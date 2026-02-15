@@ -212,6 +212,51 @@ class DownwardComboBox(QComboBox):
         popup.move(self.mapToGlobal(QPoint(0, self.height() + 3)))
 
 
+class ProfileRowWidget(QFrame):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._hovered = False
+        self._selected = False
+        self._action_buttons = []
+        self.setMouseTracking(True)
+
+    def set_action_buttons(self, buttons):
+        self._action_buttons = list(buttons)
+        self._apply_action_visibility()
+
+    def set_hovered(self, hovered):
+        self._hovered = bool(hovered)
+        self.setProperty("hovered", "true" if self._hovered else "false")
+        self._apply_action_visibility()
+        self._refresh_style()
+
+    def set_selected(self, selected):
+        self._selected = bool(selected)
+        self.setProperty("selected", "true" if self._selected else "false")
+        self._apply_action_visibility()
+        self._refresh_style()
+
+    def enterEvent(self, event):
+        self.set_hovered(True)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self.set_hovered(False)
+        super().leaveEvent(event)
+
+    def _apply_action_visibility(self):
+        visible = self._hovered or self._selected
+        for btn in self._action_buttons:
+            btn.setVisible(visible)
+
+    def _refresh_style(self):
+        style = self.style()
+        if style:
+            style.unpolish(self)
+            style.polish(self)
+        self.update()
+
+
 class SettingsDialog(QDialog):
     def __init__(self, parent=None, settings_data=None):
         super().__init__(parent)
@@ -1894,9 +1939,9 @@ class MasterController(QMainWindow):
                 background-color: #24354e;
             }
             QFrame#titleBar {
-                background-color: #355079;
-                border: 1px solid #5979aa;
-                border-radius: 12px;
+                background-color: transparent;
+                border: none;
+                border-radius: 0px;
             }
             QLabel#titleLabel {
                 color: #f5f7ff;
@@ -1907,14 +1952,11 @@ class MasterController(QMainWindow):
                 color: #d0dcf2;
                 font-size: 11px;
             }
-            QLabel#sectionLabel {
-                color: #e6eeff;
-                font-size: 12px;
-                font-weight: 600;
-                padding: 3px 10px;
-                background-color: #314a70;
-                border: 1px solid #5576a9;
-                border-radius: 8px;
+            QLabel#groupHeaderLabel {
+                color: #b8c8e6;
+                font-size: 11px;
+                font-weight: 700;
+                padding: 8px 2px 4px 2px;
             }
             QLabel#gpuCfgLabel {
                 color: #d6e2f7;
@@ -1926,20 +1968,23 @@ class MasterController(QMainWindow):
                 font-size: 12px;
                 font-weight: 700;
             }
-            QToolButton#gpuCfgToggle {
-                min-height: 30px;
-                color: #e5edf8;
-                background-color: #30486d;
-                border: 1px solid #5677aa;
-                border-radius: 9px;
+            QToolButton#gpuCfgBtn {
+                min-width: 50px;
+                min-height: 26px;
+                color: #eef3ff;
+                background-color: #2f466d;
+                border: 1px solid #5478ae;
+                border-radius: 8px;
                 padding: 0 10px;
-                text-align: left;
             }
-            QToolButton#gpuCfgToggle:hover {
-                background-color: #395682;
+            QToolButton#gpuCfgBtn:hover {
+                background-color: #3b5988;
             }
-            QFrame#gpuCfgPanel {
-                background-color: #2a3e5d;
+            QToolButton#gpuCfgBtn:checked {
+                background-color: #476ca6;
+            }
+            QFrame#gpuCfgPopup {
+                background-color: #263b5a;
                 border: 1px solid #4c6997;
                 border-radius: 10px;
             }
@@ -1956,49 +2001,38 @@ class MasterController(QMainWindow):
                 background: #82aff8;
             }
             QListWidget#profileList {
-                background-color: rgba(24, 38, 60, 208);
+                background-color: rgba(24, 38, 60, 220);
                 border: 1px solid #45618a;
                 border-radius: 14px;
-                padding: 8px;
+                padding: 8px 10px;
                 outline: none;
             }
             QListWidget#profileList::item {
                 border: none;
-                padding: 2px;
+                padding: 0px;
             }
             QListWidget#profileList::item:selected {
                 background-color: transparent;
             }
             QWidget#profileRow {
-                background-color: #2e4567;
-                border: 1px solid transparent;
-                border-radius: 11px;
+                background-color: transparent;
+                border: none;
+                border-bottom: 1px solid rgba(143, 170, 214, 70);
             }
-            QWidget#profileRow[running="true"] {
-                background-color: #2f5752;
-                border: 1px solid transparent;
+            QWidget#profileRow[hovered="true"] {
+                background-color: rgba(138, 173, 233, 40);
             }
             QWidget#profileRow[selected="true"] {
-                border: 2px solid #9fc2ff;
+                background-color: rgba(150, 192, 255, 56);
             }
             QWidget#profileRow[running="true"][selected="true"] {
-                border: 2px solid #8de0cf;
+                background-color: rgba(119, 205, 178, 56);
             }
             QLabel#profileName {
                 color: #edf2ff;
-                font-size: 14px;
+                font-size: 13px;
                 font-weight: 600;
-                padding-bottom: 4px;
-            }
-            QLabel#profileState {
-                color: #8e9cb4;
-                font-size: 11px;
-            }
-            QLabel#profileState[running="true"] {
-                color: #74d6ac;
-            }
-            QLabel#profileState[running="false"] {
-                color: #8e9cb4;
+                padding: 0;
             }
             QLabel#statusDot {
                 min-width: 10px;
@@ -2056,7 +2090,7 @@ class MasterController(QMainWindow):
             QPushButton[kind="rowAction"] {
                 min-width: 28px;
                 min-height: 28px;
-                border-radius: 8px;
+                border-radius: 7px;
                 font-size: 11px;
                 font-weight: 600;
                 color: #dbe4f6;
@@ -2113,34 +2147,33 @@ class MasterController(QMainWindow):
 
         title_bar = QFrame()
         title_bar.setObjectName("titleBar")
-        title_bar_layout = QVBoxLayout(title_bar)
+        title_bar_layout = QHBoxLayout(title_bar)
         title_bar_layout.setContentsMargins(10, 6, 10, 6)
-        title_bar_layout.setSpacing(1)
+        title_bar_layout.setSpacing(8)
+        title_left_layout = QVBoxLayout()
+        title_left_layout.setContentsMargins(0, 0, 0, 0)
+        title_left_layout.setSpacing(1)
         title_label = QLabel("위젯 컨트롤러")
         title_label.setObjectName("titleLabel")
         subtitle_label = QLabel("프로필 실행 상태와 설정을 한 화면에서 관리합니다")
         subtitle_label.setObjectName("subtitleLabel")
-        title_bar_layout.addWidget(title_label)
-        title_bar_layout.addWidget(subtitle_label)
-        section_label = QLabel("위젯 세팅 리스트")
-        section_label.setObjectName("sectionLabel")
-
-        layout.addWidget(title_bar)
-        layout.addWidget(section_label)
+        title_left_layout.addWidget(title_label)
+        title_left_layout.addWidget(subtitle_label)
+        title_bar_layout.addLayout(title_left_layout, 1)
 
         self.gpu_cfg_toggle = QToolButton()
-        self.gpu_cfg_toggle.setObjectName("gpuCfgToggle")
+        self.gpu_cfg_toggle.setObjectName("gpuCfgBtn")
         self.gpu_cfg_toggle.setCheckable(True)
         self.gpu_cfg_toggle.setChecked(False)
-        self.gpu_cfg_toggle.setArrowType(Qt.ArrowType.RightArrow)
-        self.gpu_cfg_toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        self.gpu_cfg_toggle.setText("GPU 설정")
-        self.gpu_cfg_toggle.clicked.connect(self._toggle_gpu_cfg_panel)
-        layout.addWidget(self.gpu_cfg_toggle)
+        self.gpu_cfg_toggle.setText("GPU")
+        self.gpu_cfg_toggle.toggled.connect(self._toggle_gpu_cfg_panel)
+        title_bar_layout.addWidget(self.gpu_cfg_toggle, 0, Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight)
+        layout.addWidget(title_bar)
 
-        self.gpu_cfg_panel = QFrame()
-        self.gpu_cfg_panel.setObjectName("gpuCfgPanel")
-        self.gpu_cfg_panel.hide()
+        self.gpu_cfg_panel = QFrame(self)
+        self.gpu_cfg_panel.setObjectName("gpuCfgPopup")
+        self.gpu_cfg_panel.setWindowFlags(Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
+        self.gpu_cfg_panel.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         gpu_cfg_panel_layout = QVBoxLayout(self.gpu_cfg_panel)
         gpu_cfg_panel_layout.setContentsMargins(10, 8, 10, 10)
         gpu_cfg_panel_layout.setSpacing(6)
@@ -2180,13 +2213,13 @@ class MasterController(QMainWindow):
         self.gpu_resume_slider.setRange(0, 99)
         self.gpu_resume_slider.setSingleStep(1)
         gpu_cfg_panel_layout.addWidget(self.gpu_resume_slider)
-
-        layout.addWidget(self.gpu_cfg_panel)
+        self.gpu_cfg_panel.installEventFilter(self)
 
         self.list_widget = QListWidget()
         self.list_widget.setObjectName("profileList")
         self.list_widget.setFrameShape(QFrame.Shape.NoFrame)
-        self.list_widget.setSpacing(6)
+        self.list_widget.setSpacing(0)
+        self.list_widget.setMouseTracking(True)
         self.list_widget.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.list_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.list_widget.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
@@ -2210,6 +2243,8 @@ class MasterController(QMainWindow):
         self.add_btn.clicked.connect(self.add_profile); self.run_all_btn.clicked.connect(self.run_all)
         self.list_widget.itemClicked.connect(self.highlight_widget)
         self.list_widget.itemDoubleClicked.connect(self.rename_profile)
+        self.list_widget.itemEntered.connect(self._on_profile_item_entered)
+        self.list_widget.viewport().installEventFilter(self)
         
         self.load_profiles()
         QTimer.singleShot(100, self.restore_last_session)
@@ -2229,6 +2264,7 @@ class MasterController(QMainWindow):
         self._gpu_guard_low_pct = 70.0
         self._gpu_guard_high_hold = 2
         self._gpu_guard_low_hold = 3
+        self._hovered_profile_pid = None
         self._apply_gpu_guard_thresholds(
             self.master_settings.value("gpu_guard_high_pct", 90),
             self.master_settings.value("gpu_guard_low_pct", 70),
@@ -2251,10 +2287,48 @@ class MasterController(QMainWindow):
             return []
         return [str(value)]
 
-    def _toggle_gpu_cfg_panel(self):
-        expanded = self.gpu_cfg_toggle.isChecked()
-        self.gpu_cfg_toggle.setArrowType(Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow)
-        self.gpu_cfg_panel.setVisible(expanded)
+    def _toggle_gpu_cfg_panel(self, expanded=None):
+        if expanded is None:
+            expanded = self.gpu_cfg_toggle.isChecked()
+        expanded = bool(expanded)
+        if expanded:
+            self._place_gpu_cfg_panel()
+            self.gpu_cfg_panel.show()
+            self.gpu_cfg_panel.raise_()
+            self.gpu_cfg_panel.activateWindow()
+        else:
+            self.gpu_cfg_panel.hide()
+
+    def _place_gpu_cfg_panel(self):
+        self.gpu_cfg_panel.adjustSize()
+        hint = self.gpu_cfg_panel.sizeHint()
+        popup_w = max(256, hint.width())
+        popup_h = hint.height()
+
+        anchor_global = self.gpu_cfg_toggle.mapToGlobal(QPoint(0, self.gpu_cfg_toggle.height() + 6))
+        x = anchor_global.x() - (popup_w - self.gpu_cfg_toggle.width())
+        y = anchor_global.y()
+
+        screen = QGuiApplication.screenAt(anchor_global) or self.screen() or QGuiApplication.primaryScreen()
+        if screen:
+            ag = screen.availableGeometry()
+            x = max(ag.left() + 8, min(x, ag.right() - popup_w - 8))
+            y = max(ag.top() + 8, min(y, ag.bottom() - popup_h - 8))
+
+        self.gpu_cfg_panel.setGeometry(x, y, popup_w, popup_h)
+
+    def eventFilter(self, obj, event):
+        if obj is getattr(self, "gpu_cfg_panel", None):
+            if event.type() == QEvent.Type.Hide and self.gpu_cfg_toggle.isChecked():
+                prev = self.gpu_cfg_toggle.blockSignals(True)
+                self.gpu_cfg_toggle.setChecked(False)
+                self.gpu_cfg_toggle.blockSignals(prev)
+        list_widget = getattr(self, "list_widget", None)
+        viewport = list_widget.viewport() if list_widget is not None else None
+        if obj is viewport:
+            if event.type() == QEvent.Type.Leave:
+                self._set_hovered_profile_row(None)
+        return super().eventFilter(obj, event)
 
     def _apply_gpu_guard_thresholds(self, high_pct, low_pct, persist=True):
         try:
@@ -2359,6 +2433,9 @@ class MasterController(QMainWindow):
         row = self.profile_rows.get(str(pid))
         if row is None:
             return
+        if isinstance(row, ProfileRowWidget):
+            row.set_selected(selected)
+            return
         row.setProperty("selected", "true" if selected else "false")
         style = row.style()
         if style:
@@ -2403,93 +2480,123 @@ class MasterController(QMainWindow):
         except Exception:
             pass
 
+    def _add_profile_group_header(self, text):
+        item = QListWidgetItem(self.list_widget)
+        item.setFlags(Qt.ItemFlag.NoItemFlags)
+        item.setSizeHint(QSize(1, 28))
+        lbl = QLabel(text)
+        lbl.setObjectName("groupHeaderLabel")
+        self.list_widget.addItem(item)
+        self.list_widget.setItemWidget(item, lbl)
+
+    def _add_profile_row(self, pid, name, is_running):
+        item = QListWidgetItem(self.list_widget)
+        item.setData(Qt.ItemDataRole.UserRole, str(pid))
+
+        row = ProfileRowWidget()
+        row.setObjectName("profileRow")
+        row.setProperty("running", "true" if is_running else "false")
+        row.setProperty("hovered", "false")
+        row.setProperty("selected", "false")
+        row.setMinimumHeight(46)
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(4, 4, 2, 4)
+        row_layout.setSpacing(8)
+
+        status_dot = QLabel()
+        status_dot.setObjectName("statusDot")
+        status_dot.setProperty("running", "true" if is_running else "false")
+
+        lbl = QLabel()
+        lbl.setObjectName("profileName")
+        lbl.setMinimumHeight(20)
+        lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+
+        btn_run = QPushButton("실행")
+        btn_stop = QPushButton("중지")
+        btn_set = QPushButton("설정")
+        btn_del = QPushButton("삭제")
+        btn_run.setObjectName("runBtn")
+        btn_stop.setObjectName("stopBtn")
+        btn_set.setObjectName("setBtn")
+        btn_del.setObjectName("deleteBtn")
+
+        btns = [btn_run, btn_stop, btn_set, btn_del]
+        for btn in btns:
+            btn.setProperty("kind", "rowAction")
+            btn.setText("")
+            btn.setFixedSize(28, 28)
+            btn.setIconSize(QSize(13, 13))
+            btn.setVisible(False)
+
+        btn_run.setToolTip("실행")
+        btn_stop.setToolTip("중지")
+        btn_set.setToolTip("설정")
+        btn_del.setToolTip("삭제")
+        btn_run.setIcon(self._build_action_icon("run", "#dbfff3"))
+        btn_stop.setIcon(self._build_action_icon("stop", "#ffe9ef"))
+        btn_set.setIcon(self._build_action_icon("settings", "#e3edff"))
+        btn_del.setIcon(self._build_action_icon("delete", "#ffe4e9"))
+        btn_run.setEnabled(not is_running)
+        btn_stop.setEnabled(is_running)
+
+        btn_run.clicked.connect(lambda _, p=str(pid), n=name: self.run_widget(p, n))
+        btn_stop.clicked.connect(lambda _, p=str(pid): self.stop_widget(p))
+        btn_set.clicked.connect(lambda _, p=str(pid): self.open_widget_settings(p))
+        btn_del.clicked.connect(lambda _, p=str(pid): self.delete_profile(p))
+
+        action_wrap = QWidget()
+        action_wrap_layout = QHBoxLayout(action_wrap)
+        action_wrap_layout.setContentsMargins(0, 0, 0, 0)
+        action_wrap_layout.setSpacing(4)
+        for btn in btns:
+            action_wrap_layout.addWidget(btn)
+        action_wrap.setFixedWidth(4 * 28 + 3 * action_wrap_layout.spacing())
+
+        margin_width = row_layout.contentsMargins().left() + row_layout.contentsMargins().right()
+        status_width = 10 + row_layout.spacing()
+        action_width = action_wrap.width() + row_layout.spacing()
+        viewport_w = self.list_widget.viewport().width()
+        if viewport_w <= 0:
+            viewport_w = max(260, self.width() - 48)
+        name_max_width = max(84, viewport_w - margin_width - status_width - action_width - 12)
+        elided_name = QFontMetrics(lbl.font()).elidedText(
+            str(name), Qt.TextElideMode.ElideRight, name_max_width
+        )
+        lbl.setText(elided_name)
+        if elided_name != str(name):
+            lbl.setToolTip(str(name))
+
+        row_layout.addWidget(status_dot, 0, Qt.AlignmentFlag.AlignVCenter)
+        row_layout.addWidget(lbl, 1, Qt.AlignmentFlag.AlignVCenter)
+        row_layout.addWidget(action_wrap, 0, Qt.AlignmentFlag.AlignVCenter)
+        row.set_action_buttons(btns)
+
+        item.setSizeHint(QSize(1, 46))
+        self.list_widget.addItem(item)
+        self.list_widget.setItemWidget(item, row)
+        self.profile_rows[str(pid)] = row
+
     def load_profiles(self):
         self.list_widget.clear()
         self.profile_rows = {}
         p_ids = self._as_list(self.master_settings.value("profile_ids", []))
-        
-        for pid in p_ids:
-            name = QSettings("MyHomeApp", f"Profile_{pid}").value("name", "New 세팅")
-            name = str(name)
-            is_running = pid in self.widgets
-            
-            item = QListWidgetItem(self.list_widget)
-            item.setData(Qt.ItemDataRole.UserRole, pid)
-            
-            row = QFrame()
-            row.setObjectName("profileRow")
-            row.setProperty("running", "true" if is_running else "false")
-            row.setProperty("selected", "false")
-            row.setMinimumHeight(58)
-            row_layout = QHBoxLayout(row)
-            row_layout.setContentsMargins(10, 8, 8, 8)
-            row_layout.setSpacing(5)
 
-            status_dot = QLabel()
-            status_dot.setObjectName("statusDot")
-            status_dot.setProperty("running", "true" if is_running else "false")
+        running_ids = [pid for pid in p_ids if pid in self.widgets]
+        stopped_ids = [pid for pid in p_ids if pid not in self.widgets]
 
-            lbl = QLabel()
-            lbl.setObjectName("profileName")
-            lbl.setMinimumHeight(20)
-            lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-            action_area_width = (4 * 28) + (4 * row_layout.spacing())
-            margin_width = row_layout.contentsMargins().left() + row_layout.contentsMargins().right()
-            status_width = 10 + row_layout.spacing()
-            viewport_w = self.list_widget.viewport().width()
-            if viewport_w <= 0:
-                viewport_w = max(240, self.width() - 64)
-            name_max_width = max(72, viewport_w - action_area_width - margin_width - status_width - 24)
-            elided_name = QFontMetrics(lbl.font()).elidedText(
-                name, Qt.TextElideMode.ElideRight, name_max_width
-            )
-            lbl.setText(elided_name)
-            if elided_name != name:
-                lbl.setToolTip(name)
+        if running_ids:
+            self._add_profile_group_header(f"실행 중 ({len(running_ids)})")
+            for pid in running_ids:
+                name = QSettings("MyHomeApp", f"Profile_{pid}").value("name", "New 세팅")
+                self._add_profile_row(pid, str(name), True)
 
-            left_box = QVBoxLayout()
-            left_box.setContentsMargins(0, 0, 0, 0)
-            left_box.setSpacing(0)
-            left_box.addWidget(lbl)
-
-            btn_run = QPushButton("실행"); btn_stop = QPushButton("중지")
-            btn_set = QPushButton("설정"); btn_del = QPushButton("삭제")
-            btn_run.setObjectName("runBtn")
-            btn_stop.setObjectName("stopBtn")
-            btn_set.setObjectName("setBtn")
-            btn_del.setObjectName("deleteBtn")
-            
-            btns = [btn_run, btn_stop, btn_set, btn_del]
-            for btn in btns:
-                btn.setProperty("kind", "rowAction")
-                btn.setText("")
-                btn.setFixedSize(28, 28)
-                btn.setIconSize(QSize(13, 13))
-                font = btn.font(); font.setPointSize(10); btn.setFont(font)
-
-            btn_run.setToolTip("실행")
-            btn_stop.setToolTip("중지")
-            btn_set.setToolTip("설정")
-            btn_del.setToolTip("삭제")
-            btn_run.setIcon(self._build_action_icon("run", "#dbfff3"))
-            btn_stop.setIcon(self._build_action_icon("stop", "#ffe9ef"))
-            btn_set.setIcon(self._build_action_icon("settings", "#e3edff"))
-            btn_del.setIcon(self._build_action_icon("delete", "#ffe4e9"))
-
-            btn_run.setEnabled(not is_running); btn_stop.setEnabled(is_running)
-
-            btn_run.clicked.connect(lambda _, p=pid, n=name: self.run_widget(p, n))
-            btn_stop.clicked.connect(lambda _, p=pid: self.stop_widget(p))
-            btn_set.clicked.connect(lambda _, p=pid: self.open_widget_settings(p))
-            btn_del.clicked.connect(lambda _, p=pid: self.delete_profile(p))
-            
-            row_layout.addWidget(status_dot, 0, Qt.AlignmentFlag.AlignVCenter)
-            row_layout.addLayout(left_box, 1)
-            for btn in btns: row_layout.addWidget(btn)
-                
-            item.setSizeHint(QSize(1, 60))
-            self.list_widget.addItem(item); self.list_widget.setItemWidget(item, row)
-            self.profile_rows[str(pid)] = row
+        if stopped_ids:
+            self._add_profile_group_header(f"정지됨 ({len(stopped_ids)})")
+            for pid in stopped_ids:
+                name = QSettings("MyHomeApp", f"Profile_{pid}").value("name", "New 세팅")
+                self._add_profile_row(pid, str(name), False)
+        self._set_hovered_profile_row(None)
 
     def open_widget_settings(self, pid):
 
@@ -2611,9 +2718,26 @@ class MasterController(QMainWindow):
             if is_running:
                 self.widgets[pid].setWindowOpacity(self.widgets[pid].current_opacity_pct / 100.0)
 
+    def _set_hovered_profile_row(self, pid):
+        next_pid = str(pid) if pid not in (None, "") else None
+        if getattr(self, "_hovered_profile_pid", None) == next_pid:
+            return
+        self._hovered_profile_pid = next_pid
+        for row_pid, row in self.profile_rows.items():
+            if isinstance(row, ProfileRowWidget):
+                row.set_hovered(row_pid == next_pid)
+
+    def _on_profile_item_entered(self, item):
+        raw_pid = item.data(Qt.ItemDataRole.UserRole)
+        self._set_hovered_profile_row(raw_pid)
+
     def highlight_widget(self, item):
         """리스트 아이템 클릭 시 해당 위젯만 강조"""
-        target_pid = str(item.data(Qt.ItemDataRole.UserRole))
+        raw_pid = item.data(Qt.ItemDataRole.UserRole)
+        if raw_pid in (None, ""):
+            self.clear_all_highlights()
+            return
+        target_pid = str(raw_pid)
         
         for pid, widget in self.widgets.items():
             if str(pid) == target_pid:
@@ -2641,6 +2765,16 @@ class MasterController(QMainWindow):
     def mousePressEvent(self, event):
         self.clear_all_highlights()
         super().mousePressEvent(event)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "gpu_cfg_panel") and self.gpu_cfg_panel.isVisible():
+            self._place_gpu_cfg_panel()
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        if hasattr(self, "gpu_cfg_panel") and self.gpu_cfg_panel.isVisible():
+            self._place_gpu_cfg_panel()
 
     def show_master_window(self):
         """숨겨지거나 최소화된 창을 강제로 끄집어내는 함수"""
@@ -2835,6 +2969,8 @@ class MasterController(QMainWindow):
             self.load_profiles()
 
     def closeEvent(self, event):
+        if hasattr(self, "gpu_cfg_panel") and self.gpu_cfg_panel.isVisible():
+            self.gpu_cfg_panel.hide()
         if self.tray_icon.isVisible(): self.hide(); event.ignore()
 
     def quit_app(self):
@@ -2849,6 +2985,8 @@ class MasterController(QMainWindow):
 
     def rename_profile(self, item):
         pid = item.data(Qt.ItemDataRole.UserRole)
+        if pid in (None, ""):
+            return
         current_name = QSettings("MyHomeApp", f"Profile_{pid}").value("name", "New 세팅")
         dialog = QInputDialog(self)
         dialog.setWindowTitle("이름 변경")
