@@ -257,6 +257,160 @@ class ProfileRowWidget(QFrame):
         self.update()
 
 
+class ProfileListWidget(QListWidget):
+    orderChanged = pyqtSignal(list)
+
+    def dropEvent(self, event):
+        super().dropEvent(event)
+        ordered_ids = []
+        for idx in range(self.count()):
+            item = self.item(idx)
+            if item is None:
+                continue
+            raw_pid = item.data(Qt.ItemDataRole.UserRole)
+            if raw_pid in (None, ""):
+                continue
+            ordered_ids.append(str(raw_pid))
+        self.orderChanged.emit(ordered_ids)
+
+
+class SetManagerDialog(QDialog):
+    def __init__(self, master, parent=None):
+        super().__init__(parent if parent is not None else master)
+        self.master = master
+        self._title_bar_themed = False
+        self.setObjectName("setManagerDialog")
+        self.setWindowTitle("세트 관리")
+        self.setWindowIcon(QIcon())
+        self.setFixedSize(360, 198)
+        self.setStyleSheet("""
+            QDialog#setManagerDialog { background-color: #1f2f46; }
+            QFrame#setCard {
+                background-color: #23344d;
+                border: 1px solid #3f567a;
+                border-radius: 12px;
+            }
+            QLabel#setTitle {
+                color: #eef3ff;
+                font-size: 15px;
+                font-weight: 700;
+            }
+            QLabel {
+                color: #d7e4fb;
+                font-size: 12px;
+            }
+            QPushButton {
+                min-height: 30px;
+                border-radius: 8px;
+                font-size: 12px;
+                font-weight: 600;
+                padding: 0 10px;
+                color: #e6efff;
+                background-color: #2a3f60;
+                border: 1px solid #4a6591;
+            }
+            QPushButton:hover { background-color: #35527d; }
+            QPushButton#copyBtn {
+                background-color: #2b5664;
+                border: 1px solid #41798b;
+            }
+            QPushButton#copyBtn:hover { background-color: #346676; }
+            QPushButton#deleteBtn {
+                background-color: #6e4048;
+                border: 1px solid #955761;
+                color: #ffe4e9;
+            }
+            QPushButton#deleteBtn:hover { background-color: #7b4a54; }
+        """)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(8)
+
+        card = QFrame()
+        card.setObjectName("setCard")
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(12, 10, 12, 12)
+        card_layout.setSpacing(8)
+
+        title = QLabel("세트 관리")
+        title.setObjectName("setTitle")
+        card_layout.addWidget(title)
+
+        self.info_label = QLabel("")
+        card_layout.addWidget(self.info_label)
+
+        row1 = QHBoxLayout()
+        row1.setSpacing(6)
+        self.copy_btn = QPushButton("다른 세트 복사")
+        self.copy_btn.setObjectName("copyBtn")
+        self.delete_btn = QPushButton("현재 세트 삭제")
+        self.delete_btn.setObjectName("deleteBtn")
+        row1.addWidget(self.copy_btn)
+        row1.addWidget(self.delete_btn)
+        card_layout.addLayout(row1)
+
+        row2 = QHBoxLayout()
+        row2.setSpacing(6)
+        close_btn = QPushButton("닫기")
+        row2.addStretch()
+        row2.addWidget(close_btn)
+        card_layout.addLayout(row2)
+
+        root.addWidget(card)
+
+        self.copy_btn.clicked.connect(self._copy_set)
+        self.delete_btn.clicked.connect(self._delete_set)
+        close_btn.clicked.connect(self.accept)
+
+        self._refresh_info()
+
+    def showEvent(self, event):
+        if not self._title_bar_themed:
+            self._title_bar_themed = True
+            try:
+                self.master._apply_window_title_bar_theme(self)
+            except Exception:
+                pass
+        super().showEvent(event)
+
+    def _refresh_info(self):
+        sid = self.master.selected_set_id()
+        data = self.master._set_defs.get(sid, {})
+        name = str(data.get("name", f"세트{sid}" if sid else "세트"))
+        count = len(data.get("profiles", []))
+        self.info_label.setText(f"현재 세트: {name}  |  위젯 {count}개")
+        self.delete_btn.setEnabled(len(self.master._set_order) > 1)
+
+    def _copy_set(self):
+        items = self.master.get_set_items()
+        if not items:
+            return
+        target_sid = self.master.selected_set_id()
+        choices = [(str(sid), str(name)) for sid, name, _ in items if str(sid) != str(target_sid)]
+        labels = [f"{name} ({sid})" for sid, name in choices]
+        if not labels:
+            QMessageBox.information(self, "세트 복사", "복사할 다른 세트가 없습니다.")
+            return
+        sid_by_label = {labels[i]: choices[i][0] for i in range(len(choices))}
+        source_label, ok = self.master._prompt_choice_dialog(
+            "세트 복사", "현재 세트로 가져올 원본 세트:", labels
+        )
+        if not ok or not source_label:
+            return
+        source_sid = sid_by_label.get(source_label, "")
+        if self.master.copy_profiles_from_set(source_sid, target_sid):
+            self.master.load_profiles()
+            self._refresh_info()
+
+    def _delete_set(self):
+        sid = self.master.selected_set_id()
+        if not sid:
+            return
+        if self.master.delete_set(sid):
+            self._refresh_info()
+
+
 class SettingsDialog(QDialog):
     def __init__(self, parent=None, settings_data=None):
         super().__init__(parent)
@@ -1918,7 +2072,7 @@ class MasterController(QMainWindow):
             self.app_icon = QIcon(pixmap)
 
         self.setWindowIcon(QIcon())
-        self.setFixedSize(400, 680)
+        self.setFixedSize(476, 680)
         self.setObjectName("masterWindow")
         self.master_settings = QSettings("MyHomeApp", "MasterV3")
         self.widgets = {}
@@ -1983,10 +2137,84 @@ class MasterController(QMainWindow):
             QToolButton#gpuCfgBtn:checked {
                 background-color: #476ca6;
             }
+            QToolButton#setMgrBtn {
+                min-width: 72px;
+                min-height: 26px;
+                color: #eef3ff;
+                background-color: #2f466d;
+                border: 1px solid #5478ae;
+                border-radius: 8px;
+                padding: 0 10px;
+            }
+            QToolButton#setMgrBtn:hover {
+                background-color: #3b5988;
+            }
             QFrame#gpuCfgPopup {
                 background-color: #263b5a;
                 border: 1px solid #4c6997;
                 border-radius: 10px;
+            }
+            QFrame#setSidebar {
+                background-color: rgba(23, 35, 54, 205);
+                border: 1px solid #3f587e;
+                border-radius: 12px;
+            }
+            QPushButton#addSetBtn,
+            QPushButton#addWidgetBtn {
+                min-width: 30px;
+                max-width: 30px;
+                min-height: 30px;
+                max-height: 30px;
+                border-radius: 15px;
+                color: #eef3ff;
+                background-color: #2f4569;
+                border: 1px solid #5878a6;
+                font-size: 14px;
+                font-weight: 700;
+                padding: 0px;
+            }
+            QPushButton#addSetBtn:hover,
+            QPushButton#addWidgetBtn:hover {
+                background-color: #3a5885;
+            }
+            QPushButton[kind="setIndexBtn"] {
+                min-width: 30px;
+                max-width: 30px;
+                min-height: 30px;
+                max-height: 30px;
+                border-radius: 15px;
+                color: #e5edff;
+                background-color: #2f4569;
+                border: 1px solid #5878a6;
+                font-size: 12px;
+                font-weight: 700;
+                padding: 0px;
+            }
+            QPushButton[kind="setIndexBtn"][selected="true"] {
+                background-color: #4a74e2;
+                border: 1px solid #7fa0f0;
+                color: #ffffff;
+            }
+            QPushButton[kind="setIndexBtn"]:hover {
+                background-color: #3a5885;
+            }
+            QLabel#setNameTag {
+                color: #e6efff;
+                font-size: 12px;
+                font-weight: 600;
+                padding-left: 6px;
+            }
+            QLabel#setNewLabel {
+                color: #d8e6ff;
+                font-size: 12px;
+                font-weight: 600;
+                padding-left: 6px;
+            }
+            QLabel#addWidgetLabel {
+                color: #d8e6ff;
+                font-size: 12px;
+                font-weight: 600;
+                padding-left: 6px;
             }
             QSlider#gpuCfgSlider::groove:horizontal {
                 height: 6px;
@@ -2004,7 +2232,7 @@ class MasterController(QMainWindow):
                 background-color: rgba(24, 38, 60, 220);
                 border: 1px solid #45618a;
                 border-radius: 14px;
-                padding: 8px 10px;
+                padding: 6px 8px;
                 outline: none;
             }
             QListWidget#profileList::item {
@@ -2017,7 +2245,10 @@ class MasterController(QMainWindow):
             QWidget#profileRow {
                 background-color: transparent;
                 border: none;
-                border-bottom: 1px solid rgba(143, 170, 214, 70);
+            }
+            QWidget#addWidgetRow {
+                background-color: transparent;
+                border: none;
             }
             QWidget#profileRow[hovered="true"] {
                 background-color: rgba(138, 173, 233, 40);
@@ -2075,6 +2306,17 @@ class MasterController(QMainWindow):
             }
             QPushButton#secondaryBtn:pressed {
                 background-color: #263a56;
+            }
+            QPushButton#secondaryBtn[pendingApply="true"] {
+                color: #10251d;
+                background-color: #58c796;
+                border: 1px solid #7ad8af;
+            }
+            QPushButton#secondaryBtn[pendingApply="true"]:hover {
+                background-color: #68d3a3;
+            }
+            QPushButton#secondaryBtn[pendingApply="true"]:pressed {
+                background-color: #4cb487;
             }
             QPushButton#dangerBtn {
                 color: #ffe8ec;
@@ -2152,13 +2394,10 @@ class MasterController(QMainWindow):
         title_bar_layout.setSpacing(8)
         title_left_layout = QVBoxLayout()
         title_left_layout.setContentsMargins(0, 0, 0, 0)
-        title_left_layout.setSpacing(1)
+        title_left_layout.setSpacing(0)
         title_label = QLabel("위젯 컨트롤러")
         title_label.setObjectName("titleLabel")
-        subtitle_label = QLabel("프로필 실행 상태와 설정을 한 화면에서 관리합니다")
-        subtitle_label.setObjectName("subtitleLabel")
         title_left_layout.addWidget(title_label)
-        title_left_layout.addWidget(subtitle_label)
         title_bar_layout.addLayout(title_left_layout, 1)
 
         self.gpu_cfg_toggle = QToolButton()
@@ -2167,6 +2406,11 @@ class MasterController(QMainWindow):
         self.gpu_cfg_toggle.setChecked(False)
         self.gpu_cfg_toggle.setText("GPU")
         self.gpu_cfg_toggle.toggled.connect(self._toggle_gpu_cfg_panel)
+        self.set_mgr_btn = QToolButton()
+        self.set_mgr_btn.setObjectName("setMgrBtn")
+        self.set_mgr_btn.setText("세트 관리")
+        self.set_mgr_btn.clicked.connect(self.open_set_manager)
+        title_bar_layout.addWidget(self.set_mgr_btn, 0, Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight)
         title_bar_layout.addWidget(self.gpu_cfg_toggle, 0, Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight)
         layout.addWidget(title_bar)
 
@@ -2215,7 +2459,62 @@ class MasterController(QMainWindow):
         gpu_cfg_panel_layout.addWidget(self.gpu_resume_slider)
         self.gpu_cfg_panel.installEventFilter(self)
 
-        self.list_widget = QListWidget()
+        content_row = QHBoxLayout()
+        content_row.setSpacing(8)
+
+        left_panel = QWidget()
+        left_panel_layout = QVBoxLayout(left_panel)
+        left_panel_layout.setContentsMargins(0, 0, 0, 0)
+        left_panel_layout.setSpacing(6)
+
+        self.set_column_label = QLabel("위젯 세트")
+        self.set_column_label.setObjectName("groupHeaderLabel")
+        left_panel_layout.addWidget(self.set_column_label, 0)
+
+        self.set_sidebar = QFrame()
+        self.set_sidebar.setObjectName("setSidebar")
+        self._set_sidebar_expanded_width = 182
+        self._set_sidebar_collapsed_width = 56
+        self._set_list_collapsed = _as_bool(self.master_settings.value("set_list_collapsed", False), False)
+        self.set_sidebar.setFixedWidth(self._set_sidebar_collapsed_width if self._set_list_collapsed else self._set_sidebar_expanded_width)
+        set_sidebar_layout = QVBoxLayout(self.set_sidebar)
+        set_sidebar_layout.setContentsMargins(8, 8, 8, 8)
+        set_sidebar_layout.setSpacing(6)
+
+        top_row = QWidget()
+        top_row_layout = QHBoxLayout(top_row)
+        top_row_layout.setContentsMargins(0, 0, 0, 0)
+        top_row_layout.setSpacing(6)
+
+        self.add_set_btn = QPushButton("＋")
+        self.add_set_btn.setObjectName("addSetBtn")
+        self.add_set_btn.clicked.connect(self._on_add_set_clicked)
+        self.add_set_label = QLabel("새로운 세트", top_row)
+        self.add_set_label.setObjectName("setNewLabel")
+        self.add_set_label.setVisible(not self._set_list_collapsed)
+
+        top_row_layout.addWidget(self.add_set_btn, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        top_row_layout.addWidget(self.add_set_label, 1, Qt.AlignmentFlag.AlignVCenter)
+        set_sidebar_layout.addWidget(top_row, 0)
+
+        self.set_list_container = QWidget()
+        self.set_list_layout = QVBoxLayout(self.set_list_container)
+        self.set_list_layout.setContentsMargins(0, 2, 0, 0)
+        self.set_list_layout.setSpacing(4)
+        set_sidebar_layout.addWidget(self.set_list_container, 1)
+        left_panel_layout.addWidget(self.set_sidebar, 1)
+        content_row.addWidget(left_panel, 0)
+
+        right_panel = QWidget()
+        right_panel_layout = QVBoxLayout(right_panel)
+        right_panel_layout.setContentsMargins(0, 0, 0, 0)
+        right_panel_layout.setSpacing(6)
+
+        self.profile_column_label = QLabel("위젯 리스트")
+        self.profile_column_label.setObjectName("groupHeaderLabel")
+        right_panel_layout.addWidget(self.profile_column_label, 0)
+
+        self.list_widget = ProfileListWidget()
         self.list_widget.setObjectName("profileList")
         self.list_widget.setFrameShape(QFrame.Shape.NoFrame)
         self.list_widget.setSpacing(0)
@@ -2223,29 +2522,41 @@ class MasterController(QMainWindow):
         self.list_widget.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.list_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.list_widget.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
-        layout.addWidget(self.list_widget, 1)
+        self.list_widget.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.list_widget.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.list_widget.setDragEnabled(True)
+        self.list_widget.setAcceptDrops(True)
+        self.list_widget.setDropIndicatorShown(True)
+        right_panel_layout.addWidget(self.list_widget, 1)
+        content_row.addWidget(right_panel, 1)
+        layout.addLayout(content_row, 1)
 
         btn_box = QHBoxLayout()
         btn_box.setSpacing(8)
-        self.add_btn = QPushButton("위젯 세팅 추가")
-        self.add_btn.setObjectName("primaryBtn")
-        self.run_all_btn = QPushButton("전체 실행")
+        self.exit_btn = QPushButton("프로그램 종료 (Exit)")
+        self.exit_btn.setObjectName("dangerBtn")
+        self.exit_btn.clicked.connect(self.quit_app)
+        self.run_all_btn = QPushButton("세트 적용")
         self.run_all_btn.setObjectName("secondaryBtn")
-        btn_box.addWidget(self.add_btn)
+        btn_box.addWidget(self.exit_btn)
         btn_box.addWidget(self.run_all_btn)
         layout.addLayout(btn_box)
-        
-        exit_btn = QPushButton("프로그램 종료 (Exit)")
-        exit_btn.setObjectName("dangerBtn")
-        exit_btn.clicked.connect(self.quit_app)
-        layout.addWidget(exit_btn)
 
-        self.add_btn.clicked.connect(self.add_profile); self.run_all_btn.clicked.connect(self.run_all)
+        self.run_all_btn.clicked.connect(self.run_all)
         self.list_widget.itemClicked.connect(self.highlight_widget)
         self.list_widget.itemDoubleClicked.connect(self.rename_profile)
         self.list_widget.itemEntered.connect(self._on_profile_item_entered)
+        self.list_widget.orderChanged.connect(self._on_profile_order_changed)
         self.list_widget.viewport().installEventFilter(self)
-        
+
+        self._set_order = []
+        self._set_defs = {}
+        self._current_set_id = ""
+        self._applied_set_id = ""
+        self._load_set_state()
+        self._migrate_profile_run_flags()
+        self._refresh_set_ui()
+
         self.load_profiles()
         QTimer.singleShot(100, self.restore_last_session)
         QApplication.instance().focusChanged.connect(self.handle_focus_change)
@@ -2286,6 +2597,556 @@ class MasterController(QMainWindow):
         if value in (None, ""):
             return []
         return [str(value)]
+
+    @staticmethod
+    def _normalize_ids(values):
+        out = []
+        seen = set()
+        for value in values:
+            sid = str(value)
+            if not sid or sid in seen:
+                continue
+            out.append(sid)
+            seen.add(sid)
+        return out
+
+    def _set_key(self, set_id, field):
+        return f"sets/{set_id}/{field}"
+
+    def _all_profile_ids(self):
+        return self._normalize_ids(self._as_list(self.master_settings.value("profile_ids", [])))
+
+    def _next_profile_id(self, existing_ids=None):
+        if existing_ids is None:
+            existing_ids = self._all_profile_ids()
+        max_id = 0
+        for pid in existing_ids:
+            try:
+                max_id = max(max_id, int(str(pid)))
+            except Exception:
+                continue
+        return str(max_id + 1)
+
+    def _next_set_id(self):
+        max_id = 0
+        for sid in self._set_order:
+            try:
+                max_id = max(max_id, int(str(sid)))
+            except Exception:
+                continue
+        return str(max_id + 1)
+
+    def _default_set_name(self):
+        used = {str(data.get("name", "")).strip() for data in self._set_defs.values()}
+        idx = 1
+        while True:
+            candidate = f"세트{idx}"
+            if candidate not in used:
+                return candidate
+            idx += 1
+
+    def _profile_run_enabled(self, pid):
+        spid = str(pid)
+        raw = QSettings("MyHomeApp", f"Profile_{spid}").value("run_enabled", None)
+        if raw is None:
+            return True
+        return _as_bool(raw, True)
+
+    def _set_profile_run_enabled(self, pid, enabled):
+        spid = str(pid)
+        settings = QSettings("MyHomeApp", f"Profile_{spid}")
+        settings.setValue("run_enabled", bool(enabled))
+        settings.sync()
+
+    def _clone_profile_settings(self, src_pid, dst_pid):
+        src = QSettings("MyHomeApp", f"Profile_{src_pid}")
+        dst = QSettings("MyHomeApp", f"Profile_{dst_pid}")
+        dst.clear()
+        for key in src.allKeys():
+            dst.setValue(key, src.value(key))
+        if dst.value("run_enabled", None) is None:
+            dst.setValue("run_enabled", True)
+        dst.sync()
+
+    def _set_current_set_id(self, set_id, persist=True):
+        sid = str(set_id)
+        if sid not in self._set_defs:
+            sid = self._set_order[0] if self._set_order else ""
+        self._current_set_id = sid
+        if persist and sid:
+            self.master_settings.setValue("current_set_id", sid)
+            self.master_settings.sync()
+        self._refresh_set_ui()
+
+    def selected_set_id(self):
+        return str(self._current_set_id) if self._current_set_id else ""
+
+    def get_set_items(self):
+        items = []
+        for sid in self._set_order:
+            data = self._set_defs.get(str(sid), {})
+            items.append((str(sid), str(data.get("name", f"세트{sid}")), len(data.get("profiles", []))))
+        return items
+
+    def _clear_set_list_sidebar(self):
+        if not hasattr(self, "set_list_layout"):
+            return
+        while self.set_list_layout.count():
+            item = self.set_list_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+    def _set_name_width(self):
+        base = self._set_sidebar_collapsed_width if self._set_list_collapsed else self._set_sidebar_expanded_width
+        return max(40, int(base) - 46)
+
+    def _elide_set_text(self, text):
+        width = self._set_name_width()
+        metrics = QFontMetrics(self.font())
+        return metrics.elidedText(str(text), Qt.TextElideMode.ElideRight, width)
+
+    def _set_sidebar_collapsed(self, collapsed, persist=True):
+        collapsed = bool(collapsed)
+        if self._set_list_collapsed == collapsed:
+            if persist:
+                self.master_settings.setValue("set_list_collapsed", bool(collapsed))
+                self.master_settings.sync()
+            return
+        self._set_list_collapsed = collapsed
+        if persist:
+            self.master_settings.setValue("set_list_collapsed", bool(collapsed))
+            self.master_settings.sync()
+        self._refresh_set_ui()
+
+    def _rebuild_set_sidebar(self):
+        self._clear_set_list_sidebar()
+        sid_selected = self.selected_set_id()
+        for idx, sid in enumerate(self._set_order, start=1):
+            data = self._set_defs.get(str(sid), {})
+            name = str(data.get("name", f"세트{sid}"))
+            selected = (str(sid) == str(sid_selected))
+
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(6)
+
+            btn = QPushButton(str(idx), row)
+            btn.setProperty("kind", "setIndexBtn")
+            btn.setProperty("selected", "true" if selected else "false")
+            btn.clicked.connect(lambda _, s=str(sid): self._on_set_selected(s))
+
+            name_label = QLabel(self._elide_set_text(name), row)
+            name_label.setObjectName("setNameTag")
+            name_label.setVisible(not self._set_list_collapsed)
+            name_label.setFixedWidth(self._set_name_width())
+
+            row_layout.addWidget(btn, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            row_layout.addWidget(name_label, 1, Qt.AlignmentFlag.AlignVCenter)
+            self.set_list_layout.addWidget(row)
+
+        self.set_list_layout.addStretch(1)
+
+    def _refresh_set_ui(self):
+        if hasattr(self, "set_mgr_btn"):
+            sid = self.selected_set_id()
+            data = self._set_defs.get(sid, {})
+            _ = str(data.get("name", "세트"))
+            self.set_mgr_btn.setText("세트 관리")
+        if hasattr(self, "set_sidebar"):
+            self.set_sidebar.setFixedWidth(
+                self._set_sidebar_collapsed_width if self._set_list_collapsed else self._set_sidebar_expanded_width
+            )
+        if hasattr(self, "add_set_label"):
+            full_text = "새로운 세트"
+            self.add_set_label.setVisible(not self._set_list_collapsed)
+            self.add_set_label.setFixedWidth(self._set_name_width())
+            self.add_set_label.setText(self._elide_set_text(full_text))
+        self._rebuild_set_sidebar()
+        self._refresh_apply_button_state()
+
+    def _refresh_apply_button_state(self):
+        if not hasattr(self, "run_all_btn"):
+            return
+        selected_sid = str(self.selected_set_id() or "")
+        applied_sid = str(getattr(self, "_applied_set_id", "") or "")
+        pending = bool(selected_sid and applied_sid and selected_sid != applied_sid)
+        self.run_all_btn.setProperty("pendingApply", "true" if pending else "false")
+        self.run_all_btn.setText("세트 적용 *" if pending else "세트 적용")
+        style = self.run_all_btn.style()
+        if style:
+            style.unpolish(self.run_all_btn)
+            style.polish(self.run_all_btn)
+        self.run_all_btn.update()
+
+    def _on_set_selected(self, sid):
+        sid = str(sid)
+        if sid not in self._set_defs:
+            return
+        current_sid = self.selected_set_id()
+        if not self._set_list_collapsed and sid == current_sid:
+            self._set_sidebar_collapsed(True, persist=True)
+            return
+        if self._set_list_collapsed:
+            self._set_sidebar_collapsed(False, persist=True)
+        self._set_current_set_id(sid, persist=True)
+        self.clear_all_highlights()
+        self.load_profiles()
+
+    def _on_add_set_clicked(self):
+        if self._set_list_collapsed:
+            self._set_sidebar_collapsed(False, persist=True)
+            return
+        default_name = self._default_set_name()
+        name, ok = self._prompt_text_dialog("새 세트", "새 세트 이름:", default_name)
+        if not ok or not name:
+            return
+        sid = self.create_empty_set(name)
+        if sid:
+            self._set_current_set_id(sid, persist=True)
+            self.clear_all_highlights()
+            self.load_profiles()
+
+    def _load_set_state(self):
+        profile_ids = self._all_profile_ids()
+        raw_set_ids = self._normalize_ids(self._as_list(self.master_settings.value("set_ids", [])))
+        changed = False
+
+        if not raw_set_ids:
+            raw_set_ids = ["1"]
+            self.master_settings.setValue("set_ids", raw_set_ids)
+            self.master_settings.setValue(self._set_key("1", "name"), "세트1")
+            self.master_settings.setValue(self._set_key("1", "profiles"), list(profile_ids))
+            changed = True
+
+        set_defs = {}
+        assigned_profiles = set()
+        for sid in raw_set_ids:
+            name_raw = self.master_settings.value(self._set_key(sid, "name"), f"세트{sid}")
+            name = str(name_raw).strip() or f"세트{sid}"
+            raw_profiles = self._normalize_ids(
+                self._as_list(self.master_settings.value(self._set_key(sid, "profiles"), []))
+            )
+            clean_profiles = []
+            for pid in raw_profiles:
+                if pid not in profile_ids:
+                    changed = True
+                    continue
+                if pid in assigned_profiles:
+                    changed = True
+                    continue
+                assigned_profiles.add(pid)
+                clean_profiles.append(pid)
+            if raw_profiles != clean_profiles:
+                self.master_settings.setValue(self._set_key(sid, "profiles"), clean_profiles)
+                changed = True
+            if str(name_raw) != name:
+                self.master_settings.setValue(self._set_key(sid, "name"), name)
+                changed = True
+            set_defs[sid] = {"name": name, "profiles": clean_profiles}
+
+        if not set_defs:
+            raw_set_ids = ["1"]
+            set_defs = {"1": {"name": "세트1", "profiles": list(profile_ids)}}
+            self.master_settings.setValue("set_ids", raw_set_ids)
+            self.master_settings.setValue(self._set_key("1", "name"), "세트1")
+            self.master_settings.setValue(self._set_key("1", "profiles"), list(profile_ids))
+            changed = True
+
+        current_sid = str(self.master_settings.value("current_set_id", raw_set_ids[0]))
+        if current_sid not in set_defs:
+            current_sid = raw_set_ids[0]
+            self.master_settings.setValue("current_set_id", current_sid)
+            changed = True
+
+        self._set_order = list(raw_set_ids)
+        self._set_defs = set_defs
+        self._current_set_id = current_sid
+        applied_sid = str(self.master_settings.value("applied_set_id", current_sid))
+        if applied_sid not in set_defs:
+            applied_sid = current_sid
+            self.master_settings.setValue("applied_set_id", applied_sid)
+            changed = True
+        self._applied_set_id = applied_sid
+        if changed:
+            self.master_settings.sync()
+
+    def _migrate_profile_run_flags(self):
+        profile_ids = self._all_profile_ids()
+        legacy_raw = self.master_settings.value("active_profiles", None)
+        has_legacy = legacy_raw is not None
+        legacy_active = set(self._as_list(legacy_raw)) if has_legacy else set()
+        for pid in profile_ids:
+            settings = QSettings("MyHomeApp", f"Profile_{pid}")
+            if settings.value("run_enabled", None) is None:
+                should_run = (pid in legacy_active) if has_legacy else True
+                settings.setValue("run_enabled", bool(should_run))
+                settings.sync()
+
+    def _current_set_profiles(self):
+        sid = self.selected_set_id()
+        data = self._set_defs.get(sid, {})
+        return list(data.get("profiles", []))
+
+    def _set_current_profiles(self, profile_ids):
+        sid = self.selected_set_id()
+        if not sid or sid not in self._set_defs:
+            return
+        clean_profiles = self._normalize_ids(profile_ids)
+        self._set_defs[sid]["profiles"] = clean_profiles
+        self.master_settings.setValue(self._set_key(sid, "profiles"), clean_profiles)
+        self.master_settings.sync()
+
+    def _remove_profile_from_sets(self, profile_id):
+        spid = str(profile_id)
+        changed = False
+        for sid in self._set_order:
+            data = self._set_defs.get(sid, {})
+            profiles = [pid for pid in data.get("profiles", []) if pid != spid]
+            if profiles != data.get("profiles", []):
+                data["profiles"] = profiles
+                self._set_defs[sid] = data
+                self.master_settings.setValue(self._set_key(sid, "profiles"), profiles)
+                changed = True
+        if changed:
+            self.master_settings.sync()
+
+    def _cleanup_orphan_profiles(self):
+        referenced = set()
+        for data in self._set_defs.values():
+            for pid in data.get("profiles", []):
+                referenced.add(str(pid))
+
+        profile_ids = self._all_profile_ids()
+        orphan_ids = [pid for pid in profile_ids if pid not in referenced]
+        if not orphan_ids:
+            return 0
+
+        for pid in orphan_ids:
+            profile_settings = QSettings("MyHomeApp", f"Profile_{pid}")
+            profile_settings.clear()
+            profile_settings.sync()
+
+        kept_profile_ids = [pid for pid in profile_ids if pid in referenced]
+        self.master_settings.setValue("profile_ids", kept_profile_ids)
+        active_ids = self._as_list(self.master_settings.value("active_profiles", []))
+        self.master_settings.setValue(
+            "active_profiles",
+            [pid for pid in active_ids if pid in referenced]
+        )
+        self.master_settings.sync()
+        return len(orphan_ids)
+
+    def _start_widget_instance(self, pid, name):
+        spid = str(pid)
+        if spid in self.widgets:
+            return False
+        self.widgets[spid] = DesktopWidget(spid, name, self)
+        self.widgets[spid].show()
+        if self._gpu_guard_paused and bool(getattr(self.widgets[spid], "gpu_guard_enabled", False)):
+            self.widgets[spid].set_performance_paused(
+                True, reason=f"gpu {self._gpu_last_usage:.1f}%", force=True
+            )
+        return True
+
+    def _stop_all_widgets_bulk(self):
+        changed = False
+        for pid in list(self.widgets.keys()):
+            widget = self.widgets.get(pid)
+            if widget is None:
+                continue
+            widget.close()
+            widget.deleteLater()
+            self.widgets.pop(pid, None)
+            changed = True
+        return changed
+
+    def apply_set(self, set_id):
+        sid = str(set_id)
+        if sid not in self._set_defs:
+            return
+
+        self._set_current_set_id(sid, persist=True)
+        self.clear_all_highlights()
+        self._stop_all_widgets_bulk()
+
+        for pid in self._set_defs[sid].get("profiles", []):
+            if not self._profile_run_enabled(pid):
+                continue
+            name = QSettings("MyHomeApp", f"Profile_{pid}").value("name", "New 세팅")
+            self._start_widget_instance(pid, str(name))
+
+        self._applied_set_id = sid
+        self.master_settings.setValue("applied_set_id", sid)
+        self.master_settings.sync()
+        self.update_active_status()
+        self.load_profiles()
+        self._refresh_apply_button_state()
+
+    def create_empty_set(self, name):
+        clean_name = str(name).strip()
+        if not clean_name:
+            return ""
+        sid = self._next_set_id()
+        self._set_order.append(sid)
+        self._set_defs[sid] = {"name": clean_name, "profiles": []}
+        self.master_settings.setValue("set_ids", list(self._set_order))
+        self.master_settings.setValue(self._set_key(sid, "name"), clean_name)
+        self.master_settings.setValue(self._set_key(sid, "profiles"), [])
+        self.master_settings.sync()
+        return sid
+
+    def copy_set(self, source_set_id, new_name):
+        source_sid = str(source_set_id)
+        if source_sid not in self._set_defs:
+            return ""
+        clean_name = str(new_name).strip()
+        if not clean_name:
+            return ""
+
+        profile_ids = self._all_profile_ids()
+        profile_id_set = set(profile_ids)
+        next_profile_num = 0
+        for pid in profile_ids:
+            try:
+                next_profile_num = max(next_profile_num, int(pid))
+            except Exception:
+                continue
+
+        copied_profiles = []
+        for src_pid in self._set_defs[source_sid].get("profiles", []):
+            next_profile_num += 1
+            while str(next_profile_num) in profile_id_set:
+                next_profile_num += 1
+            new_pid = str(next_profile_num)
+            self._clone_profile_settings(src_pid, new_pid)
+            profile_ids.append(new_pid)
+            profile_id_set.add(new_pid)
+            copied_profiles.append(new_pid)
+
+        sid = self._next_set_id()
+        self._set_order.append(sid)
+        self._set_defs[sid] = {"name": clean_name, "profiles": copied_profiles}
+        self.master_settings.setValue("profile_ids", profile_ids)
+        self.master_settings.setValue("set_ids", list(self._set_order))
+        self.master_settings.setValue(self._set_key(sid, "name"), clean_name)
+        self.master_settings.setValue(self._set_key(sid, "profiles"), copied_profiles)
+        self.master_settings.sync()
+        return sid
+
+    def copy_profiles_from_set(self, source_set_id, target_set_id):
+        source_sid = str(source_set_id)
+        target_sid = str(target_set_id)
+        if source_sid not in self._set_defs or target_sid not in self._set_defs:
+            return False
+        if source_sid == target_sid:
+            return False
+
+        profile_ids = self._all_profile_ids()
+        profile_id_set = set(profile_ids)
+        next_profile_num = 0
+        for pid in profile_ids:
+            try:
+                next_profile_num = max(next_profile_num, int(pid))
+            except Exception:
+                continue
+
+        copied_profiles = []
+        for src_pid in self._set_defs[source_sid].get("profiles", []):
+            next_profile_num += 1
+            while str(next_profile_num) in profile_id_set:
+                next_profile_num += 1
+            new_pid = str(next_profile_num)
+            self._clone_profile_settings(src_pid, new_pid)
+            profile_ids.append(new_pid)
+            profile_id_set.add(new_pid)
+            copied_profiles.append(new_pid)
+
+        if not copied_profiles:
+            return False
+
+        target_profiles = list(self._set_defs[target_sid].get("profiles", []))
+        target_profiles.extend(copied_profiles)
+        self._set_defs[target_sid]["profiles"] = target_profiles
+
+        self.master_settings.setValue("profile_ids", profile_ids)
+        self.master_settings.setValue(self._set_key(target_sid, "profiles"), target_profiles)
+        self.master_settings.sync()
+        self._refresh_set_ui()
+        return True
+
+    def rename_set(self, set_id, new_name):
+        sid = str(set_id)
+        if sid not in self._set_defs:
+            return False
+        clean_name = str(new_name).strip()
+        if not clean_name:
+            return False
+        self._set_defs[sid]["name"] = clean_name
+        self.master_settings.setValue(self._set_key(sid, "name"), clean_name)
+        self.master_settings.sync()
+        self._refresh_set_ui()
+        return True
+
+    def delete_set(self, set_id):
+        sid = str(set_id)
+        if sid not in self._set_defs:
+            return False
+        if len(self._set_order) <= 1:
+            QMessageBox.information(self, "세트 삭제", "최소 1개의 세트는 유지되어야 합니다.")
+            return False
+
+        set_name = self._set_defs[sid].get("name", f"세트{sid}")
+        confirm = QMessageBox.question(
+            self,
+            "세트 삭제",
+            f"'{set_name}' 세트를 삭제하시겠습니까?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return False
+
+        self.master_settings.remove(f"sets/{sid}")
+        self._set_defs.pop(sid, None)
+        self._set_order = [x for x in self._set_order if str(x) != sid]
+        self.master_settings.setValue("set_ids", list(self._set_order))
+        self.master_settings.sync()
+
+        if self.selected_set_id() == sid:
+            next_sid = self._set_order[0]
+            self.apply_set(next_sid)
+        else:
+            self._refresh_set_ui()
+            self.load_profiles()
+        return True
+
+    def _on_profile_order_changed(self, ordered_ids):
+        sid = self.selected_set_id()
+        if not sid or sid not in self._set_defs:
+            return
+        current = list(self._set_defs[sid].get("profiles", []))
+        if not current:
+            return
+        current_set = set(current)
+        ordered = [pid for pid in self._normalize_ids(ordered_ids) if pid in current_set]
+        if len(ordered) != len(current):
+            for pid in current:
+                if pid not in ordered:
+                    ordered.append(pid)
+        if ordered == current:
+            return
+        self._set_defs[sid]["profiles"] = ordered
+        self.master_settings.setValue(self._set_key(sid, "profiles"), ordered)
+        self.master_settings.sync()
+        self.load_profiles()
+
+    def open_set_manager(self):
+        self._load_set_state()
+        dialog = SetManagerDialog(self, self)
+        dialog.exec()
+        self._refresh_set_ui()
+        self.load_profiles()
 
     def _toggle_gpu_cfg_panel(self, expanded=None):
         if expanded is None:
@@ -2480,6 +3341,103 @@ class MasterController(QMainWindow):
         except Exception:
             pass
 
+    @staticmethod
+    def _themed_input_dialog_style():
+        return """
+            QDialog {
+                background-color: #23344d;
+            }
+            QLabel {
+                color: #e6eefc;
+                font-size: 12px;
+            }
+            QLineEdit {
+                min-height: 30px;
+                color: #edf3ff;
+                background-color: #1a2740;
+                border: 1px solid #4a6288;
+                border-radius: 8px;
+                padding: 2px 8px;
+            }
+            QLineEdit:focus {
+                border: 1px solid #77a3f2;
+            }
+            QComboBox {
+                min-height: 32px;
+                color: #edf3ff;
+                background-color: #1a2740;
+                border: 1px solid #4a6288;
+                border-radius: 8px;
+                padding: 2px 10px;
+            }
+            QComboBox::drop-down {
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 18px;
+                border: none;
+                background: transparent;
+            }
+            QComboBox::down-arrow {
+                image: none;
+                width: 0px;
+                height: 0px;
+                border-left: 5px solid transparent;
+                border-right: 5px solid transparent;
+                border-top: 6px solid #dbe7ff;
+                margin-right: 5px;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #23344d;
+                color: #eef4ff;
+                border: none;
+                selection-background-color: #3f5e8e;
+                selection-color: #ffffff;
+                outline: 0;
+                font-size: 13px;
+            }
+            QPushButton {
+                min-height: 30px;
+                border-radius: 8px;
+                padding: 0 12px;
+                color: #e8efff;
+                background-color: #35507a;
+                border: 1px solid #5977a4;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background-color: #3f5e8e;
+            }
+        """
+
+    def _prompt_text_dialog(self, title, label, default_text=""):
+        dialog = QInputDialog(self)
+        dialog.setWindowTitle(str(title))
+        dialog.setInputMode(QInputDialog.InputMode.TextInput)
+        dialog.setLabelText(str(label))
+        dialog.setTextValue(str(default_text))
+        dialog.setOkButtonText("확인")
+        dialog.setCancelButtonText("취소")
+        dialog.setStyleSheet(self._themed_input_dialog_style())
+        QTimer.singleShot(0, lambda d=dialog: self._apply_window_title_bar_theme(d))
+        if dialog.exec():
+            return dialog.textValue().strip(), True
+        return "", False
+
+    def _prompt_choice_dialog(self, title, label, choices):
+        dialog = QInputDialog(self)
+        dialog.setWindowTitle(str(title))
+        dialog.setLabelText(str(label))
+        dialog.setComboBoxEditable(False)
+        dialog.setComboBoxItems([str(v) for v in choices])
+        dialog.setTextValue(str(choices[0]) if choices else "")
+        dialog.setOkButtonText("확인")
+        dialog.setCancelButtonText("취소")
+        dialog.setStyleSheet(self._themed_input_dialog_style())
+        QTimer.singleShot(0, lambda d=dialog: self._apply_window_title_bar_theme(d))
+        if dialog.exec():
+            return dialog.textValue(), True
+        return "", False
+
     def _add_profile_group_header(self, text):
         item = QListWidgetItem(self.list_widget)
         item.setFlags(Qt.ItemFlag.NoItemFlags)
@@ -2488,6 +3446,29 @@ class MasterController(QMainWindow):
         lbl.setObjectName("groupHeaderLabel")
         self.list_widget.addItem(item)
         self.list_widget.setItemWidget(item, lbl)
+
+    def _add_widget_add_row(self):
+        item = QListWidgetItem(self.list_widget)
+        item.setFlags(Qt.ItemFlag.NoItemFlags)
+        item.setSizeHint(QSize(1, 34))
+
+        row = QWidget()
+        row.setObjectName("addWidgetRow")
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(6)
+
+        btn = QPushButton("＋", row)
+        btn.setObjectName("addWidgetBtn")
+        btn.clicked.connect(self.add_profile)
+        lbl = QLabel("위젯 추가", row)
+        lbl.setObjectName("addWidgetLabel")
+
+        row_layout.addWidget(btn, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        row_layout.addWidget(lbl, 1, Qt.AlignmentFlag.AlignVCenter)
+
+        self.list_widget.addItem(item)
+        self.list_widget.setItemWidget(item, row)
 
     def _add_profile_row(self, pid, name, is_running):
         item = QListWidgetItem(self.list_widget)
@@ -2529,10 +3510,6 @@ class MasterController(QMainWindow):
             btn.setIconSize(QSize(13, 13))
             btn.setVisible(False)
 
-        btn_run.setToolTip("실행")
-        btn_stop.setToolTip("중지")
-        btn_set.setToolTip("설정")
-        btn_del.setToolTip("삭제")
         btn_run.setIcon(self._build_action_icon("run", "#dbfff3"))
         btn_stop.setIcon(self._build_action_icon("stop", "#ffe9ef"))
         btn_set.setIcon(self._build_action_icon("settings", "#e3edff"))
@@ -2564,8 +3541,6 @@ class MasterController(QMainWindow):
             str(name), Qt.TextElideMode.ElideRight, name_max_width
         )
         lbl.setText(elided_name)
-        if elided_name != str(name):
-            lbl.setToolTip(str(name))
 
         row_layout.addWidget(status_dot, 0, Qt.AlignmentFlag.AlignVCenter)
         row_layout.addWidget(lbl, 1, Qt.AlignmentFlag.AlignVCenter)
@@ -2580,25 +3555,16 @@ class MasterController(QMainWindow):
     def load_profiles(self):
         self.list_widget.clear()
         self.profile_rows = {}
-        p_ids = self._as_list(self.master_settings.value("profile_ids", []))
+        self._add_widget_add_row()
+        p_ids = self._current_set_profiles()
 
-        running_ids = [pid for pid in p_ids if pid in self.widgets]
-        stopped_ids = [pid for pid in p_ids if pid not in self.widgets]
-
-        if running_ids:
-            self._add_profile_group_header(f"실행 중 ({len(running_ids)})")
-            for pid in running_ids:
-                name = QSettings("MyHomeApp", f"Profile_{pid}").value("name", "New 세팅")
-                self._add_profile_row(pid, str(name), True)
-
-        if stopped_ids:
-            self._add_profile_group_header(f"정지됨 ({len(stopped_ids)})")
-            for pid in stopped_ids:
-                name = QSettings("MyHomeApp", f"Profile_{pid}").value("name", "New 세팅")
-                self._add_profile_row(pid, str(name), False)
+        for pid in p_ids:
+            name = QSettings("MyHomeApp", f"Profile_{pid}").value("name", "New 세팅")
+            self._add_profile_row(pid, str(name), pid in self.widgets)
         self._set_hovered_profile_row(None)
 
     def open_widget_settings(self, pid):
+        pid = str(pid)
 
         is_running = pid in self.widgets
         s_obj = QSettings("MyHomeApp", f"Profile_{pid}")
@@ -2894,53 +3860,58 @@ class MasterController(QMainWindow):
                 self._set_gpu_guard_paused(False, usage, reason="gpu_recovered_soft")
 
     def add_profile(self):
-        p_ids = self._as_list(self.master_settings.value("profile_ids", []))
-        new_id = str(max([int(i) for i in p_ids] + [0]) + 1)
+        p_ids = self._all_profile_ids()
+        new_id = self._next_profile_id(p_ids)
         p_ids.append(new_id)
-        
 
         new_settings = QSettings("MyHomeApp", f"Profile_{new_id}")
         new_settings.setValue("name", "New 세팅")
-        
-
-        new_settings.setValue("w", 200) 
+        new_settings.setValue("w", 200)
         new_settings.setValue("h", 200)
-        new_settings.sync() # 利됱떆 諛섏쁺
-        
+        new_settings.setValue("run_enabled", True)
+        new_settings.sync()
+
         self.master_settings.setValue("profile_ids", p_ids)
+        sid = self.selected_set_id()
+        if sid not in self._set_defs and self._set_order:
+            sid = self._set_order[0]
+        if sid in self._set_defs:
+            profiles = list(self._set_defs[sid].get("profiles", []))
+            profiles.append(new_id)
+            self._set_defs[sid]["profiles"] = profiles
+            self.master_settings.setValue(self._set_key(sid, "profiles"), profiles)
+        self.master_settings.sync()
         self.run_widget(new_id, "New 세팅")
 
     def run_widget(self, pid, name):
-        if pid not in self.widgets:
-            self.widgets[pid] = DesktopWidget(pid, name, self)
-            self.widgets[pid].show()
-            if self._gpu_guard_paused and bool(getattr(self.widgets[pid], "gpu_guard_enabled", False)):
-                self.widgets[pid].set_performance_paused(
-                    True, reason=f"gpu {self._gpu_last_usage:.1f}%", force=True
-                )
-            self.update_active_status()
-            self.load_profiles()
+        spid = str(pid)
+        self._set_profile_run_enabled(spid, True)
+        if spid not in self.widgets:
+            display_name = name if name not in (None, "") else QSettings(
+                "MyHomeApp", f"Profile_{spid}"
+            ).value("name", "New 세팅")
+            self._start_widget_instance(spid, str(display_name))
+        self.update_active_status()
+        self.load_profiles()
 
     def stop_widget(self, pid):
-        if pid in self.widgets:
-            widget = self.widgets[pid]
+        spid = str(pid)
+        self._set_profile_run_enabled(spid, False)
+        if spid in self.widgets:
+            widget = self.widgets[spid]
             widget.close()
             widget.deleteLater()
-            del self.widgets[pid]
-            self.update_active_status()
-            self.load_profiles()
+            del self.widgets[spid]
+        self.update_active_status()
+        self.load_profiles()
 
     def restore_last_session(self):
-
-        active_ids = self._as_list(self.master_settings.value("active_profiles", []))
-        all_profiles = set(self._as_list(self.master_settings.value("profile_ids", [])))
-
-
-        for pid in active_ids:
-
-            if pid in all_profiles:
-                name = QSettings("MyHomeApp", f"Profile_{pid}").value("name", "New 세팅")
-                self.run_widget(pid, name)
+        self._load_set_state()
+        sid = self.selected_set_id()
+        if not sid and self._set_order:
+            sid = self._set_order[0]
+        if sid:
+            self.apply_set(sid)
 
 
         # Startup visibility policy:
@@ -2952,20 +3923,30 @@ class MasterController(QMainWindow):
             self.show()
 
     def run_all(self):
-        for pid in self._as_list(self.master_settings.value("profile_ids", [])):
-            name = QSettings("MyHomeApp", f"Profile_{pid}").value("name", "New 세팅")
-            self.run_widget(pid, name)
-        self.update_active_status()
-        self.load_profiles()
+        sid = self.selected_set_id()
+        if sid:
+            self.apply_set(sid)
 
     def delete_profile(self, pid):
+        spid = str(pid)
         confirm = QMessageBox.question(self, "삭제 확인", "이 세팅을 완전히 삭제하시겠습니까?", 
                                      QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         if confirm == QMessageBox.StandardButton.Yes:
-            self.stop_widget(pid)
-            prof_settings = QSettings("MyHomeApp", f"Profile_{pid}"); prof_settings.clear(); prof_settings.sync()
-            p_ids = self._as_list(self.master_settings.value("profile_ids", []))
-            if pid in p_ids: p_ids.remove(pid); self.master_settings.setValue("profile_ids", p_ids)
+            if spid in self.widgets:
+                widget = self.widgets[spid]
+                widget.close()
+                widget.deleteLater()
+                del self.widgets[spid]
+            prof_settings = QSettings("MyHomeApp", f"Profile_{spid}")
+            prof_settings.clear()
+            prof_settings.sync()
+            p_ids = self._all_profile_ids()
+            if spid in p_ids:
+                p_ids.remove(spid)
+                self.master_settings.setValue("profile_ids", p_ids)
+            self._remove_profile_from_sets(spid)
+            self.master_settings.sync()
+            self.update_active_status()
             self.load_profiles()
 
     def closeEvent(self, event):
@@ -2980,8 +3961,19 @@ class MasterController(QMainWindow):
             self._gpu_guard_timer.stop()
         if hasattr(self, "_gpu_sampler"):
             self._gpu_sampler.close()
-        for w in list(self.widgets.values()): w.close()
-        QTimer.singleShot(500, QApplication.instance().quit)
+        for w in list(self.widgets.values()):
+            w.close()
+        QTimer.singleShot(450, self._finalize_quit)
+
+    def _finalize_quit(self):
+        try:
+            self._load_set_state()
+            self._cleanup_orphan_profiles()
+        except Exception as e:
+            print(f"[orphan-cleanup] failed: {e}")
+        app = QApplication.instance()
+        if app:
+            app.quit()
 
     def rename_profile(self, item):
         pid = item.data(Qt.ItemDataRole.UserRole)
