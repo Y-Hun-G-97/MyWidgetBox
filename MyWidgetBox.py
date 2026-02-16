@@ -274,6 +274,21 @@ class ProfileListWidget(QListWidget):
         self.orderChanged.emit(ordered_ids)
 
 
+class SetNameLabel(QLabel):
+    renameRequested = pyqtSignal(str)
+
+    def __init__(self, set_id, text="", parent=None):
+        super().__init__(text, parent)
+        self._set_id = str(set_id)
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.renameRequested.emit(self._set_id)
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+
 class SetManagerDialog(QDialog):
     def __init__(self, master, parent=None):
         super().__init__(parent if parent is not None else master)
@@ -635,6 +650,15 @@ class SettingsDialog(QDialog):
         self.bg_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.bg_combo.setMinimumHeight(36)
 
+        self.corner_combo = DownwardComboBox()
+        self.corner_combo.addItems(["곡선", "직각"])
+        self.corner_combo.setCurrentIndex(max(0, min(int(s.get('corner_mode', 0)), 1)))
+        self.corner_combo.setView(QListView())
+        self.corner_combo.view().setFrameShape(QFrame.Shape.NoFrame)
+        self.corner_combo.setStyle(QStyleFactory.create("Fusion"))
+        self.corner_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.corner_combo.setMinimumHeight(36)
+
         self.layer_combo = DownwardComboBox()
         self.layer_combo.addItems([
             "0: 화면 뒤 (아이콘 위)", 
@@ -661,6 +685,10 @@ class SettingsDialog(QDialog):
             "- Ctrl+스크롤: 불투명도 조절\n"
             "- Shift+코너 드래그: 크기 조절\n"
             "- Alt+클릭: 마우스 잠금 토글\n"
+            "- G: 임시 그룹 토글\n"
+            "- Ctrl+G: 임시 그룹 전체 해제\n"
+            "- H: 성능 보호 토글\n"
+            "- R: 모서리 모드 전환\n"
             "- M: 음소거 토글\n"
             "- O: 설정 상세\n"
             "- P: 위젯 종료\n"
@@ -702,6 +730,7 @@ class SettingsDialog(QDialog):
         layout.addRow("불투명도(%):", self.opacity_spinbox)
         layout.addRow("", self.opacity_slider)
         layout.addRow("배경색:", self.bg_combo)
+        layout.addRow("모서리:", self.corner_combo)
         layout.addRow("레이어:", self.layer_combo)
         layout.addRow("클릭 잠금:", self.lock_cb)
         layout.addRow("음소거:", self.mute_checkbox)
@@ -878,6 +907,25 @@ class DesktopWidget(QMainWindow):
             "border: 1px solid rgba(255, 255, 255, 80); border-radius: 8px; padding: 4px 10px; }"
         )
         self.size_hud.hide()
+        self.action_hud = QLabel(self)
+        self.action_hud.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.action_hud.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.action_hud.setStyleSheet(
+            "QLabel { color: white; background-color: rgba(0, 0, 0, 150); "
+            "border: 1px solid rgba(255, 255, 255, 80); border-radius: 8px; padding: 3px 10px; }"
+        )
+        self.action_hud.hide()
+        self.action_hud_timer = QTimer(self)
+        self.action_hud_timer.setSingleShot(True)
+        self.action_hud_timer.timeout.connect(self.action_hud.hide)
+        self.group_badge = QLabel("G", self)
+        self.group_badge.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.group_badge.setStyleSheet(
+            "QLabel { color: #eff7ff; background-color: rgba(40, 86, 146, 180); "
+            "border: 1px solid rgba(145, 192, 255, 170); border-radius: 9px; padding: 1px 6px; "
+            "font-size: 10pt; font-weight: 700; }"
+        )
+        self.group_badge.hide()
         self._size_hud_top_padding = 10
         self.resize_corner = None
         self.is_resizing = False
@@ -975,23 +1023,40 @@ class DesktopWidget(QMainWindow):
                 self._refresh_resize_ui()
             elif (
                 event.type() == QEvent.Type.KeyPress
-                and key in (Qt.Key.Key_M, Qt.Key.Key_O, Qt.Key.Key_P, Qt.Key.Key_C)
+                and key in (
+                    Qt.Key.Key_M, Qt.Key.Key_O, Qt.Key.Key_P, Qt.Key.Key_C, Qt.Key.Key_G,
+                    Qt.Key.Key_H, Qt.Key.Key_R
+                )
                 and self._is_topmost_widget_under_cursor()
             ):
                 modifiers = event.modifiers() if hasattr(event, "modifiers") else Qt.KeyboardModifier.NoModifier
-                blocked_mods = (
-                    Qt.KeyboardModifier.ControlModifier
-                    | Qt.KeyboardModifier.AltModifier
-                    | Qt.KeyboardModifier.MetaModifier
-                )
+                ctrl_mod = Qt.KeyboardModifier.ControlModifier
+                blocked_mods = ctrl_mod | Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.MetaModifier
                 is_auto_repeat = event.isAutoRepeat() if hasattr(event, "isAutoRepeat") else False
+                if key == Qt.Key.Key_G:
+                    only_ctrl = (
+                        bool(modifiers & ctrl_mod)
+                        and not bool(modifiers & (Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.MetaModifier | Qt.KeyboardModifier.ShiftModifier))
+                    )
+                    no_mod = modifiers == Qt.KeyboardModifier.NoModifier
+                    if is_auto_repeat:
+                        return True
+                    if only_ctrl and self._consume_shortcut_once(key, 1):
+                        if hasattr(self, "manager") and self.manager and hasattr(self.manager, "clear_temp_group"):
+                            self.manager.clear_temp_group()
+                        return True
+                    if no_mod and self._consume_shortcut_once(key, 0):
+                        if hasattr(self, "manager") and self.manager and hasattr(self.manager, "toggle_temp_group_member"):
+                            self.manager.toggle_temp_group_member(self.profile_id)
+                        return True
+                    return False
                 if (modifiers & blocked_mods) == Qt.KeyboardModifier.NoModifier and not is_auto_repeat:
-                    now_ms = QDateTime.currentMSecsSinceEpoch()
-                    last_ms = int(self._shortcut_last_ms.get(int(key), 0))
-                    if (now_ms - last_ms) > 120:
-                        self._shortcut_last_ms[int(key)] = now_ms
+                    if self._consume_shortcut_once(key, 0):
                         if key == Qt.Key.Key_M:
-                            self.toggle_mute_shortcut()
+                            if hasattr(self, "manager") and self.manager and hasattr(self.manager, "set_temp_group_mute"):
+                                self.manager.set_temp_group_mute(self.profile_id, not bool(self.is_muted))
+                            else:
+                                self.toggle_mute_shortcut()
                         elif key == Qt.Key.Key_O:
                             self.open_settings()
                         elif key == Qt.Key.Key_C:
@@ -999,6 +1064,17 @@ class DesktopWidget(QMainWindow):
                         elif key == Qt.Key.Key_P:
                             if hasattr(self, "manager") and self.manager and hasattr(self.manager, "stop_widget"):
                                 QTimer.singleShot(0, lambda pid=self.profile_id: self.manager.stop_widget(pid))
+                        elif key == Qt.Key.Key_H:
+                            if hasattr(self, "manager") and self.manager and hasattr(self.manager, "set_temp_group_gpu_guard"):
+                                self.manager.set_temp_group_gpu_guard(self.profile_id, not bool(self.gpu_guard_enabled))
+                            else:
+                                self.toggle_gpu_guard_shortcut()
+                        elif key == Qt.Key.Key_R:
+                            next_corner = 0 if int(getattr(self, "corner_mode", 0)) == 1 else 1
+                            if hasattr(self, "manager") and self.manager and hasattr(self.manager, "set_temp_group_corner_mode"):
+                                self.manager.set_temp_group_corner_mode(self.profile_id, next_corner)
+                            else:
+                                self.toggle_corner_mode_shortcut()
                         return True
             return False
 
@@ -1085,6 +1161,15 @@ class DesktopWidget(QMainWindow):
     def _is_shift_down(self):
         return bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier)
 
+    def _consume_shortcut_once(self, key, modifier_bucket=0):
+        now_ms = QDateTime.currentMSecsSinceEpoch()
+        token = f"{int(key)}:{int(modifier_bucket)}"
+        last_ms = int(self._shortcut_last_ms.get(token, 0))
+        if (now_ms - last_ms) <= 120:
+            return False
+        self._shortcut_last_ms[token] = now_ms
+        return True
+
     def _is_topmost_widget_under_cursor(self):
         pos = QCursor.pos()
         top_widget = QApplication.widgetAt(pos)
@@ -1099,6 +1184,26 @@ class DesktopWidget(QMainWindow):
         if hasattr(self, "manager") and self.manager and hasattr(self.manager, "_widget_under_global_pos"):
             return self.manager._widget_under_global_pos(pos) is self
         return self.geometry().contains(pos)
+
+    def _place_group_badge(self):
+        if not hasattr(self, "group_badge"):
+            return
+        self.group_badge.adjustSize()
+        margin = 10
+        x = margin
+        y = margin
+        self.group_badge.move(x, y)
+
+    def _refresh_group_badge(self):
+        is_grouped = False
+        if hasattr(self, "manager") and self.manager and hasattr(self.manager, "is_temp_group_member"):
+            is_grouped = bool(self.manager.is_temp_group_member(self.profile_id))
+        if is_grouped:
+            self._place_group_badge()
+            self.group_badge.show()
+            self.group_badge.raise_()
+        else:
+            self.group_badge.hide()
 
     def _set_audio_output_attached(self, attach):
         if attach:
@@ -1135,10 +1240,12 @@ class DesktopWidget(QMainWindow):
             if pos >= 0:
                 self.media_player.setPosition(pos)
 
-    def toggle_mute_shortcut(self):
-        self.is_muted = not bool(self.is_muted)
+    def set_mute_shortcut_state(self, muted, log=False):
+        self.is_muted = bool(muted)
         self._apply_mute_state(force_refresh=True)
         self.save_all_settings()
+        if not log:
+            return
         playback_state = self.media_player.playbackState().name if self.media_player else "n/a"
         media_path = self.current_media_path if self.current_media_path else "none"
         print(
@@ -1146,6 +1253,40 @@ class DesktopWidget(QMainWindow):
             f"output_muted={self.audio_output.isMuted()} volume={self.audio_output.volume():.2f} "
             f"output_attached={self._audio_output_attached} state={playback_state} media={media_path}"
         )
+
+    def toggle_mute_shortcut(self):
+        self.set_mute_shortcut_state(not bool(self.is_muted), log=True)
+
+    def set_gpu_guard_shortcut_state(self, enabled, log=False, show_hud=False):
+        self.gpu_guard_enabled = bool(enabled)
+        if not self.gpu_guard_enabled:
+            self.set_performance_paused(False, reason="guard_toggle_off")
+        elif hasattr(self, "manager") and self.manager and bool(getattr(self.manager, "_gpu_guard_paused", False)):
+            usage = float(getattr(self.manager, "_gpu_last_usage", 0.0))
+            self.set_performance_paused(True, reason=f"gpu {usage:.1f}%", force=True)
+        self.save_all_settings()
+        if show_hud:
+            self.show_gpu_guard_hud(self.gpu_guard_enabled)
+        if log:
+            print(f"[gpu-guard-toggle] profile={self.profile_id} enabled={self.gpu_guard_enabled}")
+
+    def toggle_gpu_guard_shortcut(self):
+        self.set_gpu_guard_shortcut_state(not bool(self.gpu_guard_enabled), log=True, show_hud=True)
+
+    def set_corner_mode_shortcut_state(self, mode, log=False):
+        mode_int = int(mode)
+        if mode_int not in (0, 1):
+            mode_int = 0
+        self.corner_mode = mode_int
+        self.apply_mask_and_style()
+        self.save_all_settings()
+        if log:
+            mode_text = "곡선" if self.corner_mode == 0 else "직각"
+            print(f"[corner-toggle] profile={self.profile_id} corner_mode={mode_text}")
+
+    def toggle_corner_mode_shortcut(self):
+        curr = int(getattr(self, "corner_mode", 0))
+        self.set_corner_mode_shortcut_state(0 if curr == 1 else 1, log=True)
 
     def set_performance_paused(self, paused, reason="", force=False):
         paused = bool(paused)
@@ -1263,6 +1404,36 @@ class DesktopWidget(QMainWindow):
 
     def _hide_size_hud(self):
         self.size_hud.hide()
+
+    def _refresh_action_hud(self):
+        if not hasattr(self, "action_hud"):
+            return
+        text = self.action_hud.text()
+        if not text:
+            return
+        fm = QFontMetrics(self.action_hud.font())
+        hud_w = max(92, fm.horizontalAdvance(text) + 24)
+        hud_h = max(22, fm.height() + 10)
+        self.action_hud.resize(hud_w, hud_h)
+        hud_x = max(0, (self.width() - hud_w) // 2)
+        self.action_hud.move(hud_x, self._size_hud_top_padding)
+        self.action_hud.raise_()
+
+    def _show_action_hud(self, text, timeout_ms=1200):
+        if not hasattr(self, "action_hud"):
+            return
+        self.action_hud.setText(str(text))
+        self._refresh_action_hud()
+        self.action_hud.show()
+        self.action_hud.raise_()
+        if hasattr(self, "action_hud_timer"):
+            self.action_hud_timer.start(max(400, int(timeout_ms)))
+
+    def show_lock_hud(self, lock_enabled):
+        self._show_action_hud(f"마우스 잠금 {'ON' if lock_enabled else 'OFF'}", timeout_ms=1300)
+
+    def show_gpu_guard_hud(self, guard_enabled):
+        self._show_action_hud(f"성능 보호 {'ON' if guard_enabled else 'OFF'}", timeout_ms=1300)
 
     def cancel_active_interaction(self):
         """Force-clear dragging/resizing transient states (used by lock toggle)."""
@@ -1503,6 +1674,7 @@ class DesktopWidget(QMainWindow):
         self.current_opacity_pct = int(self.settings.value("opacity_pct", 100))
         self.setWindowOpacity(self.current_opacity_pct / 100.0)
         self.bg_color_mode = int(self.settings.value("bg_color_mode", 1))
+        self.corner_mode = int(self.settings.value("corner_mode", 0))
         self.layer_mode = int(self.settings.value("layer_mode", 1))
         self.is_locked = _as_bool(self.settings.value("is_locked", False), False)
         self.gpu_guard_enabled = _as_bool(self.settings.value("gpu_guard_enabled", False), False)
@@ -1557,7 +1729,7 @@ class DesktopWidget(QMainWindow):
             self.move(int(x), int(y))
 
     def apply_mask_and_style(self):
-        radius = 20
+        radius = 0 if int(getattr(self, "corner_mode", 0)) == 1 else 20
 
         bg_options = ["transparent", "black", "white"]
         bg_idx = max(0, min(int(self.bg_color_mode), len(bg_options) - 1))
@@ -1565,6 +1737,8 @@ class DesktopWidget(QMainWindow):
         
 
         self.container.setStyleSheet(f"QWidget#mainContainer {{ background-color: {bg}; border-radius: {radius}px; }}")
+        if hasattr(self, "placeholder"):
+            self.placeholder.setStyleSheet(f"background: #222; border-radius: {radius}px;")
      
 
         if hasattr(self, 'selection_overlay'):
@@ -1573,11 +1747,17 @@ class DesktopWidget(QMainWindow):
             self.resize_overlay.raise_()
         if hasattr(self, 'size_hud') and self.size_hud.isVisible():
             self.size_hud.raise_()
+        if hasattr(self, 'action_hud') and self.action_hud.isVisible():
+            self.action_hud.raise_()
+        if hasattr(self, "group_badge") and self.group_badge.isVisible():
+            self.group_badge.raise_()
         
-
-        path = QPainterPath()
-        path.addRoundedRect(QRectF(self.rect()), radius, radius)
-        self.setMask(QRegion(path.toFillPolygon().toPolygon()))
+        if radius > 0:
+            path = QPainterPath()
+            path.addRoundedRect(QRectF(self.rect()), radius, radius)
+            self.setMask(QRegion(path.toFillPolygon().toPolygon()))
+        else:
+            self.clearMask()
 
     def update_playlist(self):
         if not os.path.exists(self.folder_path):
@@ -1660,6 +1840,7 @@ class DesktopWidget(QMainWindow):
             'exec_path': self.exec_path,
             'interval': self.interval_ms // 1000,
             'bg_color_mode': self.bg_color_mode,
+            'corner_mode': getattr(self, 'corner_mode', 0),
             'opacity_pct': self.current_opacity_pct,
             'layer_mode': getattr(self, 'layer_mode', 0),
             'is_locked': getattr(self, 'is_locked', False)
@@ -1678,6 +1859,7 @@ class DesktopWidget(QMainWindow):
             self._set_watched_folder(self.folder_path)
             self.interval_ms = dialog.sec_input.value() * 1000
             self.bg_color_mode = dialog.bg_combo.currentIndex()
+            self.corner_mode = dialog.corner_combo.currentIndex()
             
 
             self.apply_window_settings(dialog.layer_combo.currentIndex(), dialog.lock_cb.isChecked())
@@ -1726,6 +1908,7 @@ class DesktopWidget(QMainWindow):
         self._move_exact(current_pos)
         self.apply_mask_and_style()
         self._refresh_resize_ui()
+        self._refresh_group_badge()
 
     def show_selection(self, state):
             if state:
@@ -1742,6 +1925,7 @@ class DesktopWidget(QMainWindow):
         self.settings.setValue("exec_path", self.exec_path)
         self.settings.setValue("interval", self.interval_ms // 1000)
         self.settings.setValue("bg_color_mode", self.bg_color_mode)
+        self.settings.setValue("corner_mode", int(getattr(self, "corner_mode", 0)))
         self.settings.setValue("is_muted", bool(self.is_muted))
         self.settings.setValue("gpu_guard_enabled", bool(self.gpu_guard_enabled))
         self.settings.setValue("layer_mode", int(getattr(self, "layer_mode", 1)))
@@ -1913,11 +2097,18 @@ class DesktopWidget(QMainWindow):
             delta = current_global - self.start_pos
             if delta.manhattanLength() > self._drag_threshold:
                 self.is_moving = True
+                prev_x = self.x()
+                prev_y = self.y()
                 raw_x = self.x() + delta.x()
                 raw_y = self.y() + delta.y()
                 snap_x = self._apply_axis_snap("x", raw_x, current_global.x())
                 snap_y = self._apply_axis_snap("y", raw_y, current_global.y())
                 self._move_exact((snap_x, snap_y))
+                moved_dx = self.x() - prev_x
+                moved_dy = self.y() - prev_y
+                if moved_dx or moved_dy:
+                    if hasattr(self, "manager") and self.manager and hasattr(self.manager, "move_temp_group_by_delta"):
+                        self.manager.move_temp_group_by_delta(self.profile_id, moved_dx, moved_dy)
                 self._show_size_hud()
                 self.start_pos = current_global
 
@@ -1934,6 +2125,8 @@ class DesktopWidget(QMainWindow):
                 return
             if getattr(self, 'is_moving', False):
                 self.save_all_settings()
+                if hasattr(self, "manager") and self.manager and hasattr(self.manager, "save_temp_group_positions"):
+                    self.manager.save_temp_group_positions(self.profile_id)
                 self._hide_size_hud()
             else:
                 if not self.exec_path or not os.path.exists(self.exec_path):
@@ -1958,11 +2151,14 @@ class DesktopWidget(QMainWindow):
             if steps == 0 and wheel_delta != 0:
                 steps = 1 if wheel_delta > 0 else -1
             if steps != 0:
-                new_opacity = max(10, min(100, self.current_opacity_pct + (steps * 5)))
-                if new_opacity != self.current_opacity_pct:
-                    self.current_opacity_pct = new_opacity
-                    self.setWindowOpacity(self.current_opacity_pct / 100.0)
-                    self.save_all_settings()
+                if hasattr(self, "manager") and self.manager and hasattr(self.manager, "adjust_temp_group_opacity"):
+                    self.manager.adjust_temp_group_opacity(self.profile_id, steps * 5)
+                else:
+                    new_opacity = max(10, min(100, self.current_opacity_pct + (steps * 5)))
+                    if new_opacity != self.current_opacity_pct:
+                        self.current_opacity_pct = new_opacity
+                        self.setWindowOpacity(self.current_opacity_pct / 100.0)
+                        self.save_all_settings()
             return
 
         if not self.playlist:
@@ -2018,8 +2214,14 @@ class DesktopWidget(QMainWindow):
             self.resize_overlay.setGeometry(self.rect())
             if self.resize_overlay.isVisible():
                 self.resize_overlay.raise_()
+        if hasattr(self, "group_badge"):
+            self._place_group_badge()
+            if self.group_badge.isVisible():
+                self.group_badge.raise_()
         if hasattr(self, 'size_hud') and self.size_hud.isVisible():
             self._refresh_size_hud()
+        if hasattr(self, "action_hud") and self.action_hud.isVisible():
+            self._refresh_action_hud()
 
         if self.movie:
             self.movie.setScaledSize(self.size())
@@ -2028,6 +2230,7 @@ class DesktopWidget(QMainWindow):
 
         self.apply_mask_and_style()
         self._refresh_resize_ui()
+        self._refresh_group_badge()
         super().resizeEvent(e)
 
     def closeEvent(self, event):
@@ -2063,10 +2266,17 @@ class MasterController(QMainWindow):
         super().__init__()
         self.setWindowTitle("위젯 컨트롤러")
 
-        if os.path.exists("icon.ico"):
-            self.app_icon = QIcon("icon.ico")
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        icon_candidates = [
+            "icon.ico",
+            "MyWidgetBox.ico",
+            os.path.join(script_dir, "icon.ico"),
+            os.path.join(script_dir, "MyWidgetBox.ico"),
+        ]
+        icon_path = next((p for p in icon_candidates if os.path.exists(p)), "")
+        if icon_path:
+            self.app_icon = QIcon(icon_path)
         else:
-
             pixmap = QPixmap(16, 16)
             pixmap.fill(Qt.GlobalColor.green)
             self.app_icon = QIcon(pixmap)
@@ -2076,6 +2286,7 @@ class MasterController(QMainWindow):
         self.setObjectName("masterWindow")
         self.master_settings = QSettings("MyHomeApp", "MasterV3")
         self.widgets = {}
+        self._temp_group_ids = set()
         self.profile_rows = {}
 
 
@@ -2737,10 +2948,11 @@ class MasterController(QMainWindow):
             btn.setProperty("selected", "true" if selected else "false")
             btn.clicked.connect(lambda _, s=str(sid): self._on_set_selected(s))
 
-            name_label = QLabel(self._elide_set_text(name), row)
+            name_label = SetNameLabel(str(sid), self._elide_set_text(name), row)
             name_label.setObjectName("setNameTag")
             name_label.setVisible(not self._set_list_collapsed)
             name_label.setFixedWidth(self._set_name_width())
+            name_label.renameRequested.connect(self._on_set_name_double_clicked)
 
             row_layout.addWidget(btn, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             row_layout.addWidget(name_label, 1, Qt.AlignmentFlag.AlignVCenter)
@@ -2793,6 +3005,16 @@ class MasterController(QMainWindow):
         self._set_current_set_id(sid, persist=True)
         self.clear_all_highlights()
         self.load_profiles()
+
+    def _on_set_name_double_clicked(self, sid):
+        sid = str(sid)
+        if sid not in self._set_defs:
+            return
+        current_name = str(self._set_defs.get(sid, {}).get("name", f"세트{sid}"))
+        new_name, ok = self._prompt_text_dialog("세트 이름 변경", "세트 이름:", current_name)
+        if not ok or not new_name:
+            return
+        self.rename_set(sid, new_name)
 
     def _on_add_set_clicked(self):
         if self._set_list_collapsed:
@@ -2859,6 +3081,20 @@ class MasterController(QMainWindow):
             current_sid = raw_set_ids[0]
             self.master_settings.setValue("current_set_id", current_sid)
             changed = True
+
+        # Backward-compat: if profile_ids contains entries that are not referenced by
+        # any set, attach them to the currently selected set so they remain operable.
+        unassigned_profiles = [pid for pid in profile_ids if pid not in assigned_profiles]
+        if unassigned_profiles:
+            attach_sid = current_sid if current_sid in set_defs else (raw_set_ids[0] if raw_set_ids else "")
+            if attach_sid:
+                existing_profiles = list(set_defs.get(attach_sid, {}).get("profiles", []))
+                merged_profiles = existing_profiles + [pid for pid in unassigned_profiles if pid not in existing_profiles]
+                if merged_profiles != existing_profiles:
+                    set_defs.setdefault(attach_sid, {"name": f"세트{attach_sid}", "profiles": []})
+                    set_defs[attach_sid]["profiles"] = merged_profiles
+                    self.master_settings.setValue(self._set_key(attach_sid, "profiles"), merged_profiles)
+                    changed = True
 
         self._set_order = list(raw_set_ids)
         self._set_defs = set_defs
@@ -2944,6 +3180,8 @@ class MasterController(QMainWindow):
             return False
         self.widgets[spid] = DesktopWidget(spid, name, self)
         self.widgets[spid].show()
+        if spid in self._temp_group_ids:
+            self.widgets[spid]._refresh_group_badge()
         if self._gpu_guard_paused and bool(getattr(self.widgets[spid], "gpu_guard_enabled", False)):
             self.widgets[spid].set_performance_paused(
                 True, reason=f"gpu {self._gpu_last_usage:.1f}%", force=True
@@ -2951,6 +3189,7 @@ class MasterController(QMainWindow):
         return True
 
     def _stop_all_widgets_bulk(self):
+        self.clear_temp_group(silent=True)
         changed = False
         for pid in list(self.widgets.keys()):
             widget = self.widgets.get(pid)
@@ -2962,6 +3201,154 @@ class MasterController(QMainWindow):
             changed = True
         return changed
 
+    def is_temp_group_member(self, pid):
+        spid = str(pid)
+        return spid in self._temp_group_ids
+
+    def _sync_temp_group_badges(self):
+        for widget in self.widgets.values():
+            if isinstance(widget, DesktopWidget):
+                widget._refresh_group_badge()
+
+    def toggle_temp_group_member(self, pid):
+        spid = str(pid)
+        if not spid or spid not in self.widgets:
+            return False
+        if spid in self._temp_group_ids:
+            self._temp_group_ids.remove(spid)
+            grouped = False
+        else:
+            self._temp_group_ids.add(spid)
+            grouped = True
+        self._sync_temp_group_badges()
+        print(f"[temp-group] profile={spid} grouped={grouped} members={sorted(self._temp_group_ids)}")
+        return grouped
+
+    def clear_temp_group(self, silent=False):
+        if not self._temp_group_ids:
+            return 0
+        count = len(self._temp_group_ids)
+        self._temp_group_ids.clear()
+        self._sync_temp_group_badges()
+        if not silent:
+            print(f"[temp-group] cleared count={count}")
+        return count
+
+    def _temp_group_shortcut_targets(self, source_pid):
+        spid = str(source_pid)
+        source_widget = self.widgets.get(spid)
+        if not isinstance(source_widget, DesktopWidget):
+            return []
+        if spid not in self._temp_group_ids:
+            return [source_widget]
+
+        targets = []
+        for pid in self._temp_group_ids:
+            widget = self.widgets.get(str(pid))
+            if isinstance(widget, DesktopWidget):
+                targets.append(widget)
+        if not targets:
+            return [source_widget]
+
+        targets.sort(key=lambda w: (0 if str(w.profile_id) == spid else 1, str(w.profile_id)))
+        return targets
+
+    def _temp_group_move_targets(self, source_pid):
+        spid = str(source_pid)
+        if spid not in self._temp_group_ids:
+            return []
+        targets = []
+        for pid in self._temp_group_ids:
+            if pid == spid:
+                continue
+            widget = self.widgets.get(pid)
+            if not isinstance(widget, DesktopWidget):
+                continue
+            if not widget.isVisible():
+                continue
+            targets.append(widget)
+        return targets
+
+    def move_temp_group_by_delta(self, source_pid, dx, dy):
+        if not dx and not dy:
+            return
+        for widget in self._temp_group_move_targets(source_pid):
+            widget._move_exact((widget.x() + int(dx), widget.y() + int(dy)))
+
+    def save_temp_group_positions(self, source_pid):
+        for widget in self._temp_group_move_targets(source_pid):
+            widget.save_all_settings()
+
+    def set_temp_group_mute(self, source_pid, muted):
+        targets = self._temp_group_shortcut_targets(source_pid)
+        if not targets:
+            return
+        for idx, widget in enumerate(targets):
+            widget.set_mute_shortcut_state(bool(muted), log=(idx == 0))
+        if len(targets) > 1:
+            print(f"[temp-group-mute] source={source_pid} members={len(targets)} muted={bool(muted)}")
+
+    def set_temp_group_gpu_guard(self, source_pid, enabled):
+        targets = self._temp_group_shortcut_targets(source_pid)
+        if not targets:
+            return
+        for idx, widget in enumerate(targets):
+            widget.set_gpu_guard_shortcut_state(bool(enabled), log=(idx == 0), show_hud=True)
+        if len(targets) > 1:
+            print(f"[temp-group-gpu-guard] source={source_pid} members={len(targets)} enabled={bool(enabled)}")
+
+    def set_temp_group_corner_mode(self, source_pid, mode):
+        mode_int = 0 if int(mode) != 1 else 1
+        targets = self._temp_group_shortcut_targets(source_pid)
+        if not targets:
+            return
+        for idx, widget in enumerate(targets):
+            widget.set_corner_mode_shortcut_state(mode_int, log=(idx == 0))
+        if len(targets) > 1:
+            mode_text = "곡선" if mode_int == 0 else "직각"
+            print(f"[temp-group-corner] source={source_pid} members={len(targets)} mode={mode_text}")
+
+    def adjust_temp_group_opacity(self, source_pid, delta_pct):
+        try:
+            delta = int(delta_pct)
+        except Exception:
+            delta = 0
+        if delta == 0:
+            return
+        targets = self._temp_group_shortcut_targets(source_pid)
+        if not targets:
+            return
+        changed = 0
+        for widget in targets:
+            old_val = int(getattr(widget, "current_opacity_pct", 100))
+            new_val = max(10, min(100, old_val + delta))
+            if new_val == old_val:
+                continue
+            widget.current_opacity_pct = new_val
+            widget.setWindowOpacity(new_val / 100.0)
+            widget.save_all_settings()
+            changed += 1
+        if len(targets) > 1 and changed > 0:
+            print(f"[temp-group-opacity] source={source_pid} members={len(targets)} delta={delta}")
+
+    def set_temp_group_lock(self, source_pid, lock):
+        targets = self._temp_group_shortcut_targets(source_pid)
+        if not targets:
+            return 0
+        lock_val = bool(lock)
+        for widget in targets:
+            if hasattr(widget, "cancel_active_interaction"):
+                widget.cancel_active_interaction()
+        for widget in targets:
+            widget.apply_window_settings(int(getattr(widget, "layer_mode", 1)), lock_val)
+            widget.save_all_settings()
+            if hasattr(widget, "show_lock_hud"):
+                widget.show_lock_hud(lock_val)
+        self._sync_temp_group_badges()
+        if len(targets) > 1:
+            print(f"[temp-group-lock] source={source_pid} members={len(targets)} lock={lock_val}")
+        return len(targets)
+
     def apply_set(self, set_id):
         sid = str(set_id)
         if sid not in self._set_defs:
@@ -2969,6 +3356,7 @@ class MasterController(QMainWindow):
 
         self._set_current_set_id(sid, persist=True)
         self.clear_all_highlights()
+        self.clear_temp_group(silent=True)
         self._stop_all_widgets_bulk()
 
         for pid in self._set_defs[sid].get("profiles", []):
@@ -3067,7 +3455,7 @@ class MasterController(QMainWindow):
             return False
 
         target_profiles = list(self._set_defs[target_sid].get("profiles", []))
-        target_profiles.extend(copied_profiles)
+        target_profiles = copied_profiles + target_profiles
         self._set_defs[target_sid]["profiles"] = target_profiles
 
         self.master_settings.setValue("profile_ids", profile_ids)
@@ -3580,6 +3968,7 @@ class MasterController(QMainWindow):
                 'is_locked': getattr(w, 'is_locked', False),
                 'opacity_pct': w.current_opacity_pct,
                 'bg_color_mode': w.bg_color_mode,
+                'corner_mode': getattr(w, 'corner_mode', 0),
                 'interval': w.interval_ms // 1000,
                 'is_muted': w.is_muted,
                 'gpu_guard_enabled': getattr(w, 'gpu_guard_enabled', False),
@@ -3595,6 +3984,7 @@ class MasterController(QMainWindow):
                 'is_locked': _as_bool(s_obj.value("is_locked", False), False),
                 'opacity_pct': int(s_obj.value("opacity_pct", 100)),
                 'bg_color_mode': int(s_obj.value("bg_color_mode", 1)),
+                'corner_mode': int(s_obj.value("corner_mode", 0)),
                 'interval': int(s_obj.value("interval", 5)),
                 'is_muted': _as_bool(s_obj.value("is_muted", True), True),
                 'gpu_guard_enabled': _as_bool(s_obj.value("gpu_guard_enabled", False), False),
@@ -3615,6 +4005,7 @@ class MasterController(QMainWindow):
             new_interval = dialog.sec_input.value() * 1000
             new_opacity = dialog.opacity_slider.value()
             new_bg = dialog.bg_combo.currentIndex()
+            new_corner = dialog.corner_combo.currentIndex()
             new_layer = dialog.layer_combo.currentIndex()
             new_lock = dialog.lock_cb.isChecked()
             new_mute = dialog.mute_checkbox.isChecked()
@@ -3628,6 +4019,7 @@ class MasterController(QMainWindow):
             s_obj.setValue("w", new_w); s_obj.setValue("h", new_h)
             s_obj.setValue("opacity_pct", new_opacity)
             s_obj.setValue("bg_color_mode", new_bg)
+            s_obj.setValue("corner_mode", int(new_corner))
             s_obj.setValue("interval", new_interval // 1000)
             s_obj.setValue("is_muted", bool(new_mute))
             s_obj.setValue("gpu_guard_enabled", bool(new_gpu_guard))
@@ -3645,6 +4037,7 @@ class MasterController(QMainWindow):
                 w.setWindowOpacity(new_opacity / 100.0)
                 
                 w.bg_color_mode = new_bg
+                w.corner_mode = int(new_corner)
                 w.apply_mask_and_style()
 
                 w.apply_window_settings(new_layer, new_lock)
@@ -3774,11 +4167,14 @@ class MasterController(QMainWindow):
                 cursor_x, cursor_y = win32api.GetCursorPos()
                 target = self._widget_under_global_pos(QPoint(int(cursor_x), int(cursor_y)))
                 if target is not None:
-                    if hasattr(target, "cancel_active_interaction"):
-                        target.cancel_active_interaction()
                     new_lock = not bool(getattr(target, "is_locked", False))
-                    target.apply_window_settings(int(getattr(target, "layer_mode", 1)), new_lock)
-                    target.save_all_settings()
+                    if hasattr(self, "set_temp_group_lock"):
+                        self.set_temp_group_lock(target.profile_id, new_lock)
+                    else:
+                        if hasattr(target, "cancel_active_interaction"):
+                            target.cancel_active_interaction()
+                        target.apply_window_settings(int(getattr(target, "layer_mode", 1)), new_lock)
+                        target.save_all_settings()
                     self.load_profiles()
                     print(f"[alt-click-lock] profile={target.profile_id} lock={new_lock}")
 
@@ -3868,6 +4264,7 @@ class MasterController(QMainWindow):
         new_settings.setValue("name", "New 세팅")
         new_settings.setValue("w", 200)
         new_settings.setValue("h", 200)
+        new_settings.setValue("corner_mode", 0)
         new_settings.setValue("run_enabled", True)
         new_settings.sync()
 
@@ -3877,7 +4274,7 @@ class MasterController(QMainWindow):
             sid = self._set_order[0]
         if sid in self._set_defs:
             profiles = list(self._set_defs[sid].get("profiles", []))
-            profiles.append(new_id)
+            profiles = [new_id] + [pid for pid in profiles if pid != new_id]
             self._set_defs[sid]["profiles"] = profiles
             self.master_settings.setValue(self._set_key(sid, "profiles"), profiles)
         self.master_settings.sync()
@@ -3897,11 +4294,14 @@ class MasterController(QMainWindow):
     def stop_widget(self, pid):
         spid = str(pid)
         self._set_profile_run_enabled(spid, False)
+        if spid in self._temp_group_ids:
+            self._temp_group_ids.remove(spid)
         if spid in self.widgets:
             widget = self.widgets[spid]
             widget.close()
             widget.deleteLater()
             del self.widgets[spid]
+        self._sync_temp_group_badges()
         self.update_active_status()
         self.load_profiles()
 
@@ -3932,6 +4332,8 @@ class MasterController(QMainWindow):
         confirm = QMessageBox.question(self, "삭제 확인", "이 세팅을 완전히 삭제하시겠습니까?", 
                                      QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         if confirm == QMessageBox.StandardButton.Yes:
+            if spid in self._temp_group_ids:
+                self._temp_group_ids.remove(spid)
             if spid in self.widgets:
                 widget = self.widgets[spid]
                 widget.close()
@@ -3946,6 +4348,7 @@ class MasterController(QMainWindow):
                 self.master_settings.setValue("profile_ids", p_ids)
             self._remove_profile_from_sets(spid)
             self.master_settings.sync()
+            self._sync_temp_group_badges()
             self.update_active_status()
             self.load_profiles()
 
@@ -3961,6 +4364,7 @@ class MasterController(QMainWindow):
             self._gpu_guard_timer.stop()
         if hasattr(self, "_gpu_sampler"):
             self._gpu_sampler.close()
+        self.clear_temp_group(silent=True)
         for w in list(self.widgets.values()):
             w.close()
         QTimer.singleShot(450, self._finalize_quit)
