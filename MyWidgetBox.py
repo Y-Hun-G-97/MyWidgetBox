@@ -3,6 +3,11 @@ import sys
 import os
 import math
 import time
+import hashlib
+import shutil
+import subprocess
+import threading
+from collections import deque
 
 import ctypes
 from ctypes import wintypes
@@ -837,6 +842,7 @@ class SettingsDialog(QDialog):
         right_form.setHorizontalSpacing(12)
         right_form.setVerticalSpacing(8)
         right_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        self._right_form = right_form
 
         content_row.addWidget(left_panel, 5)
         content_row.addWidget(right_panel, 5)
@@ -854,6 +860,45 @@ class SettingsDialog(QDialog):
         self.exec_label.setObjectName("pathLabel")
         self.exec_label.setWordWrap(True)
         self.exec_btn = QPushButton("실행파일 선택")
+        self._focus_binding_host = s.get("focus_binding_host", None)
+        self._focus_capture_deadline = 0.0
+        self._focus_capture_timer = QTimer(self)
+        self._focus_capture_timer.setInterval(140)
+        self._focus_capture_timer.timeout.connect(self._on_focus_capture_tick)
+        self._focus_binding_supported = bool(
+            self._focus_binding_host
+            and hasattr(self._focus_binding_host, "_capture_bindable_foreground_hwnd")
+            and hasattr(self._focus_binding_host, "_set_manual_focus_binding_from_hwnd")
+            and hasattr(self._focus_binding_host, "_clear_manual_focus_binding")
+            and hasattr(self._focus_binding_host, "get_exec_manual_focus_summary")
+        )
+        focus_summary = str(s.get("focus_binding_summary", "") or "").strip()
+        if not focus_summary and self._focus_binding_supported:
+            try:
+                focus_summary = str(self._focus_binding_host.get_exec_manual_focus_summary() or "").strip()
+            except Exception:
+                focus_summary = ""
+        if not focus_summary:
+            focus_summary = "자동 (실행파일 기준)"
+        self.focus_binding_label = QLabel(focus_summary)
+        self.focus_binding_label.setObjectName("pathLabel")
+        self.focus_binding_label.setWordWrap(True)
+        self.focus_bind_btn = QPushButton("포커싱 대상 지정")
+        self.focus_bind_clear_btn = QPushButton("바인딩 초기화")
+        self.focus_bind_btn.setMinimumHeight(30)
+        self.focus_bind_clear_btn.setMinimumHeight(30)
+        self.focus_bind_btn.setEnabled(self._focus_binding_supported)
+        self.focus_bind_clear_btn.setEnabled(self._focus_binding_supported)
+        if not self._focus_binding_supported:
+            self.focus_bind_btn.setToolTip("실행 중인 위젯에서만 사용 가능합니다.")
+            self.focus_bind_clear_btn.setToolTip("실행 중인 위젯에서만 사용 가능합니다.")
+        self._focus_bind_row_widget = QWidget()
+        focus_bind_row = QHBoxLayout(self._focus_bind_row_widget)
+        focus_bind_row.setContentsMargins(0, 0, 0, 0)
+        focus_bind_row.setSpacing(6)
+        focus_bind_row.addWidget(self.focus_bind_btn)
+        focus_bind_row.addWidget(self.focus_bind_clear_btn)
+        focus_bind_row.addStretch(1)
         
         self.width_input = QSpinBox(); self.width_input.setRange(50, 5000)
         self.width_input.setValue(s.get('w', 200))
@@ -910,6 +955,76 @@ class SettingsDialog(QDialog):
         self.media_mode_combo.setStyle(QStyleFactory.create("Fusion"))
         self.media_mode_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.media_mode_combo.setMinimumHeight(36)
+
+        self.video_transition_combo = DownwardComboBox()
+        self.video_transition_combo.addItems([
+            "싱글 (가벼움, 전환 깜빡임 가능)",
+            "듀얼 (매끄러움, 메모리 사용 증가)",
+        ])
+        vt_mode = DesktopWidget.coerce_video_transition_mode(
+            s.get('video_transition_mode', DesktopWidget.VIDEO_TRANSITION_SINGLE)
+        )
+        self.video_transition_combo.setCurrentIndex(int(vt_mode))
+        self.video_transition_combo.setView(QListView())
+        self.video_transition_combo.view().setFrameShape(QFrame.Shape.NoFrame)
+        self.video_transition_combo.setStyle(QStyleFactory.create("Fusion"))
+        self.video_transition_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.video_transition_combo.setMinimumHeight(36)
+        self.video_transition_hint = QLabel(
+            "싱글: 가볍지만 영상 전환 시 깜빡일 수 있습니다.\n"
+            "듀얼: 영상→영상 전환이 매끄럽지만 메모리 사용량이 증가합니다."
+        )
+        self.video_transition_hint.setObjectName("pathLabel")
+        self.video_transition_hint.setWordWrap(True)
+        self.video_decode_combo = DownwardComboBox()
+        self.video_decode_combo.addItems([
+            "원본 해상도 (품질 우선)",
+            "자동 (위젯 크기 기준)",
+            "1080p 이하",
+            "720p 이하",
+        ])
+        decode_mode = DesktopWidget.coerce_video_decode_mode(
+            s.get('video_decode_mode', DesktopWidget.VIDEO_DECODE_ORIGINAL)
+        )
+        self.video_decode_combo.setCurrentIndex(int(decode_mode))
+        self.video_decode_combo.setView(QListView())
+        self.video_decode_combo.view().setFrameShape(QFrame.Shape.NoFrame)
+        self.video_decode_combo.setStyle(QStyleFactory.create("Fusion"))
+        self.video_decode_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.video_decode_combo.setMinimumHeight(36)
+        self.video_decode_hint = QLabel(
+            "재생 시 원본 대신 저해상도 프록시를 자동 생성/사용해 GPU/메모리 사용량을 줄입니다."
+        )
+        self.video_decode_hint.setObjectName("pathLabel")
+        self.video_decode_hint.setWordWrap(True)
+        self.video_cache_usage_label = QLabel("캐시 사용량: 계산 중...")
+        self.video_cache_usage_label.setObjectName("pathLabel")
+        self.video_cache_usage_label.setWordWrap(True)
+        self.video_cache_usage_label.setToolTip("영상 프록시 캐시 폴더")
+        self.video_cache_clear_btn = QPushButton("영상 캐시 정리")
+        self.video_cache_clear_btn.setMinimumHeight(30)
+        self.video_cache_action_row_widget = QWidget()
+        video_cache_action_row = QHBoxLayout(self.video_cache_action_row_widget)
+        video_cache_action_row.setContentsMargins(0, 0, 0, 0)
+        video_cache_action_row.setSpacing(6)
+        video_cache_action_row.addWidget(self.video_cache_clear_btn)
+        video_cache_action_row.addStretch(1)
+        self.video_dual_fade_ms_spin = QSpinBox()
+        self.video_dual_fade_ms_spin.setRange(0, 300)
+        self.video_dual_fade_ms_spin.setSingleStep(10)
+        self.video_dual_fade_ms_spin.setSuffix(" ms")
+        self.video_dual_fade_ms_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.video_dual_fade_ms_spin.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.video_dual_fade_ms_spin.setValue(
+            DesktopWidget.coerce_video_dual_fade_ms(
+                s.get('video_dual_fade_ms', DesktopWidget.VIDEO_DUAL_FADE_DEFAULT_MS)
+            )
+        )
+        self.video_dual_fade_hint = QLabel(
+            "듀얼 전환 시 짧은 페이드 길이입니다. 값이 클수록 더 부드럽게 보일 수 있습니다."
+        )
+        self.video_dual_fade_hint.setObjectName("pathLabel")
+        self.video_dual_fade_hint.setWordWrap(True)
 
         self.layer_combo = DownwardComboBox()
         self.layer_combo.addItems([
@@ -981,6 +1096,8 @@ class SettingsDialog(QDialog):
         left_form.addRow("", self.folder_label)
         left_form.addRow("실행 파일:", self.exec_btn)
         left_form.addRow("", self.exec_label)
+        left_form.addRow("포커싱 대상:", self.focus_binding_label)
+        left_form.addRow("", self._focus_bind_row_widget)
         left_form.addRow("너비:", self.width_input)
         left_form.addRow("높이:", self.height_input)
         left_form.addRow("재생 간격(초):", self.sec_input)
@@ -990,10 +1107,20 @@ class SettingsDialog(QDialog):
         right_form.addRow("배경색:", self.bg_combo)
         right_form.addRow("모서리:", self.corner_combo)
         right_form.addRow("미디어 맞춤:", self.media_mode_combo)
+        right_form.addRow("영상 전환:", self.video_transition_combo)
+        right_form.addRow("", self.video_transition_hint)
+        right_form.addRow("영상 디코드:", self.video_decode_combo)
+        right_form.addRow("", self.video_decode_hint)
+        right_form.addRow("영상 캐시:", self.video_cache_usage_label)
+        right_form.addRow("", self.video_cache_action_row_widget)
+        right_form.addRow("듀얼 페이드:", self.video_dual_fade_ms_spin)
+        right_form.addRow("", self.video_dual_fade_hint)
         right_form.addRow("레이어:", self.layer_combo)
         right_form.addRow("클릭 잠금:", self.lock_cb)
         right_form.addRow("음소거:", self.mute_checkbox)
         right_form.addRow("성능 보호:", self.gpu_guard_checkbox)
+        self._video_dual_fade_label = right_form.labelForField(self.video_dual_fade_ms_spin)
+        self._video_dual_fade_hint_label = right_form.labelForField(self.video_dual_fade_hint)
         
         btns = QHBoxLayout(); apply = QPushButton("저장"); cancel = QPushButton("취소")
         btns.setSpacing(12)
@@ -1016,9 +1143,15 @@ class SettingsDialog(QDialog):
         
         self.folder_btn.clicked.connect(self.select_folder)
         self.exec_btn.clicked.connect(self.select_exec)
+        self.focus_bind_btn.clicked.connect(self._start_focus_capture)
+        self.focus_bind_clear_btn.clicked.connect(self._clear_focus_binding)
+        self.video_transition_combo.currentIndexChanged.connect(self._sync_video_transition_dependent_ui)
+        self.video_cache_clear_btn.clicked.connect(self._clear_video_proxy_cache)
         self.master_btn.clicked.connect(self.open_master)
         apply.clicked.connect(self.accept); cancel.clicked.connect(self.reject)
         QTimer.singleShot(0, self._apply_title_bar_theme)
+        QTimer.singleShot(0, self._sync_video_transition_dependent_ui)
+        QTimer.singleShot(0, self._refresh_video_proxy_cache_usage)
         QTimer.singleShot(0, self._sync_dialog_height)
 
     def _set_shortcut_panel_visible(self, expanded):
@@ -1044,6 +1177,153 @@ class SettingsDialog(QDialog):
         target_height = max(420, self.minimumSizeHint().height())
         if self.height() != target_height:
             self.resize(self.width(), target_height)
+
+    def _sync_video_transition_dependent_ui(self):
+        is_dual = (
+            int(self.video_transition_combo.currentIndex())
+            == int(DesktopWidget.VIDEO_TRANSITION_DUAL)
+        )
+        self.video_dual_fade_ms_spin.setVisible(bool(is_dual))
+        self.video_dual_fade_hint.setVisible(bool(is_dual))
+        if getattr(self, "_video_dual_fade_label", None) is not None:
+            self._video_dual_fade_label.setVisible(bool(is_dual))
+        if getattr(self, "_video_dual_fade_hint_label", None) is not None:
+            self._video_dual_fade_hint_label.setVisible(bool(is_dual))
+        self._sync_dialog_height()
+
+    @staticmethod
+    def _format_size_bytes(num_bytes):
+        try:
+            size = float(max(0, int(num_bytes)))
+        except Exception:
+            size = 0.0
+        units = ["B", "KB", "MB", "GB", "TB"]
+        idx = 0
+        while size >= 1024.0 and idx < (len(units) - 1):
+            size /= 1024.0
+            idx += 1
+        if idx == 0:
+            return f"{int(size)} {units[idx]}"
+        return f"{size:.1f} {units[idx]}"
+
+    def _video_proxy_cache_dir(self):
+        try:
+            return str(DesktopWidget._resolve_video_proxy_dir() or "")
+        except Exception:
+            base = str(os.environ.get("LOCALAPPDATA", "") or "").strip()
+            if not base:
+                base = os.path.expanduser("~")
+            return os.path.join(base, "MyHomeApp", "video_proxy_cache")
+
+    def _video_proxy_cache_usage(self):
+        cache_dir = self._video_proxy_cache_dir()
+        total = 0
+        count = 0
+        if os.path.isdir(cache_dir):
+            for root, _dirs, files in os.walk(cache_dir):
+                for name in files:
+                    fp = os.path.join(root, name)
+                    try:
+                        total += int(os.path.getsize(fp))
+                        count += 1
+                    except Exception:
+                        pass
+        return cache_dir, int(total), int(count)
+
+    @staticmethod
+    def _themed_message_box_style():
+        return """
+            QMessageBox {
+                background-color: #23344d;
+            }
+            QMessageBox QLabel {
+                color: #e6eefc;
+                font-size: 12px;
+            }
+            QMessageBox QPushButton {
+                min-height: 30px;
+                border-radius: 8px;
+                padding: 0 12px;
+                color: #e8efff;
+                background-color: #35507a;
+                border: 1px solid #5977a4;
+                font-weight: 600;
+            }
+            QMessageBox QPushButton:hover {
+                background-color: #3f5e8e;
+            }
+        """
+
+    def _show_themed_message_box(self, icon, title, text, buttons, default_button=QMessageBox.StandardButton.NoButton):
+        box = QMessageBox(self)
+        box.setIcon(icon)
+        box.setWindowTitle(str(title))
+        box.setText(str(text))
+        box.setStandardButtons(buttons)
+        if default_button != QMessageBox.StandardButton.NoButton:
+            box.setDefaultButton(default_button)
+        box.setStyleSheet(self._themed_message_box_style())
+        try:
+            self._apply_title_bar_theme_for_window(box)
+        except Exception:
+            pass
+        return box.exec()
+
+    def _refresh_video_proxy_cache_usage(self):
+        cache_dir, total, count = self._video_proxy_cache_usage()
+        self.video_cache_usage_label.setText(
+            f"{self._format_size_bytes(total)} ({int(count)}개 파일)"
+        )
+        self.video_cache_usage_label.setToolTip(cache_dir)
+        self.video_cache_clear_btn.setEnabled(int(count) > 0)
+
+    def _clear_video_proxy_cache(self):
+        cache_dir, total, count = self._video_proxy_cache_usage()
+        if int(count) <= 0:
+            self._refresh_video_proxy_cache_usage()
+            return
+        confirm = self._show_themed_message_box(
+            QMessageBox.Icon.Question,
+            "영상 캐시 정리",
+            f"영상 캐시 {self._format_size_bytes(total)} ({int(count)}개 파일)를 삭제할까요?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if int(confirm) != int(QMessageBox.StandardButton.Yes):
+            return
+        removed = 0
+        failed = 0
+        if os.path.isdir(cache_dir):
+            for root, dirs, files in os.walk(cache_dir, topdown=False):
+                for name in files:
+                    fp = os.path.join(root, name)
+                    try:
+                        os.remove(fp)
+                        removed += 1
+                    except Exception:
+                        failed += 1
+                for name in dirs:
+                    dp = os.path.join(root, name)
+                    try:
+                        os.rmdir(dp)
+                    except Exception:
+                        pass
+        self._refresh_video_proxy_cache_usage()
+        if failed > 0:
+            self._show_themed_message_box(
+                QMessageBox.Icon.Warning,
+                "영상 캐시 정리",
+                f"{int(removed)}개 파일 삭제됨, {int(failed)}개 파일은 삭제하지 못했습니다.\n"
+                "재생 중인 파일은 잠시 후 다시 시도해 주세요.",
+                QMessageBox.StandardButton.Ok,
+            )
+        else:
+            self._show_themed_message_box(
+                QMessageBox.Icon.Information,
+                "영상 캐시 정리",
+                f"{int(removed)}개 파일을 삭제했습니다.",
+                QMessageBox.StandardButton.Ok,
+            )
 
     def _place_shortcut_panel(self):
         self.shortcut_panel.adjustSize()
@@ -1089,6 +1369,7 @@ class SettingsDialog(QDialog):
         super().showEvent(event)
         self._apply_title_bar_theme()
         self._sync_dialog_height()
+        self._refresh_focus_binding_label()
         if self.shortcut_toggle.isChecked():
             self._place_shortcut_panel()
 
@@ -1103,6 +1384,9 @@ class SettingsDialog(QDialog):
             self._place_shortcut_panel()
 
     def closeEvent(self, event):
+        if hasattr(self, "_focus_capture_timer") and self._focus_capture_timer.isActive():
+            self._focus_capture_timer.stop()
+            self._focus_capture_deadline = 0.0
         if hasattr(self, "shortcut_panel") and self.shortcut_panel.isVisible():
             self.shortcut_panel.hide()
         super().closeEvent(event)
@@ -1114,6 +1398,89 @@ class SettingsDialog(QDialog):
     def select_exec(self):
         path, _ = QFileDialog.getOpenFileName(self, "파일 선택", "", "실행 파일 (*.exe *.lnk);;모든 파일 (*)")
         if path: self.exec_path = path; self.exec_label.setText(os.path.basename(path))
+
+    def _refresh_focus_binding_label(self):
+        text = ""
+        if self._focus_binding_supported:
+            try:
+                text = str(self._focus_binding_host.get_exec_manual_focus_summary() or "").strip()
+            except Exception:
+                text = ""
+        else:
+            text = str(self.focus_binding_label.text() or "").strip()
+        if not text:
+            text = "자동 (실행파일 기준)"
+        self.focus_binding_label.setText(text)
+
+    def _finish_focus_capture(self, success, message):
+        if self._focus_capture_timer.isActive():
+            self._focus_capture_timer.stop()
+        self._focus_capture_deadline = 0.0
+        self.focus_bind_btn.setEnabled(self._focus_binding_supported)
+        self.focus_bind_clear_btn.setEnabled(self._focus_binding_supported)
+        self._refresh_focus_binding_label()
+        if str(message or "").strip():
+            print(f"[focus-bind] {str(message)}")
+
+    def _start_focus_capture(self):
+        if not self._focus_binding_supported:
+            print("[focus-bind] 실행 중인 위젯에서만 지정할 수 있습니다.")
+            return
+        if self._focus_capture_timer.isActive():
+            return
+        self.focus_bind_btn.setEnabled(False)
+        self.focus_bind_clear_btn.setEnabled(False)
+        self.focus_binding_label.setText("대기 중: 12초 안에 대상 창을 한 번 클릭하세요")
+        self._focus_capture_deadline = float(time.monotonic()) + 12.0
+        self._focus_capture_timer.start()
+
+    def _on_focus_capture_tick(self):
+        if not self._focus_binding_supported:
+            if self._focus_capture_timer.isActive():
+                self._focus_capture_timer.stop()
+            self._focus_capture_deadline = 0.0
+            return
+        if float(time.monotonic()) >= float(self._focus_capture_deadline or 0.0):
+            self._finish_focus_capture(False, "시간 내에 대상 창을 찾지 못했습니다.")
+            return
+        try:
+            hwnd = int(self._focus_binding_host._capture_bindable_foreground_hwnd() or 0)
+        except Exception:
+            hwnd = 0
+        if hwnd <= 0:
+            return
+        try:
+            ok = bool(self._focus_binding_host._set_manual_focus_binding_from_hwnd(hwnd, persist=True))
+        except Exception:
+            ok = False
+        if bool(ok):
+            self._finish_focus_capture(True, "포커싱 대상이 저장되었습니다.")
+        else:
+            self._finish_focus_capture(False, "선택한 창을 포커싱 대상으로 저장하지 못했습니다.")
+
+    def _clear_focus_binding(self):
+        if not self._focus_binding_supported:
+            return
+        try:
+            self._focus_binding_host._clear_manual_focus_binding(persist=True, clear_bound=True)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _apply_title_bar_theme_for_window(window):
+        try:
+            import ctypes
+            hwnd = int(window.winId())
+            value = ctypes.c_int(1)
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                ctypes.c_void_p(hwnd),
+                ctypes.c_uint(20),
+                ctypes.byref(value),
+                ctypes.sizeof(value)
+            )
+        except Exception:
+            pass
+        self._refresh_focus_binding_label()
 
     def open_master(self):
 
@@ -1152,6 +1519,13 @@ class DesktopWidget(QMainWindow):
     LAYER_NORMAL = 1
     LAYER_TOPMOST = 2
     LAYER_SCHEMA_VERSION = 4
+    VIDEO_TRANSITION_SINGLE = 0
+    VIDEO_TRANSITION_DUAL = 1
+    VIDEO_DUAL_FADE_DEFAULT_MS = 90
+    VIDEO_DECODE_ORIGINAL = 0
+    VIDEO_DECODE_AUTO = 1
+    VIDEO_DECODE_1080P = 2
+    VIDEO_DECODE_720P = 3
 
     @classmethod
     def coerce_layer_mode(cls, raw_layer, schema_version=None):
@@ -1191,6 +1565,40 @@ class DesktopWidget(QMainWindow):
             3: int(cls.LAYER_TOPMOST),
         }
         return int(legacy_map.get(int(val), int(cls.LAYER_NORMAL)))
+
+    @classmethod
+    def coerce_video_transition_mode(cls, raw_mode):
+        try:
+            mode = int(raw_mode)
+        except Exception:
+            mode = int(cls.VIDEO_TRANSITION_SINGLE)
+        if mode not in (int(cls.VIDEO_TRANSITION_SINGLE), int(cls.VIDEO_TRANSITION_DUAL)):
+            mode = int(cls.VIDEO_TRANSITION_SINGLE)
+        return int(mode)
+
+    @classmethod
+    def coerce_video_dual_fade_ms(cls, raw_value):
+        try:
+            value = int(raw_value)
+        except Exception:
+            value = int(cls.VIDEO_DUAL_FADE_DEFAULT_MS)
+        return max(0, min(300, int(value)))
+
+    @classmethod
+    def coerce_video_decode_mode(cls, raw_mode):
+        try:
+            mode = int(raw_mode)
+        except Exception:
+            mode = int(cls.VIDEO_DECODE_ORIGINAL)
+        valid = {
+            int(cls.VIDEO_DECODE_ORIGINAL),
+            int(cls.VIDEO_DECODE_AUTO),
+            int(cls.VIDEO_DECODE_1080P),
+            int(cls.VIDEO_DECODE_720P),
+        }
+        if mode not in valid:
+            mode = int(cls.VIDEO_DECODE_ORIGINAL)
+        return int(mode)
 
     def __init__(self, profile_id, name, manager):
         super().__init__()
@@ -1287,6 +1695,7 @@ class DesktopWidget(QMainWindow):
         
         self.video_scene = None
         self.video_item = None
+        self.video_item_dual = None
         self._video_graphics_mode = bool(QGraphicsVideoItem is not None)
         if self._video_graphics_mode:
             self.video_widget = QGraphicsView()
@@ -1302,6 +1711,15 @@ class DesktopWidget(QMainWindow):
             self.video_widget.setScene(self.video_scene)
             self.video_item = QGraphicsVideoItem()
             self.video_scene.addItem(self.video_item)
+            self.video_item_dual = QGraphicsVideoItem()
+            self.video_scene.addItem(self.video_item_dual)
+            try:
+                self.video_item.setOpacity(1.0)
+                self.video_item.setZValue(2.0)
+                self.video_item_dual.setOpacity(0.0)
+                self.video_item_dual.setZValue(1.0)
+            except Exception:
+                pass
             try:
                 vp = self.video_widget.viewport()
                 if isinstance(vp, QWidget):
@@ -1338,10 +1756,92 @@ class DesktopWidget(QMainWindow):
             self.media_player.setVideoOutput(self.video_item)
         else:
             self.media_player.setVideoOutput(self.video_widget)
+        self._video_primary_player = self.media_player
+        self._video_secondary_player = None
+        if self._video_graphics_mode and self.video_item_dual is not None:
+            try:
+                self._video_secondary_player = QMediaPlayer()
+                self._video_secondary_player.setAudioOutput(None)
+                self._video_secondary_player.setVideoOutput(self.video_item_dual)
+            except Exception:
+                self._video_secondary_player = None
         self._last_unmuted_volume = 1.0
         self._audio_output_attached = True
-        self.media_player.mediaStatusChanged.connect(self.check_video_status)
-        self.media_player.errorOccurred.connect(self._on_video_error)
+        self.media_player.mediaStatusChanged.connect(
+            lambda status, p=self._video_primary_player: self.check_video_status(status, p)
+        )
+        self.media_player.errorOccurred.connect(
+            lambda error, text, p=self._video_primary_player: self._on_video_error(error, text, p)
+        )
+        self.media_player.positionChanged.connect(
+            lambda pos, p=self._video_primary_player: self._on_video_position_changed(pos, p)
+        )
+        if self._video_secondary_player is not None:
+            self._video_secondary_player.mediaStatusChanged.connect(
+                lambda status, p=self._video_secondary_player: self.check_video_status(status, p)
+            )
+            self._video_secondary_player.errorOccurred.connect(
+                lambda error, text, p=self._video_secondary_player: self._on_video_error(error, text, p)
+            )
+            self._video_secondary_player.positionChanged.connect(
+                lambda pos, p=self._video_secondary_player: self._on_video_position_changed(pos, p)
+            )
+        self._video_primary_sink = None
+        self._video_secondary_sink = None
+        if self._video_graphics_mode:
+            try:
+                self._video_primary_sink = self.video_item.videoSink() if self.video_item is not None else None
+            except Exception:
+                self._video_primary_sink = None
+            try:
+                self._video_secondary_sink = self.video_item_dual.videoSink() if self.video_item_dual is not None else None
+            except Exception:
+                self._video_secondary_sink = None
+            if self._video_primary_sink is not None:
+                try:
+                    self._video_primary_sink.videoFrameChanged.connect(
+                        lambda frame, slot=0: self._on_video_frame_changed(frame, slot)
+                    )
+                except Exception:
+                    pass
+            if self._video_secondary_sink is not None:
+                try:
+                    self._video_secondary_sink.videoFrameChanged.connect(
+                        lambda frame, slot=1: self._on_video_frame_changed(frame, slot)
+                    )
+                except Exception:
+                    pass
+        self._video_active_slot = 0
+        self._video_dual_pending_slot = -1
+        self._video_dual_pending_path = ""
+        self._video_dual_pending_ready = False
+        self._video_dual_pending_frame_ready = False
+        self._video_dual_pending_frozen = False
+        self._video_dual_waiting_for_swap = False
+        self._video_dual_preload_triggered_for_path = ""
+        self._video_dual_pending_seq = 0
+        self._video_dual_pending_started_mono = 0.0
+        self._video_transition_seq = 0
+        self._video_debug_enabled = _as_bool(os.environ.get("MYWIDGET_DEBUG_VIDEO", "0"), False)
+        self._video_swap_fade_duration_ms = int(self.VIDEO_DUAL_FADE_DEFAULT_MS)
+        self._video_crossfade_group = None
+        self._video_proxy_source_height_cache = {}
+        self._video_proxy_failed_keys = set()
+        self._video_proxy_ffmpeg_path = None
+        self._video_proxy_ffprobe_path = None
+        self._video_proxy_dir = self._resolve_video_proxy_dir()
+        self._video_proxy_build_queue = deque()
+        self._video_proxy_building_keys = set()
+        self._video_proxy_build_lock = threading.Lock()
+        self._video_proxy_build_worker_running = False
+        self._video_dual_preload_timer = QTimer(self)
+        self._video_dual_preload_timer.setSingleShot(True)
+        self._video_dual_preload_timer.setInterval(2600)
+        self._video_dual_preload_timer.timeout.connect(self._on_video_dual_preload_timeout)
+        self._video_dual_end_wait_timer = QTimer(self)
+        self._video_dual_end_wait_timer.setSingleShot(True)
+        self._video_dual_end_wait_timer.setInterval(700)
+        self._video_dual_end_wait_timer.timeout.connect(self._on_video_dual_end_wait_timeout)
 
         self.timer = QTimer(self); self.timer.timeout.connect(self.next_media)
         self.movie = None; self.playlist = []; self.current_idx = -1; self.start_pos = None
@@ -1354,6 +1854,8 @@ class DesktopWidget(QMainWindow):
         self._media_resetting = False
         self.gpu_guard_enabled = False
         self.media_fit_mode = 0  # 0: 원본 유지(전체 표시), 1: 위젯 채우기(중앙 크롭)
+        self.video_transition_mode = int(self.VIDEO_TRANSITION_SINGLE)
+        self.video_decode_mode = int(self.VIDEO_DECODE_ORIGINAL)
         self._performance_paused = False
         self._perf_paused_video = False
         self._perf_paused_gif = False
@@ -1386,6 +1888,17 @@ class DesktopWidget(QMainWindow):
         self.folder_refresh_timer.setSingleShot(True)
         self.folder_refresh_timer.setInterval(250)
         self.folder_refresh_timer.timeout.connect(self._refresh_playlist_from_folder_change)
+        self._exec_bound_hwnd = 0
+        self._exec_bound_pid = 0
+        self._exec_launch_learning = None
+        self._exec_manual_focus_enabled = False
+        self._exec_manual_focus_proc_path = ""
+        self._exec_manual_focus_proc_name = ""
+        self._exec_manual_focus_title = ""
+        self._exec_manual_focus_class = ""
+        self._exec_launch_learn_timer = QTimer(self)
+        self._exec_launch_learn_timer.setInterval(700)
+        self._exec_launch_learn_timer.timeout.connect(self._on_exec_launch_learn_tick)
 
         self._initial_media_pending = False
         self._initial_media_prepared = False
@@ -3495,11 +4008,902 @@ class DesktopWidget(QMainWindow):
             print(f"[drop-folder] profile={self.profile_id} folder={path}")
             return True
         if os.path.isfile(path):
+            if self._normalize_exec_path(path) != self._normalize_exec_path(getattr(self, "exec_path", "")):
+                self._clear_bound_exec_window()
+                self._clear_manual_focus_binding(persist=False, clear_bound=False)
             self.exec_path = path
             self.save_all_settings()
             print(f"[drop-exec] profile={self.profile_id} exec={path}")
             return True
         return False
+
+    @staticmethod
+    def _normalize_exec_path(path):
+        raw = str(path or "").strip()
+        if not raw:
+            return ""
+        try:
+            return os.path.normcase(os.path.normpath(os.path.abspath(raw)))
+        except Exception:
+            return os.path.normcase(raw)
+
+    @staticmethod
+    def _resolve_exec_launch_target(path):
+        raw = str(path or "").strip()
+        if not raw:
+            return ""
+        if not raw.lower().endswith(".lnk"):
+            return raw
+        if win32com is None:
+            return raw
+        try:
+            shell = win32com.Dispatch("WScript.Shell")
+            shortcut = shell.CreateShortCut(raw)
+            target = str(getattr(shortcut, "Targetpath", "") or "").strip()
+            if target:
+                return target
+        except Exception:
+            pass
+        return raw
+
+    @staticmethod
+    def _window_thread_and_pid(hwnd):
+        try:
+            user32 = ctypes.windll.user32
+            pid = wintypes.DWORD(0)
+            tid = int(user32.GetWindowThreadProcessId(int(hwnd), ctypes.byref(pid)))
+            return int(tid), int(pid.value)
+        except Exception:
+            return 0, 0
+
+    @staticmethod
+    def _query_process_image_path(pid):
+        try:
+            pid_int = int(pid)
+        except Exception:
+            return ""
+        if pid_int <= 0:
+            return ""
+
+        process_query_limited_information = 0x1000
+        kernel32 = ctypes.windll.kernel32
+        try:
+            handle = int(kernel32.OpenProcess(int(process_query_limited_information), False, int(pid_int)) or 0)
+        except Exception:
+            handle = 0
+        if not handle:
+            return ""
+
+        try:
+            query_full = getattr(kernel32, "QueryFullProcessImageNameW", None)
+            if query_full is None:
+                return ""
+            try:
+                query_full.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
+                query_full.restype = wintypes.BOOL
+            except Exception:
+                pass
+            buf_size = wintypes.DWORD(32768)
+            buf = ctypes.create_unicode_buffer(int(buf_size.value))
+            ok = bool(query_full(wintypes.HANDLE(int(handle)), 0, buf, ctypes.byref(buf_size)))
+            if ok:
+                return str(buf.value or "")
+        except Exception:
+            return ""
+        finally:
+            try:
+                kernel32.CloseHandle(wintypes.HANDLE(int(handle)))
+            except Exception:
+                pass
+        return ""
+
+    @staticmethod
+    def _is_focusable_top_window(hwnd):
+        try:
+            hwnd_int = int(hwnd or 0)
+            if hwnd_int <= 0:
+                return False
+            if not win32gui.IsWindow(hwnd_int):
+                return False
+            if not win32gui.IsWindowVisible(hwnd_int):
+                return False
+            if int(win32gui.GetParent(hwnd_int) or 0) != 0:
+                return False
+            owner_hwnd = int(win32gui.GetWindow(hwnd_int, win32con.GW_OWNER) or 0)
+            ex_style = int(win32gui.GetWindowLong(hwnd_int, win32con.GWL_EXSTYLE) or 0)
+            is_appwindow = bool(ex_style & int(win32con.WS_EX_APPWINDOW))
+            if owner_hwnd != 0 and not is_appwindow:
+                return False
+            if (ex_style & int(win32con.WS_EX_TOOLWINDOW)) and not is_appwindow:
+                return False
+            return True
+        except Exception:
+            return False
+
+    def _enumerate_focusable_windows(self):
+        windows = []
+
+        def _enum_window(hwnd, _lparam):
+            try:
+                if self._is_focusable_top_window(hwnd):
+                    windows.append(int(hwnd))
+            except Exception:
+                pass
+            return True
+
+        try:
+            win32gui.EnumWindows(_enum_window, None)
+        except Exception:
+            pass
+        return windows
+
+    @staticmethod
+    def _snapshot_process_ids():
+        pids = set()
+        try:
+            kernel32 = ctypes.windll.kernel32
+        except Exception:
+            return pids
+
+        th32cs_snprocess = 0x00000002
+        max_path = 260
+        invalid_handle_value = -1
+
+        class PROCESSENTRY32W(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", wintypes.DWORD),
+                ("cntUsage", wintypes.DWORD),
+                ("th32ProcessID", wintypes.DWORD),
+                ("th32DefaultHeapID", ctypes.c_size_t),
+                ("th32ModuleID", wintypes.DWORD),
+                ("cntThreads", wintypes.DWORD),
+                ("th32ParentProcessID", wintypes.DWORD),
+                ("pcPriClassBase", ctypes.c_long),
+                ("dwFlags", wintypes.DWORD),
+                ("szExeFile", ctypes.c_wchar * max_path),
+            ]
+
+        try:
+            kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+            kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+            kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+            kernel32.Process32FirstW.restype = wintypes.BOOL
+            kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+            kernel32.Process32NextW.restype = wintypes.BOOL
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+            kernel32.CloseHandle.restype = wintypes.BOOL
+        except Exception:
+            pass
+
+        snap = None
+        try:
+            snap = kernel32.CreateToolhelp32Snapshot(int(th32cs_snprocess), 0)
+            if snap is None or int(snap) == int(invalid_handle_value):
+                return pids
+            entry = PROCESSENTRY32W()
+            entry.dwSize = int(ctypes.sizeof(PROCESSENTRY32W))
+            ok = bool(kernel32.Process32FirstW(snap, ctypes.byref(entry)))
+            while ok:
+                try:
+                    pid = int(entry.th32ProcessID)
+                    if pid > 0:
+                        pids.add(int(pid))
+                except Exception:
+                    pass
+                ok = bool(kernel32.Process32NextW(snap, ctypes.byref(entry)))
+        except Exception:
+            pass
+        finally:
+            if snap not in (None, 0, int(invalid_handle_value)):
+                try:
+                    kernel32.CloseHandle(wintypes.HANDLE(int(snap)))
+                except Exception:
+                    pass
+        return pids
+
+    @staticmethod
+    def _snapshot_process_name_map():
+        name_map = {}
+        try:
+            kernel32 = ctypes.windll.kernel32
+        except Exception:
+            return name_map
+
+        th32cs_snprocess = 0x00000002
+        max_path = 260
+        invalid_handle_value = -1
+
+        class PROCESSENTRY32W(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", wintypes.DWORD),
+                ("cntUsage", wintypes.DWORD),
+                ("th32ProcessID", wintypes.DWORD),
+                ("th32DefaultHeapID", ctypes.c_size_t),
+                ("th32ModuleID", wintypes.DWORD),
+                ("cntThreads", wintypes.DWORD),
+                ("th32ParentProcessID", wintypes.DWORD),
+                ("pcPriClassBase", ctypes.c_long),
+                ("dwFlags", wintypes.DWORD),
+                ("szExeFile", ctypes.c_wchar * max_path),
+            ]
+
+        try:
+            kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+            kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+            kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+            kernel32.Process32FirstW.restype = wintypes.BOOL
+            kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+            kernel32.Process32NextW.restype = wintypes.BOOL
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+            kernel32.CloseHandle.restype = wintypes.BOOL
+        except Exception:
+            pass
+
+        snap = None
+        try:
+            snap = kernel32.CreateToolhelp32Snapshot(int(th32cs_snprocess), 0)
+            if snap is None or int(snap) == int(invalid_handle_value):
+                return name_map
+            entry = PROCESSENTRY32W()
+            entry.dwSize = int(ctypes.sizeof(PROCESSENTRY32W))
+            ok = bool(kernel32.Process32FirstW(snap, ctypes.byref(entry)))
+            while ok:
+                try:
+                    pid = int(entry.th32ProcessID)
+                    name = str(entry.szExeFile or "").strip().lower()
+                    if pid > 0 and name:
+                        name_map[int(pid)] = str(name)
+                except Exception:
+                    pass
+                ok = bool(kernel32.Process32NextW(snap, ctypes.byref(entry)))
+        except Exception:
+            pass
+        finally:
+            if snap not in (None, 0, int(invalid_handle_value)):
+                try:
+                    kernel32.CloseHandle(wintypes.HANDLE(int(snap)))
+                except Exception:
+                    pass
+        return name_map
+
+    @staticmethod
+    def _format_exec_manual_focus_summary(enabled, proc_path="", proc_name="", title_hint="", class_name=""):
+        if not bool(enabled):
+            return "자동 (실행파일 기준)"
+        target = ""
+        path_norm = str(proc_path or "").strip()
+        if path_norm:
+            target = str(os.path.basename(path_norm) or "").strip()
+        if not target:
+            target = str(proc_name or "").strip()
+        if not target:
+            target = "미지정"
+        details = []
+        class_txt = str(class_name or "").strip()
+        if class_txt:
+            details.append(class_txt)
+        title_txt = str(title_hint or "").strip()
+        if title_txt:
+            if len(title_txt) > 34:
+                title_txt = f"{title_txt[:31]}..."
+            details.append(title_txt)
+        if details:
+            return f"수동: {target} ({' / '.join(details)})"
+        return f"수동: {target}"
+
+    def get_exec_manual_focus_summary(self):
+        return self._format_exec_manual_focus_summary(
+            bool(getattr(self, "_exec_manual_focus_enabled", False)),
+            getattr(self, "_exec_manual_focus_proc_path", ""),
+            getattr(self, "_exec_manual_focus_proc_name", ""),
+            getattr(self, "_exec_manual_focus_title", ""),
+            getattr(self, "_exec_manual_focus_class", ""),
+        )
+
+    @staticmethod
+    def _normalize_window_text_for_match(text):
+        return " ".join(str(text or "").strip().lower().split())
+
+    def _build_exec_manual_focus_signature_from_hwnd(self, hwnd):
+        hwnd_int = int(hwnd or 0)
+        if hwnd_int <= 0:
+            return {}
+        if not self._is_focusable_top_window(hwnd_int):
+            return {}
+        _tid, pid = self._window_thread_and_pid(hwnd_int)
+        if pid <= 0 or int(pid) == int(os.getpid()):
+            return {}
+
+        proc_path = self._normalize_exec_path(self._query_process_image_path(pid))
+        proc_name = str(os.path.basename(proc_path) or "").strip().lower()
+        if not proc_name:
+            try:
+                proc_name = str(self._snapshot_process_name_map().get(int(pid), "") or "").strip().lower()
+            except Exception:
+                proc_name = ""
+
+        try:
+            class_name = str(win32gui.GetClassName(hwnd_int) or "").strip()
+        except Exception:
+            class_name = ""
+        try:
+            title_hint = str(win32gui.GetWindowText(hwnd_int) or "").strip()
+        except Exception:
+            title_hint = ""
+
+        if not proc_path and not proc_name and not class_name:
+            return {}
+
+        return {
+            "enabled": True,
+            "proc_path": str(proc_path or ""),
+            "proc_name": str(proc_name or ""),
+            "title_hint": str(title_hint or ""),
+            "class_name": str(class_name or ""),
+        }
+
+    def _apply_exec_manual_focus_signature(self, sig, persist=False):
+        data = sig if isinstance(sig, dict) else {}
+        proc_path = self._normalize_exec_path(data.get("proc_path", ""))
+        proc_name = str(data.get("proc_name", "") or "").strip().lower()
+        title_hint = str(data.get("title_hint", "") or "").strip()
+        class_name = str(data.get("class_name", "") or "").strip()
+        enabled = bool(data.get("enabled", False))
+        if not (proc_path or proc_name or (class_name and title_hint)):
+            enabled = False
+            proc_path = ""
+            proc_name = ""
+            title_hint = ""
+            class_name = ""
+        self._exec_manual_focus_enabled = bool(enabled)
+        self._exec_manual_focus_proc_path = str(proc_path or "")
+        self._exec_manual_focus_proc_name = str(proc_name or "")
+        self._exec_manual_focus_title = str(title_hint or "")
+        self._exec_manual_focus_class = str(class_name or "")
+        if bool(persist):
+            self.save_all_settings()
+        return bool(self._exec_manual_focus_enabled)
+
+    def _set_manual_focus_binding_from_hwnd(self, hwnd, persist=True):
+        sig = self._build_exec_manual_focus_signature_from_hwnd(hwnd)
+        if not sig:
+            return False
+        if not self._apply_exec_manual_focus_signature(sig, persist=False):
+            return False
+        self._bind_exec_window(int(hwnd))
+        if bool(persist):
+            self.save_all_settings()
+        return True
+
+    def _clear_manual_focus_binding(self, persist=True, clear_bound=False):
+        if bool(clear_bound):
+            self._clear_bound_exec_window()
+        self._exec_manual_focus_enabled = False
+        self._exec_manual_focus_proc_path = ""
+        self._exec_manual_focus_proc_name = ""
+        self._exec_manual_focus_title = ""
+        self._exec_manual_focus_class = ""
+        if bool(persist):
+            self.save_all_settings()
+
+    def _capture_bindable_foreground_hwnd(self):
+        try:
+            hwnd = int(win32gui.GetForegroundWindow() or 0)
+        except Exception:
+            return 0
+        if hwnd <= 0:
+            return 0
+        if not self._is_focusable_top_window(hwnd):
+            return 0
+        _tid, pid = self._window_thread_and_pid(hwnd)
+        if pid <= 0 or int(pid) == int(os.getpid()):
+            return 0
+        return int(hwnd)
+
+    def _find_running_window_for_manual_binding(self, only_unclaimed=False):
+        if not bool(getattr(self, "_exec_manual_focus_enabled", False)):
+            return 0
+
+        target_path = self._normalize_exec_path(getattr(self, "_exec_manual_focus_proc_path", ""))
+        target_name = str(getattr(self, "_exec_manual_focus_proc_name", "") or "").strip().lower()
+        target_title = self._normalize_window_text_for_match(getattr(self, "_exec_manual_focus_title", ""))
+        target_class = str(getattr(self, "_exec_manual_focus_class", "") or "").strip().lower()
+        if not (target_path or target_name or (target_class and target_title)):
+            return 0
+
+        current_pid = int(os.getpid())
+        pid_name_map = self._snapshot_process_name_map()
+        try:
+            foreground_hwnd = int(win32gui.GetForegroundWindow() or 0)
+        except Exception:
+            foreground_hwnd = 0
+
+        candidates = []
+        for hwnd_int in self._enumerate_focusable_windows():
+            try:
+                _tid, pid = self._window_thread_and_pid(hwnd_int)
+                if pid <= 0 or pid == current_pid:
+                    continue
+                owner = self._exec_window_owner_for(hwnd_int)
+                if bool(only_unclaimed) and owner and owner != str(self.profile_id):
+                    continue
+
+                proc_path = self._query_process_image_path(pid)
+                proc_norm = self._normalize_exec_path(proc_path)
+                proc_name = str(os.path.basename(proc_norm) or "").strip().lower()
+                if not proc_name:
+                    proc_name = str(pid_name_map.get(int(pid), "") or "").strip().lower()
+
+                try:
+                    class_name = str(win32gui.GetClassName(hwnd_int) or "").strip().lower()
+                except Exception:
+                    class_name = ""
+                try:
+                    title = self._normalize_window_text_for_match(win32gui.GetWindowText(hwnd_int))
+                except Exception:
+                    title = ""
+
+                path_match = bool(target_path and proc_norm and proc_norm == target_path)
+                name_match = bool(target_name and proc_name == target_name)
+                class_match = bool(target_class and class_name == target_class)
+                title_match = bool(target_title and title and (target_title in title or title in target_title))
+                primary_match = bool(path_match or name_match)
+                secondary_match = bool(class_match and (title_match or not target_title))
+                if not primary_match and not secondary_match:
+                    continue
+
+                ex_style = int(win32gui.GetWindowLong(hwnd_int, win32con.GWL_EXSTYLE) or 0)
+                score = 0
+                if owner == str(self.profile_id):
+                    score += 220
+                elif not owner:
+                    score += 110
+                if path_match:
+                    score += 260
+                elif name_match:
+                    score += 170
+                if class_match:
+                    score += 34
+                if title_match:
+                    score += 24
+                if hwnd_int == foreground_hwnd:
+                    score += 100
+                if not bool(win32gui.IsIconic(hwnd_int)):
+                    score += 20
+                if ex_style & int(win32con.WS_EX_APPWINDOW):
+                    score += 3
+                if str(win32gui.GetWindowText(hwnd_int) or "").strip():
+                    score += 5
+                candidates.append((int(score), int(hwnd_int)))
+            except Exception:
+                continue
+
+        if not candidates:
+            return 0
+        candidates.sort(key=lambda x: (int(x[0]), int(x[1])), reverse=True)
+        return int(candidates[0][1])
+
+    def _exec_window_owner_for(self, hwnd):
+        if not (hasattr(self, "manager") and self.manager and hasattr(self.manager, "get_exec_window_owner")):
+            return ""
+        try:
+            return str(self.manager.get_exec_window_owner(int(hwnd)) or "")
+        except Exception:
+            return ""
+
+    def _claim_exec_window(self, hwnd):
+        if not (hasattr(self, "manager") and self.manager and hasattr(self.manager, "claim_exec_window")):
+            return True
+        try:
+            return bool(self.manager.claim_exec_window(self.profile_id, int(hwnd)))
+        except Exception:
+            return False
+
+    def _release_exec_window_claim(self, hwnd=None):
+        if not (hasattr(self, "manager") and self.manager and hasattr(self.manager, "release_exec_window_claim")):
+            return
+        try:
+            if hwnd is None:
+                self.manager.release_exec_window_claim(profile_id=self.profile_id)
+            else:
+                self.manager.release_exec_window_claim(profile_id=self.profile_id, hwnd=int(hwnd))
+        except Exception:
+            pass
+
+    @staticmethod
+    def _is_launcher_like_process(proc_name):
+        name = str(proc_name or "").strip().lower()
+        if not name:
+            return False
+        hard_block = {
+            "update.exe",
+            "updater.exe",
+            "launcher.exe",
+            "launchpad.exe",
+            "start_protected_game.exe",
+            "steam.exe",
+            "epicgameslauncher.exe",
+            "battle.net.exe",
+            "riotclientservices.exe",
+        }
+        if name in hard_block:
+            return True
+        return ("launcher" in name) or ("updater" in name) or ("update" in name) or ("patcher" in name) or ("bootstrap" in name)
+
+    def _bind_exec_window(self, hwnd):
+        hwnd_int = int(hwnd or 0)
+        if hwnd_int <= 0:
+            return False
+        if not self._is_focusable_top_window(hwnd_int):
+            return False
+        if not self._claim_exec_window(hwnd_int):
+            return False
+        old_hwnd = int(getattr(self, "_exec_bound_hwnd", 0) or 0)
+        if old_hwnd > 0 and old_hwnd != hwnd_int:
+            self._release_exec_window_claim(old_hwnd)
+        self._exec_bound_hwnd = int(hwnd_int)
+        _tid, pid = self._window_thread_and_pid(hwnd_int)
+        self._exec_bound_pid = int(pid)
+        return True
+
+    def _clear_bound_exec_window(self):
+        self._stop_exec_launch_learning()
+        old_hwnd = int(getattr(self, "_exec_bound_hwnd", 0) or 0)
+        self._exec_bound_hwnd = 0
+        self._exec_bound_pid = 0
+        if old_hwnd > 0:
+            self._release_exec_window_claim(old_hwnd)
+
+    def _focus_bound_exec_window(self):
+        hwnd = int(getattr(self, "_exec_bound_hwnd", 0) or 0)
+        if hwnd <= 0:
+            return False
+        if not self._is_focusable_top_window(hwnd):
+            self._clear_bound_exec_window()
+            return False
+        owner = self._exec_window_owner_for(hwnd)
+        if owner and owner != str(self.profile_id):
+            self._clear_bound_exec_window()
+            return False
+        if not self._bind_exec_window(hwnd):
+            return False
+        return bool(self._focus_window_hwnd(hwnd))
+
+    def _find_running_window_for_exec(self, exec_path, only_unclaimed=False):
+        launch_target = self._resolve_exec_launch_target(exec_path)
+        target_norm = self._normalize_exec_path(launch_target)
+        target_name = str(os.path.basename(target_norm or launch_target) or "").strip().lower()
+        if not target_norm and not target_name:
+            return 0
+
+        current_pid = int(os.getpid())
+        pid_name_map = self._snapshot_process_name_map()
+        try:
+            foreground_hwnd = int(win32gui.GetForegroundWindow() or 0)
+        except Exception:
+            foreground_hwnd = 0
+
+        candidates = []
+
+        for hwnd_int in self._enumerate_focusable_windows():
+            try:
+                _tid, pid = self._window_thread_and_pid(hwnd_int)
+                if pid <= 0 or pid == current_pid:
+                    continue
+                owner = self._exec_window_owner_for(hwnd_int)
+                if bool(only_unclaimed) and owner and owner != str(self.profile_id):
+                    continue
+                proc_path = self._query_process_image_path(pid)
+                proc_norm = self._normalize_exec_path(proc_path)
+                proc_name = str(os.path.basename(proc_norm) or "").strip().lower()
+                if not proc_name:
+                    proc_name = str(pid_name_map.get(int(pid), "") or "").strip().lower()
+                matched = bool(target_norm and proc_norm and proc_norm == target_norm)
+                if not matched and target_name:
+                    matched = str(proc_name) == target_name
+                if not matched:
+                    continue
+
+                ex_style = int(win32gui.GetWindowLong(hwnd_int, win32con.GWL_EXSTYLE) or 0)
+                score = 0
+                if owner == str(self.profile_id):
+                    score += 220
+                elif not owner:
+                    score += 110
+                if hwnd_int == foreground_hwnd:
+                    score += 100
+                if not bool(win32gui.IsIconic(hwnd_int)):
+                    score += 20
+                if str(win32gui.GetWindowText(hwnd_int) or "").strip():
+                    score += 5
+                if ex_style & int(win32con.WS_EX_APPWINDOW):
+                    score += 2
+                candidates.append((int(score), int(hwnd_int)))
+            except Exception:
+                continue
+
+        if not candidates:
+            return 0
+        candidates.sort(key=lambda x: (int(x[0]), int(x[1])), reverse=True)
+        return int(candidates[0][1])
+
+    def _collect_exec_learning_candidates(self, exec_path, baseline_pids, baseline_hwnds):
+        launch_target = self._resolve_exec_launch_target(exec_path)
+        target_norm = self._normalize_exec_path(launch_target)
+        target_name = str(os.path.basename(target_norm or launch_target) or "").strip().lower()
+        current_pid = int(os.getpid())
+        pid_name_map = self._snapshot_process_name_map()
+        try:
+            foreground_hwnd = int(win32gui.GetForegroundWindow() or 0)
+        except Exception:
+            foreground_hwnd = 0
+
+        current_pids = self._snapshot_process_ids()
+        new_pids = set([int(pid) for pid in current_pids if int(pid) not in set(baseline_pids or set())])
+        base_hwnds = set([int(h) for h in (baseline_hwnds or set())])
+        out = []
+
+        for hwnd_int in self._enumerate_focusable_windows():
+            try:
+                _tid, pid = self._window_thread_and_pid(hwnd_int)
+                if pid <= 0 or pid == current_pid:
+                    continue
+                owner = self._exec_window_owner_for(hwnd_int)
+                if owner and owner != str(self.profile_id):
+                    continue
+
+                proc_path = self._query_process_image_path(pid)
+                proc_norm = self._normalize_exec_path(proc_path)
+                proc_name = str(os.path.basename(proc_norm) or "").strip().lower()
+                if not proc_name:
+                    proc_name = str(pid_name_map.get(int(pid), "") or "").strip().lower()
+                is_match_path = bool(target_norm and proc_norm and proc_norm == target_norm)
+                is_match_name = bool(target_name and proc_name == target_name)
+                is_new_pid = int(pid) in new_pids
+                is_new_hwnd = int(hwnd_int) not in base_hwnds
+
+                if not (is_match_path or is_match_name or is_new_pid or is_new_hwnd):
+                    continue
+
+                launcher_like = self._is_launcher_like_process(proc_name)
+                ex_style = int(win32gui.GetWindowLong(hwnd_int, win32con.GWL_EXSTYLE) or 0)
+                score = 0
+                if is_match_path:
+                    score += 220
+                elif is_match_name:
+                    score += 160
+                if is_new_pid:
+                    score += 120
+                if is_new_hwnd:
+                    score += 45
+                if hwnd_int == foreground_hwnd:
+                    score += 90
+                if not bool(win32gui.IsIconic(hwnd_int)):
+                    score += 20
+                if str(win32gui.GetWindowText(hwnd_int) or "").strip():
+                    score += 18
+                if ex_style & int(win32con.WS_EX_APPWINDOW):
+                    score += 2
+                if launcher_like:
+                    score -= 100
+                out.append({
+                    "hwnd": int(hwnd_int),
+                    "score": int(score),
+                    "launcher_like": bool(launcher_like),
+                })
+            except Exception:
+                continue
+
+        out.sort(key=lambda item: (int(item.get("score", 0)), int(item.get("hwnd", 0))), reverse=True)
+        return out
+
+    def _start_exec_launch_learning(self, exec_path, baseline_pids, baseline_hwnds):
+        self._stop_exec_launch_learning()
+        self._exec_launch_learning = {
+            "exec_path": str(exec_path or ""),
+            "baseline_pids": set([int(pid) for pid in (baseline_pids or set())]),
+            "baseline_hwnds": set([int(hwnd) for hwnd in (baseline_hwnds or set())]),
+            "deadline": float(time.monotonic()) + 26.0,
+            "best_hwnd": 0,
+            "best_score": -10**9,
+            "best_launcher_like": True,
+        }
+        if hasattr(self, "_exec_launch_learn_timer"):
+            self._exec_launch_learn_timer.start()
+        QTimer.singleShot(180, self._on_exec_launch_learn_tick)
+
+    def _stop_exec_launch_learning(self):
+        if hasattr(self, "_exec_launch_learn_timer") and self._exec_launch_learn_timer.isActive():
+            self._exec_launch_learn_timer.stop()
+        self._exec_launch_learning = None
+
+    def _on_exec_launch_learn_tick(self):
+        state = getattr(self, "_exec_launch_learning", None)
+        if not isinstance(state, dict):
+            self._stop_exec_launch_learning()
+            return
+
+        exec_path = str(state.get("exec_path", "") or "")
+        if not exec_path:
+            self._stop_exec_launch_learning()
+            return
+
+        candidates = self._collect_exec_learning_candidates(
+            exec_path,
+            baseline_pids=state.get("baseline_pids", set()),
+            baseline_hwnds=state.get("baseline_hwnds", set()),
+        )
+        if candidates:
+            best = candidates[0]
+            best_hwnd = int(best.get("hwnd", 0) or 0)
+            best_score = int(best.get("score", -10**9) or -10**9)
+            best_launcher_like = bool(best.get("launcher_like", True))
+            if best_hwnd > 0:
+                prev_score = int(state.get("best_score", -10**9))
+                prev_launcher = bool(state.get("best_launcher_like", True))
+                replace = False
+                if best_launcher_like != prev_launcher:
+                    replace = (not best_launcher_like)  # Non-launcher outranks launcher.
+                elif best_score > prev_score:
+                    replace = True
+                if replace or int(state.get("best_hwnd", 0) or 0) <= 0:
+                    state["best_hwnd"] = int(best_hwnd)
+                    state["best_score"] = int(best_score)
+                    state["best_launcher_like"] = bool(best_launcher_like)
+                if not best_launcher_like and best_score >= 120:
+                    if self._bind_exec_window(best_hwnd):
+                        self._stop_exec_launch_learning()
+                        return
+
+        if float(time.monotonic()) >= float(state.get("deadline", 0.0)):
+            fallback_hwnd = int(state.get("best_hwnd", 0) or 0)
+            if fallback_hwnd > 0:
+                self._bind_exec_window(fallback_hwnd)
+            self._stop_exec_launch_learning()
+
+
+    def _focus_window_hwnd(self, hwnd):
+        hwnd_int = int(hwnd or 0)
+        if hwnd_int <= 0:
+            return False
+        try:
+            if not win32gui.IsWindow(hwnd_int):
+                return False
+        except Exception:
+            return False
+
+        try:
+            if bool(win32gui.IsIconic(hwnd_int)):
+                win32gui.ShowWindow(hwnd_int, win32con.SW_RESTORE)
+            else:
+                win32gui.ShowWindow(hwnd_int, win32con.SW_SHOW)
+        except Exception:
+            pass
+        # Taskbar-like raise: temporary topmost toggle to pull the target above overlays/fullscreen surfaces.
+        try:
+            z_flags = int(win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_SHOWWINDOW)
+            win32gui.SetWindowPos(hwnd_int, int(win32con.HWND_TOPMOST), 0, 0, 0, 0, z_flags)
+            win32gui.SetWindowPos(hwnd_int, int(win32con.HWND_NOTOPMOST), 0, 0, 0, 0, z_flags)
+        except Exception:
+            pass
+        try:
+            win32gui.BringWindowToTop(hwnd_int)
+        except Exception:
+            pass
+        try:
+            win32gui.SetForegroundWindow(hwnd_int)
+            try:
+                if int(win32gui.GetForegroundWindow() or 0) == int(hwnd_int):
+                    return True
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+        # Foreground lock fallback.
+        try:
+            user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
+            current_tid = int(kernel32.GetCurrentThreadId())
+            fg_hwnd = int(user32.GetForegroundWindow() or 0)
+            fg_tid, _ = self._window_thread_and_pid(fg_hwnd)
+            target_tid, _ = self._window_thread_and_pid(hwnd_int)
+            attached_pairs = []
+            if fg_tid and fg_tid != current_tid:
+                if bool(user32.AttachThreadInput(int(fg_tid), int(current_tid), True)):
+                    attached_pairs.append((int(fg_tid), int(current_tid)))
+            if target_tid and target_tid != current_tid:
+                if bool(user32.AttachThreadInput(int(target_tid), int(current_tid), True)):
+                    attached_pairs.append((int(target_tid), int(current_tid)))
+            try:
+                try:
+                    user32.ShowWindow(int(hwnd_int), int(win32con.SW_RESTORE))
+                except Exception:
+                    pass
+                user32.BringWindowToTop(int(hwnd_int))
+                user32.SetForegroundWindow(int(hwnd_int))
+                user32.SetFocus(int(hwnd_int))
+                user32.SetActiveWindow(int(hwnd_int))
+                try:
+                    switch_to_this = getattr(user32, "SwitchToThisWindow", None)
+                    if switch_to_this is not None:
+                        switch_to_this.argtypes = [wintypes.HWND, wintypes.BOOL]
+                        switch_to_this.restype = None
+                        switch_to_this(wintypes.HWND(int(hwnd_int)), True)
+                except Exception:
+                    pass
+            finally:
+                for a_tid, b_tid in reversed(attached_pairs):
+                    try:
+                        user32.AttachThreadInput(int(a_tid), int(b_tid), False)
+                    except Exception:
+                        pass
+            try:
+                # Alt key trick can relax foreground restrictions in some game/launcher combinations.
+                user32.keybd_event(int(win32con.VK_MENU), 0, 0, 0)
+                user32.keybd_event(int(win32con.VK_MENU), 0, int(win32con.KEYEVENTF_KEYUP), 0)
+                user32.SetForegroundWindow(int(hwnd_int))
+            except Exception:
+                pass
+            try:
+                z_flags = int(win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_SHOWWINDOW)
+                win32gui.SetWindowPos(hwnd_int, int(win32con.HWND_TOPMOST), 0, 0, 0, 0, z_flags)
+                win32gui.SetWindowPos(hwnd_int, int(win32con.HWND_NOTOPMOST), 0, 0, 0, 0, z_flags)
+            except Exception:
+                pass
+            try:
+                return int(win32gui.GetForegroundWindow() or 0) == int(hwnd_int)
+            except Exception:
+                try:
+                    return bool(win32gui.IsWindowVisible(hwnd_int)) and not bool(win32gui.IsIconic(hwnd_int))
+                except Exception:
+                    return True
+        except Exception:
+            return False
+
+    def _launch_or_focus_exec(self, exec_path):
+        path = str(exec_path or "").strip()
+        if self._focus_bound_exec_window():
+            return True
+
+        hwnd = self._find_running_window_for_manual_binding(only_unclaimed=True)
+        if int(hwnd) > 0 and self._bind_exec_window(hwnd):
+            self._stop_exec_launch_learning()
+            return bool(self._focus_window_hwnd(hwnd))
+
+        hwnd = self._find_running_window_for_manual_binding(only_unclaimed=False)
+        if int(hwnd) > 0:
+            owner = self._exec_window_owner_for(hwnd)
+            if owner in ("", str(self.profile_id)):
+                if self._bind_exec_window(hwnd):
+                    self._stop_exec_launch_learning()
+                    return bool(self._focus_window_hwnd(hwnd))
+
+        if not path:
+            return False
+
+        hwnd = self._find_running_window_for_exec(path, only_unclaimed=True)
+        if int(hwnd) > 0 and self._bind_exec_window(hwnd):
+            self._stop_exec_launch_learning()
+            return bool(self._focus_window_hwnd(hwnd))
+
+        hwnd = self._find_running_window_for_exec(path, only_unclaimed=False)
+        if int(hwnd) > 0:
+            owner = self._exec_window_owner_for(hwnd)
+            if owner in ("", str(self.profile_id)):
+                if self._bind_exec_window(hwnd):
+                    self._stop_exec_launch_learning()
+                    return bool(self._focus_window_hwnd(hwnd))
+
+        pre_pids = self._snapshot_process_ids()
+        pre_hwnds = set(self._enumerate_focusable_windows())
+        try:
+            os.startfile(path)
+            self._start_exec_launch_learning(path, pre_pids, pre_hwnds)
+            return True
+        except Exception as e:
+            print(f"[exec-open-failed] profile={self.profile_id} path={path} error={e}")
+            return False
 
     def _is_shift_down(self):
         return bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier)
@@ -3550,10 +4954,15 @@ class DesktopWidget(QMainWindow):
 
     def _set_audio_output_attached(self, attach):
         if attach:
-            self.media_player.setAudioOutput(self.audio_output)
             self._audio_output_attached = True
+            # Audio routing refresh should not interrupt an in-flight video crossfade.
+            self._set_video_active_slot(int(getattr(self, "_video_active_slot", 0)), update_visual=False)
         else:
-            self.media_player.setAudioOutput(None)
+            for p in self._video_players():
+                try:
+                    p.setAudioOutput(None)
+                except Exception:
+                    pass
             self._audio_output_attached = False
 
     def _apply_mute_state(self, force_refresh=False):
@@ -4065,6 +5474,31 @@ class DesktopWidget(QMainWindow):
     def load_settings(self):
         self.folder_path = self.settings.value("folder_path", "")
         self.exec_path = self.settings.value("exec_path", "")
+        self._exec_manual_focus_enabled = _as_bool(
+            self.settings.value("exec_manual_focus_enabled", False),
+            False,
+        )
+        self._exec_manual_focus_proc_path = self._normalize_exec_path(
+            self.settings.value("exec_manual_focus_proc_path", "")
+        )
+        self._exec_manual_focus_proc_name = str(
+            self.settings.value("exec_manual_focus_proc_name", "") or ""
+        ).strip().lower()
+        self._exec_manual_focus_title = str(
+            self.settings.value("exec_manual_focus_title", "") or ""
+        ).strip()
+        self._exec_manual_focus_class = str(
+            self.settings.value("exec_manual_focus_class", "") or ""
+        ).strip()
+        if not (
+            self._exec_manual_focus_proc_path
+            or self._exec_manual_focus_proc_name
+            or (
+                self._exec_manual_focus_class
+                and self._exec_manual_focus_title
+            )
+        ):
+            self._exec_manual_focus_enabled = False
         self.interval_ms = int(self.settings.value("interval", 5)) * 1000
         self.is_muted = _as_bool(self.settings.value("is_muted", True), True)
         self.current_opacity_pct = int(self.settings.value("opacity_pct", 100))
@@ -4072,6 +5506,15 @@ class DesktopWidget(QMainWindow):
         self.bg_color_mode = int(self.settings.value("bg_color_mode", 1))
         self.corner_mode = int(self.settings.value("corner_mode", 0))
         self.media_fit_mode = max(0, min(int(self.settings.value("media_fit_mode", 0)), 1))
+        self.video_transition_mode = self.coerce_video_transition_mode(
+            self.settings.value("video_transition_mode", self.VIDEO_TRANSITION_SINGLE)
+        )
+        self.video_decode_mode = self.coerce_video_decode_mode(
+            self.settings.value("video_decode_mode", self.VIDEO_DECODE_ORIGINAL)
+        )
+        self._video_swap_fade_duration_ms = self.coerce_video_dual_fade_ms(
+            self.settings.value("video_dual_fade_ms", self.VIDEO_DUAL_FADE_DEFAULT_MS)
+        )
         if self.settings.contains("layer_mode"):
             layer_schema_ver = int(self.settings.value("layer_schema_version", 0))
             raw_layer_mode = int(self.settings.value("layer_mode", self.LAYER_NORMAL))
@@ -4128,12 +5571,14 @@ class DesktopWidget(QMainWindow):
             if sw > 0 and sh > 0:
                 if widget.isVisible():
                     return QSize(int(sw), int(sh))
-                # Hidden startup state: prefer fallback if widget child is still pre-layout small.
+                # Hidden startup state: trust child size only when it is close to fallback.
                 if fw <= 0 or fh <= 0:
                     return QSize(int(sw), int(sh))
-                min_w = max(24, int(fw * 0.90))
-                min_h = max(24, int(fh * 0.90))
-                if sw >= min_w and sh >= min_h:
+                min_w = max(24, int(round(fw * 0.90)))
+                min_h = max(24, int(round(fh * 0.90)))
+                max_w = max(min_w, int(round(fw * 1.10)))
+                max_h = max(min_h, int(round(fh * 1.10)))
+                if min_w <= sw <= max_w and min_h <= sh <= max_h:
                     return QSize(int(sw), int(sh))
         if fw > 0 and fh > 0:
             return QSize(int(fw), int(fh))
@@ -4155,6 +5600,810 @@ class DesktopWidget(QMainWindow):
         nh = max(1, int(round(float(sh) * float(scale))))
         return QSize(int(nw), int(nh))
 
+    @staticmethod
+    def _debug_media_name(path):
+        try:
+            return str(os.path.basename(str(path or "")) or "")
+        except Exception:
+            return str(path or "")
+
+    def _video_dbg(self, event_name, **fields):
+        if not bool(getattr(self, "_video_debug_enabled", False)):
+            return
+        try:
+            ts = QDateTime.currentDateTime().toString("HH:mm:ss.zzz")
+        except Exception:
+            ts = ""
+        parts = []
+        for key, value in fields.items():
+            if value is None:
+                continue
+            try:
+                txt = str(value)
+            except Exception:
+                continue
+            txt = txt.replace("\r", " ").replace("\n", " ").strip()
+            if not txt:
+                continue
+            parts.append(f"{key}={txt}")
+        suffix = f" {' '.join(parts)}" if parts else ""
+        print(f"[video-dbg] t={ts} profile={self.profile_id} event={event_name}{suffix}")
+
+    @staticmethod
+    def _resolve_video_proxy_dir():
+        base = str(os.environ.get("LOCALAPPDATA", "") or "").strip()
+        if not base:
+            base = os.path.expanduser("~")
+        return os.path.join(base, "MyHomeApp", "video_proxy_cache")
+
+    def _resolve_ffmpeg_path(self):
+        cached = getattr(self, "_video_proxy_ffmpeg_path", None)
+        if cached is not None:
+            return str(cached or "")
+        path = str(shutil.which("ffmpeg") or "")
+        self._video_proxy_ffmpeg_path = path
+        return path
+
+    def _resolve_ffprobe_path(self):
+        cached = getattr(self, "_video_proxy_ffprobe_path", None)
+        if cached is not None:
+            return str(cached or "")
+        path = str(shutil.which("ffprobe") or "")
+        if not path:
+            ffmpeg_path = self._resolve_ffmpeg_path()
+            if ffmpeg_path:
+                candidate = os.path.join(os.path.dirname(ffmpeg_path), "ffprobe.exe")
+                if os.path.exists(candidate):
+                    path = candidate
+        self._video_proxy_ffprobe_path = path
+        return path
+
+    def _video_source_signature(self, path):
+        src = self._normalize_exec_path(path)
+        if not src:
+            return ""
+        try:
+            st = os.stat(path)
+            return f"{src}|{int(st.st_size)}|{int(st.st_mtime_ns)}"
+        except Exception:
+            return src
+
+    def _probe_video_height(self, path):
+        signature = self._video_source_signature(path)
+        if not signature:
+            return 0
+        cache = getattr(self, "_video_proxy_source_height_cache", {})
+        cached = int(cache.get(signature, 0) or 0)
+        if cached > 0:
+            return int(cached)
+        ffprobe = self._resolve_ffprobe_path()
+        if not ffprobe:
+            return 0
+        cmd = [
+            ffprobe,
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=height",
+            "-of",
+            "csv=p=0",
+            str(path),
+        ]
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=3.0,
+                check=False,
+            )
+            if int(proc.returncode) == 0:
+                out = str(proc.stdout or "").strip()
+                h = int(out) if out.isdigit() else 0
+                if h > 0:
+                    cache[signature] = int(h)
+                    self._video_proxy_source_height_cache = cache
+                    return int(h)
+        except Exception:
+            pass
+        return 0
+
+    def _video_decode_target_height_for_current_widget(self):
+        mode = int(getattr(self, "video_decode_mode", self.VIDEO_DECODE_ORIGINAL))
+        if mode == int(self.VIDEO_DECODE_ORIGINAL):
+            return 0
+        if mode == int(self.VIDEO_DECODE_1080P):
+            return 1080
+        if mode == int(self.VIDEO_DECODE_720P):
+            return 720
+        target = self._safe_target_size(getattr(self, "video_widget", None), self.size())
+        h = max(1, int(target.height()))
+        if h <= 540:
+            return 540
+        if h <= 720:
+            return 720
+        return 1080
+
+    def _video_proxy_output_path(self, source_path, target_height):
+        signature = self._video_source_signature(source_path)
+        if not signature:
+            return ""
+        token = hashlib.sha1(f"{signature}|{int(target_height)}".encode("utf-8", "ignore")).hexdigest()[:24]
+        name = f"{token}_{int(target_height)}p.mp4"
+        return os.path.join(str(getattr(self, "_video_proxy_dir", "") or ""), name)
+
+    def _video_proxy_key(self, source_path, target_height):
+        sig = self._video_source_signature(source_path)
+        if not sig:
+            return ""
+        return f"{sig}|{int(target_height)}"
+
+    def _ensure_video_proxy_file(self, source_path, target_height, allow_build=True):
+        out_path = self._video_proxy_output_path(source_path, target_height)
+        if not out_path:
+            return ""
+        try:
+            if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+                return out_path
+        except Exception:
+            pass
+        if not bool(allow_build):
+            return ""
+        key = self._video_proxy_key(source_path, target_height)
+        if not key:
+            return ""
+        failed = getattr(self, "_video_proxy_failed_keys", set())
+        if key in failed:
+            return ""
+        ffmpeg = self._resolve_ffmpeg_path()
+        if not ffmpeg:
+            failed.add(key)
+            self._video_proxy_failed_keys = failed
+            return ""
+        out_dir = os.path.dirname(out_path)
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+        except Exception:
+            failed.add(key)
+            self._video_proxy_failed_keys = failed
+            return ""
+        temp_out = out_path + ".tmp.mp4"
+        try:
+            if os.path.exists(temp_out):
+                os.remove(temp_out)
+        except Exception:
+            pass
+        cmd = [
+            ffmpeg,
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            str(source_path),
+            "-vf",
+            f"scale=-2:{int(target_height)}:flags=lanczos",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-crf",
+            "23",
+            "-threads",
+            "1",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            str(temp_out),
+        ]
+        ok = False
+        try:
+            run_kwargs = {
+                "capture_output": True,
+                "text": True,
+                "timeout": 180.0,
+                "check": False,
+            }
+            if os.name == "nt":
+                run_kwargs["creationflags"] = int(getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0))
+            proc = subprocess.run(cmd, **run_kwargs)
+            ok = int(proc.returncode) == 0
+        except Exception:
+            ok = False
+        if ok:
+            try:
+                if os.path.exists(temp_out) and os.path.getsize(temp_out) > 0:
+                    os.replace(temp_out, out_path)
+                    self._video_dbg(
+                        "proxy_built",
+                        source=self._debug_media_name(source_path),
+                        target=f"{int(target_height)}p",
+                    )
+                    return out_path
+            except Exception:
+                ok = False
+        try:
+            if os.path.exists(temp_out):
+                os.remove(temp_out)
+        except Exception:
+            pass
+        failed.add(key)
+        self._video_proxy_failed_keys = failed
+        self._video_dbg(
+            "proxy_failed",
+            source=self._debug_media_name(source_path),
+            target=f"{int(target_height)}p",
+        )
+        return ""
+
+    def _enqueue_video_proxy_build(self, source_path, target_height):
+        src = str(source_path or "")
+        h = int(target_height or 0)
+        if not src or h <= 0:
+            return False
+        key = self._video_proxy_key(src, h)
+        if not key:
+            return False
+        out_path = self._video_proxy_output_path(src, h)
+        if out_path:
+            try:
+                if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+                    return False
+            except Exception:
+                pass
+        failed = getattr(self, "_video_proxy_failed_keys", set())
+        if key in failed:
+            return False
+        start_worker = False
+        with self._video_proxy_build_lock:
+            if key in self._video_proxy_building_keys:
+                return False
+            self._video_proxy_building_keys.add(key)
+            self._video_proxy_build_queue.append((key, src, h))
+            if not bool(getattr(self, "_video_proxy_build_worker_running", False)):
+                self._video_proxy_build_worker_running = True
+                start_worker = True
+        self._video_dbg(
+            "proxy_queue",
+            source=self._debug_media_name(src),
+            target=f"{int(h)}p",
+        )
+        if start_worker:
+            t = threading.Thread(target=self._video_proxy_build_worker, daemon=True)
+            t.start()
+        return True
+
+    def _video_proxy_build_worker(self):
+        while True:
+            with self._video_proxy_build_lock:
+                if not self._video_proxy_build_queue:
+                    self._video_proxy_build_worker_running = False
+                    return
+                key, src, h = self._video_proxy_build_queue.popleft()
+            try:
+                self._ensure_video_proxy_file(src, h, allow_build=True)
+            except Exception:
+                pass
+            finally:
+                with self._video_proxy_build_lock:
+                    self._video_proxy_building_keys.discard(key)
+
+    def _resolve_video_playback_path(self, source_path, allow_build=True):
+        src = str(source_path or "")
+        if not src or not self._is_video_path(src):
+            return src
+        target_height = int(self._video_decode_target_height_for_current_widget())
+        if target_height <= 0:
+            return src
+        source_height = int(self._probe_video_height(src))
+        if source_height > 0 and source_height <= int(target_height):
+            return src
+        proxy_path = self._ensure_video_proxy_file(src, target_height, allow_build=bool(allow_build))
+        if proxy_path:
+            self._video_dbg(
+                "proxy_use",
+                source=self._debug_media_name(src),
+                playback=self._debug_media_name(proxy_path),
+                target=f"{int(target_height)}p",
+            )
+            return proxy_path
+        if not bool(allow_build):
+            self._enqueue_video_proxy_build(src, target_height)
+        return src
+
+    def _video_players(self):
+        out = []
+        primary = getattr(self, "_video_primary_player", None)
+        if isinstance(primary, QMediaPlayer):
+            out.append(primary)
+        secondary = getattr(self, "_video_secondary_player", None)
+        if isinstance(secondary, QMediaPlayer) and secondary is not primary:
+            out.append(secondary)
+        return out
+
+    def _video_player_slot(self, player):
+        if player is None:
+            return -1
+        if player is getattr(self, "_video_primary_player", None):
+            return 0
+        if player is getattr(self, "_video_secondary_player", None):
+            return 1
+        return -1
+
+    def _video_player_for_slot(self, slot):
+        if int(slot) == 0:
+            return getattr(self, "_video_primary_player", None)
+        if int(slot) == 1:
+            return getattr(self, "_video_secondary_player", None)
+        return None
+
+    def _video_item_for_slot(self, slot):
+        if int(slot) == 0:
+            return getattr(self, "video_item", None)
+        if int(slot) == 1:
+            return getattr(self, "video_item_dual", None)
+        return None
+
+    def _set_video_active_slot(self, slot, update_visual=True):
+        slot_int = int(slot)
+        player = self._video_player_for_slot(slot_int)
+        if not isinstance(player, QMediaPlayer):
+            return
+        prev_slot = int(getattr(self, "_video_active_slot", -1))
+        self._video_active_slot = int(slot_int)
+        self.media_player = player
+        if prev_slot != int(slot_int):
+            self._video_dbg(
+                "active_slot_change",
+                prev_slot=prev_slot,
+                new_slot=int(slot_int),
+                current=self._debug_media_name(getattr(self, "current_media_path", "")),
+            )
+        audio_attached = bool(getattr(self, "_audio_output_attached", True))
+        for p in self._video_players():
+            try:
+                if p is self.media_player and audio_attached:
+                    p.setAudioOutput(self.audio_output)
+                else:
+                    p.setAudioOutput(None)
+            except Exception:
+                pass
+        if bool(getattr(self, "_video_graphics_mode", False)) and bool(update_visual):
+            self._cancel_video_crossfade()
+            for idx in (0, 1):
+                item = self._video_item_for_slot(idx)
+                if item is None:
+                    continue
+                try:
+                    if int(idx) == int(slot_int):
+                        item.setOpacity(1.0)
+                        item.setZValue(2.0)
+                    else:
+                        item.setOpacity(0.0)
+                        item.setZValue(1.0)
+                except Exception:
+                    pass
+
+    def _cancel_video_crossfade(self):
+        group = getattr(self, "_video_crossfade_group", None)
+        if group is None:
+            return
+        try:
+            group.stop()
+        except Exception:
+            pass
+        try:
+            group.deleteLater()
+        except Exception:
+            pass
+        self._video_crossfade_group = None
+
+    def _cleanup_video_player_if_inactive(self, player):
+        if not isinstance(player, QMediaPlayer):
+            return
+        if player is self.media_player:
+            return
+        pending_slot = int(getattr(self, "_video_dual_pending_slot", -1))
+        if pending_slot >= 0:
+            pending_player = self._video_player_for_slot(pending_slot)
+            if player is pending_player:
+                return
+        try:
+            if player.playbackState() != QMediaPlayer.PlaybackState.StoppedState:
+                player.stop()
+        except Exception:
+            pass
+        try:
+            player.setSource(QUrl())
+        except Exception:
+            pass
+
+    def _start_video_crossfade(self, from_slot, to_slot):
+        if not bool(getattr(self, "_video_graphics_mode", False)):
+            return False
+        from_item = self._video_item_for_slot(from_slot)
+        to_item = self._video_item_for_slot(to_slot)
+        if from_item is None or to_item is None or from_item is to_item:
+            return False
+        duration_ms = max(0, int(getattr(self, "_video_swap_fade_duration_ms", 0)))
+        if duration_ms <= 0:
+            return False
+        self._cancel_video_crossfade()
+        try:
+            from_item.setOpacity(1.0)
+            from_item.setZValue(2.0)
+            to_item.setOpacity(0.0)
+            to_item.setZValue(3.0)
+        except Exception:
+            return False
+        anim_out = QPropertyAnimation(from_item, b"opacity", self)
+        anim_out.setDuration(int(duration_ms))
+        anim_out.setStartValue(1.0)
+        anim_out.setEndValue(0.0)
+        anim_out.setEasingCurve(QEasingCurve.Type.Linear)
+        anim_in = QPropertyAnimation(to_item, b"opacity", self)
+        anim_in.setDuration(int(duration_ms))
+        anim_in.setStartValue(0.0)
+        anim_in.setEndValue(1.0)
+        anim_in.setEasingCurve(QEasingCurve.Type.Linear)
+        group = QParallelAnimationGroup(self)
+        group.addAnimation(anim_out)
+        group.addAnimation(anim_in)
+        self._video_crossfade_group = group
+        self._video_dbg(
+            "crossfade_start",
+            from_slot=int(from_slot),
+            to_slot=int(to_slot),
+            ms=int(duration_ms),
+            media=self._debug_media_name(getattr(self, "current_media_path", "")),
+        )
+
+        def _on_finish():
+            try:
+                from_item.setOpacity(0.0)
+                from_item.setZValue(1.0)
+                to_item.setOpacity(1.0)
+                to_item.setZValue(2.0)
+            except Exception:
+                pass
+            self._video_dbg(
+                "crossfade_finish",
+                from_slot=int(from_slot),
+                to_slot=int(to_slot),
+                ms=int(duration_ms),
+                media=self._debug_media_name(getattr(self, "current_media_path", "")),
+            )
+            self._cancel_video_crossfade()
+
+        group.finished.connect(_on_finish)
+        try:
+            group.start()
+            return True
+        except Exception:
+            self._cancel_video_crossfade()
+            return False
+
+    def _is_dual_video_transition_enabled(self):
+        if int(getattr(self, "video_transition_mode", self.VIDEO_TRANSITION_SINGLE)) != int(self.VIDEO_TRANSITION_DUAL):
+            return False
+        if not bool(getattr(self, "_video_graphics_mode", False)):
+            return False
+        if not isinstance(getattr(self, "_video_secondary_player", None), QMediaPlayer):
+            return False
+        if getattr(self, "video_item_dual", None) is None:
+            return False
+        return True
+
+    def _video_count_in_playlist(self):
+        count = 0
+        for path in list(getattr(self, "playlist", []) or []):
+            if self._is_video_path(path):
+                count += 1
+        return int(count)
+
+    def _next_playlist_entry(self):
+        plist = list(getattr(self, "playlist", []) or [])
+        if not plist:
+            return -1, ""
+        idx = int(getattr(self, "current_idx", -1))
+        if idx < -1:
+            idx = -1
+        if idx >= len(plist):
+            idx = len(plist) - 1
+        next_idx = (int(idx) + 1) % len(plist)
+        return int(next_idx), str(plist[next_idx])
+
+    def _dual_preload_lookahead_ms(self, duration_ms):
+        try:
+            d = int(duration_ms)
+        except Exception:
+            d = 0
+        if d <= 0:
+            return 1400
+        return int(max(900, min(2600, int(round(float(d) * 0.10)))))
+
+    def _is_dual_video_transition_candidate(self, next_video_path):
+        if not self._is_dual_video_transition_enabled():
+            return False
+        if not self._is_video_path(next_video_path):
+            return False
+        if int(self.stack.currentIndex()) != 2:
+            return False
+        if bool(getattr(self, "_performance_paused", False)):
+            return False
+        if self._video_count_in_playlist() < 2:
+            return False
+        current_path = str(getattr(self, "current_media_path", "") or "")
+        if not current_path or not self._is_video_path(current_path):
+            return False
+        if self._normalize_exec_path(current_path) == self._normalize_exec_path(next_video_path):
+            return False
+        return True
+
+    def _set_player_loop_count(self, player, loops):
+        if not isinstance(player, QMediaPlayer):
+            return False
+        setter = getattr(player, "setLoops", None)
+        if not callable(setter):
+            return False
+        try:
+            setter(int(loops))
+            return True
+        except Exception:
+            return False
+
+    def _get_player_loop_count(self, player):
+        if not isinstance(player, QMediaPlayer):
+            return 1
+        getter = getattr(player, "loops", None)
+        if callable(getter):
+            try:
+                return int(getter())
+            except Exception:
+                pass
+        return 1
+
+    def _cancel_video_dual_pending(self, clear_source=False):
+        if hasattr(self, "_video_dual_preload_timer") and self._video_dual_preload_timer.isActive():
+            self._video_dual_preload_timer.stop()
+        if hasattr(self, "_video_dual_end_wait_timer") and self._video_dual_end_wait_timer.isActive():
+            self._video_dual_end_wait_timer.stop()
+        pending_slot = int(getattr(self, "_video_dual_pending_slot", -1))
+        pending_path = str(getattr(self, "_video_dual_pending_path", "") or "")
+        self._video_dual_pending_slot = -1
+        self._video_dual_pending_path = ""
+        self._video_dual_pending_ready = False
+        self._video_dual_pending_frame_ready = False
+        self._video_dual_pending_frozen = False
+        self._video_dual_waiting_for_swap = False
+        self._video_dual_pending_seq = 0
+        self._video_dual_pending_started_mono = 0.0
+        if pending_slot < 0:
+            return
+        pending_player = self._video_player_for_slot(pending_slot)
+        if not isinstance(pending_player, QMediaPlayer):
+            return
+        if bool(clear_source):
+            try:
+                if pending_player.playbackState() != QMediaPlayer.PlaybackState.StoppedState:
+                    pending_player.stop()
+            except Exception:
+                pass
+            try:
+                pending_player.setSource(QUrl())
+            except Exception:
+                pass
+        if pending_path:
+            try:
+                pending_player.setAudioOutput(None)
+            except Exception:
+                pass
+
+    def _play_video_path_on_active_player(self, path):
+        self._video_dual_preload_triggered_for_path = ""
+        playback_path = self._resolve_video_playback_path(path, allow_build=False)
+        self._video_dbg(
+            "play_active",
+            slot=int(getattr(self, "_video_active_slot", 0)),
+            media=self._debug_media_name(path),
+            playback=self._debug_media_name(playback_path),
+        )
+        self.stack.setCurrentIndex(2)
+        self._update_video_aspect_mode()
+        self._sync_video_loop_policy_for_path(path)
+        self.media_player.setSource(QUrl.fromLocalFile(playback_path))
+        self._apply_mute_state()
+        self.media_player.play()
+        self._refresh_icon_overlay_for_current_media()
+        if self._performance_paused:
+            self.set_performance_paused(True, reason="guard_active", force=True)
+
+    def _try_start_dual_video_preload(self, next_video_path):
+        if not self._is_dual_video_transition_candidate(next_video_path):
+            return False
+        inactive_slot = 1 - int(getattr(self, "_video_active_slot", 0))
+        preload_player = self._video_player_for_slot(inactive_slot)
+        if not isinstance(preload_player, QMediaPlayer):
+            return False
+        self._cancel_video_dual_pending(clear_source=True)
+        try:
+            if preload_player.playbackState() != QMediaPlayer.PlaybackState.StoppedState:
+                preload_player.stop()
+        except Exception:
+            pass
+        self._set_player_loop_count(preload_player, 1)
+        try:
+            preload_player.setAudioOutput(None)
+        except Exception:
+            pass
+        try:
+            preload_path = self._resolve_video_playback_path(str(next_video_path), allow_build=False)
+            preload_player.setSource(QUrl.fromLocalFile(str(preload_path)))
+            preload_player.play()
+        except Exception:
+            return False
+        self._video_dual_pending_slot = int(inactive_slot)
+        self._video_dual_pending_path = str(next_video_path)
+        self._video_dual_pending_ready = False
+        self._video_dual_pending_frame_ready = False
+        self._video_dual_pending_frozen = False
+        self._video_dual_waiting_for_swap = False
+        self._video_transition_seq = int(getattr(self, "_video_transition_seq", 0)) + 1
+        self._video_dual_pending_seq = int(self._video_transition_seq)
+        self._video_dual_pending_started_mono = float(time.monotonic())
+        self._video_dbg(
+            "preload_start",
+            seq=int(self._video_dual_pending_seq),
+            active_slot=int(getattr(self, "_video_active_slot", 0)),
+            pending_slot=int(inactive_slot),
+            from_media=self._debug_media_name(getattr(self, "current_media_path", "")),
+            to_media=self._debug_media_name(next_video_path),
+        )
+        if hasattr(self, "_video_dual_preload_timer"):
+            self._video_dual_preload_timer.start()
+        return True
+
+    def _is_dual_pending_swap_ready(self):
+        if int(getattr(self, "_video_dual_pending_slot", -1)) < 0:
+            return False
+        if not bool(getattr(self, "_video_dual_pending_ready", False)):
+            return False
+        if bool(getattr(self, "_video_graphics_mode", False)):
+            return bool(getattr(self, "_video_dual_pending_frame_ready", False))
+        return True
+
+    def _swap_to_dual_pending(self):
+        pending_slot = int(getattr(self, "_video_dual_pending_slot", -1))
+        if pending_slot < 0:
+            return False
+        pending_player = self._video_player_for_slot(pending_slot)
+        if not isinstance(pending_player, QMediaPlayer):
+            return False
+        old_slot = int(getattr(self, "_video_active_slot", 0))
+        old_player = self._video_player_for_slot(old_slot)
+        seq = int(getattr(self, "_video_dual_pending_seq", 0))
+        started = float(getattr(self, "_video_dual_pending_started_mono", 0.0))
+        age_ms = int(round((float(time.monotonic()) - started) * 1000.0)) if started > 0.0 else -1
+        self._cancel_video_dual_pending(clear_source=False)
+        self._set_video_active_slot(pending_slot, update_visual=False)
+        self._video_dual_preload_triggered_for_path = ""
+        crossfade_started = self._start_video_crossfade(old_slot, pending_slot)
+        if not crossfade_started:
+            self._set_video_active_slot(pending_slot, update_visual=True)
+        self._video_dbg(
+            "swap",
+            seq=seq,
+            old_slot=int(old_slot),
+            new_slot=int(pending_slot),
+            wait_ms=int(age_ms),
+            fade=bool(crossfade_started),
+            media=self._debug_media_name(getattr(self, "current_media_path", "")),
+        )
+        self._apply_mute_state(force_refresh=True)
+        try:
+            if self.media_player.playbackState() != QMediaPlayer.PlaybackState.PlayingState:
+                self.media_player.play()
+        except Exception:
+            pass
+        if isinstance(old_player, QMediaPlayer) and old_player is not self.media_player:
+            if crossfade_started:
+                delay_ms = max(1, int(getattr(self, "_video_swap_fade_duration_ms", 90)) + 30)
+                QTimer.singleShot(
+                    int(delay_ms),
+                    lambda p=old_player: self._cleanup_video_player_if_inactive(p),
+                )
+            else:
+                self._cleanup_video_player_if_inactive(old_player)
+        return True
+
+    def _fallback_from_dual_pending(self, reason=""):
+        path = str(getattr(self, "_video_dual_pending_path", "") or "")
+        seq = int(getattr(self, "_video_dual_pending_seq", 0))
+        started = float(getattr(self, "_video_dual_pending_started_mono", 0.0))
+        age_ms = int(round((float(time.monotonic()) - started) * 1000.0)) if started > 0.0 else -1
+        if hasattr(self, "_video_dual_end_wait_timer") and self._video_dual_end_wait_timer.isActive():
+            self._video_dual_end_wait_timer.stop()
+        self._video_dual_waiting_for_swap = False
+        self._video_dbg(
+            "fallback",
+            seq=seq,
+            reason=reason,
+            age_ms=int(age_ms),
+            pending_ready=bool(getattr(self, "_video_dual_pending_ready", False)),
+            frame_ready=bool(getattr(self, "_video_dual_pending_frame_ready", False)),
+            pending_frozen=bool(getattr(self, "_video_dual_pending_frozen", False)),
+            pending_media=self._debug_media_name(path),
+        )
+        self._cancel_video_dual_pending(clear_source=True)
+        if not path:
+            return
+        if reason:
+            print(f"[video-dual-fallback] profile={self.profile_id} reason={reason}")
+        self._play_video_path_on_active_player(path)
+
+    def _on_video_dual_preload_timeout(self):
+        if int(getattr(self, "_video_dual_pending_slot", -1)) < 0:
+            return
+        # If pending media is already prepared, ignore this watchdog timeout.
+        # EndOfMedia (or end-wait) will perform the actual swap.
+        if bool(getattr(self, "_video_dual_pending_ready", False)) or bool(getattr(self, "_video_dual_pending_frame_ready", False)):
+            self._video_dbg(
+                "preload_timeout_ignored",
+                seq=int(getattr(self, "_video_dual_pending_seq", 0)),
+                pending_ready=bool(getattr(self, "_video_dual_pending_ready", False)),
+                frame_ready=bool(getattr(self, "_video_dual_pending_frame_ready", False)),
+                pending_media=self._debug_media_name(getattr(self, "_video_dual_pending_path", "")),
+            )
+            return
+        self._video_dbg(
+            "preload_timeout",
+            seq=int(getattr(self, "_video_dual_pending_seq", 0)),
+            pending_media=self._debug_media_name(getattr(self, "_video_dual_pending_path", "")),
+        )
+        self._fallback_from_dual_pending(reason="preload_timeout")
+
+    def _on_video_dual_end_wait_timeout(self):
+        if not bool(getattr(self, "_video_dual_waiting_for_swap", False)):
+            return
+        self._video_dbg(
+            "end_wait_timeout",
+            seq=int(getattr(self, "_video_dual_pending_seq", 0)),
+            pending_ready=bool(getattr(self, "_video_dual_pending_ready", False)),
+            frame_ready=bool(getattr(self, "_video_dual_pending_frame_ready", False)),
+            pending_media=self._debug_media_name(getattr(self, "_video_dual_pending_path", "")),
+        )
+        self._video_dual_waiting_for_swap = False
+        if int(getattr(self, "_video_dual_pending_slot", -1)) < 0:
+            return
+        if self._is_dual_pending_swap_ready():
+            if self._swap_to_dual_pending():
+                return
+        self._fallback_from_dual_pending(reason="end_wait_timeout")
+
+    def _stop_all_video_players(self, clear_source=True):
+        self._cancel_video_crossfade()
+        self._cancel_video_dual_pending(clear_source=bool(clear_source))
+        for player in self._video_players():
+            try:
+                if player.playbackState() != QMediaPlayer.PlaybackState.StoppedState:
+                    player.stop()
+            except Exception:
+                pass
+            self._set_player_loop_count(player, 1)
+            if bool(clear_source):
+                try:
+                    player.setSource(QUrl())
+                except Exception:
+                    pass
+        self._set_video_active_slot(int(getattr(self, "_video_active_slot", 0)))
+
     def _resize_video_surface(self):
         if not bool(getattr(self, "_video_graphics_mode", False)):
             return
@@ -4169,6 +6418,9 @@ class DesktopWidget(QMainWindow):
             self.video_scene.setSceneRect(QRectF(0.0, 0.0, float(w), float(h)))
             self.video_item.setPos(QPointF(0.0, 0.0))
             self.video_item.setSize(QSizeF(float(w), float(h)))
+            if getattr(self, "video_item_dual", None) is not None:
+                self.video_item_dual.setPos(QPointF(0.0, 0.0))
+                self.video_item_dual.setSize(QSizeF(float(w), float(h)))
         except Exception:
             pass
 
@@ -4187,6 +6439,11 @@ class DesktopWidget(QMainWindow):
                 self.video_item.setAspectRatioMode(mode)
             except Exception:
                 pass
+            if getattr(self, "video_item_dual", None) is not None:
+                try:
+                    self.video_item_dual.setAspectRatioMode(mode)
+                except Exception:
+                    pass
             self._resize_video_surface()
             return
         try:
@@ -4242,6 +6499,102 @@ class DesktopWidget(QMainWindow):
             return 0
         # Cheap estimate only: avoid frame-by-frame seeking that can stall startup.
         return int(max(0, min(600000, int(frame_count) * int(frame_delay))))
+
+    def _is_single_media_mode_active(self):
+        if len(self.playlist) != 1:
+            return False
+        if not self.playlist:
+            return False
+        only_path = self._normalize_exec_path(self.playlist[0])
+        current_path = self._normalize_exec_path(getattr(self, "current_media_path", ""))
+        return bool(only_path and current_path and only_path == current_path)
+
+    def _sync_current_media_cycle_policy(self):
+        if not self._is_dual_video_transition_enabled():
+            self._cancel_video_dual_pending(clear_source=True)
+        if self.stack.currentIndex() == 2:
+            current_path = str(getattr(self, "current_media_path", "") or "")
+            if current_path:
+                self._sync_video_loop_policy_for_path(current_path)
+            return
+        if self.stack.currentIndex() != 1:
+            return
+        # Static image branch.
+        if self.movie is None:
+            if self.current_static_pixmap is None or self.current_static_pixmap.isNull():
+                return
+            if self._is_single_media_mode_active():
+                if self.timer.isActive():
+                    self.timer.stop()
+            else:
+                if not self.timer.isActive():
+                    self.timer.start(max(1, int(self.interval_ms)))
+            return
+        # GIF branch.
+        if self._is_single_media_mode_active() and self.timer.isActive():
+            self.timer.stop()
+        if not bool(getattr(self, "_gif_loop_watch_active", False)):
+            self._start_active_gif_loop_watch()
+
+    def _restart_current_video_loop(self):
+        if self.stack.currentIndex() != 2:
+            return False
+        if not self._is_single_media_mode_active():
+            return False
+        if self._is_native_video_infinite_loop_active():
+            try:
+                self.media_player.play()
+                self._apply_mute_state()
+                return True
+            except Exception:
+                pass
+        try:
+            self.media_player.setPosition(0)
+        except Exception:
+            pass
+        try:
+            self.media_player.play()
+            self._apply_mute_state()
+            return True
+        except Exception:
+            return False
+
+    def _set_media_player_loops(self, loops, player=None):
+        target = player if isinstance(player, QMediaPlayer) else self.media_player
+        return bool(self._set_player_loop_count(target, loops))
+
+    def _get_media_player_loops(self, player=None):
+        target = player if isinstance(player, QMediaPlayer) else self.media_player
+        return int(self._get_player_loop_count(target))
+
+    def _is_native_video_infinite_loop_active(self):
+        return int(self._get_media_player_loops()) < 0
+
+    def _sync_video_loop_policy_for_path(self, path):
+        if not self._is_video_path(path):
+            self._set_media_player_loops(1)
+            return
+        if len(self.playlist) == 1:
+            # Prefer player-native infinite loop for smoother single-video playback.
+            self._set_media_player_loops(-1)
+        else:
+            self._set_media_player_loops(1)
+
+    def _restart_current_gif_loop(self):
+        if self.movie is None or self.stack.currentIndex() != 1:
+            return False
+        try:
+            self.movie.jumpToFrame(0)
+        except Exception:
+            pass
+        try:
+            self.movie.start()
+            if self.movie.state() != QMovie.MovieState.Running:
+                self.movie.start()
+        except Exception:
+            return False
+        self._start_active_gif_loop_watch()
+        return True
 
     def _clear_active_gif_loop_watch(self):
         if hasattr(self, "_gif_loop_fallback_timer") and self._gif_loop_fallback_timer.isActive():
@@ -4315,8 +6668,11 @@ class DesktopWidget(QMainWindow):
         if last > 0 and frame_idx == 0:
             now = float(time.monotonic())
             if now >= float(getattr(self, "_gif_loop_min_deadline", 0.0)):
-                self._clear_active_gif_loop_watch()
-                self._schedule_next_media()
+                if self._is_single_media_mode_active():
+                    self._gif_loop_min_deadline = float(now) + (max(1, int(self.interval_ms)) / 1000.0)
+                else:
+                    self._clear_active_gif_loop_watch()
+                    self._schedule_next_media()
                 return
         self._gif_loop_last_frame = int(frame_idx)
 
@@ -4325,6 +6681,12 @@ class DesktopWidget(QMainWindow):
             return
         sender_obj = self.sender()
         if sender_obj is not self.movie:
+            return
+        if self._is_single_media_mode_active():
+            self._clear_active_gif_loop_watch()
+            if self._restart_current_gif_loop():
+                return
+            self._schedule_next_media()
             return
         if self.timer.isActive():
             self.timer.stop()
@@ -4352,6 +6714,10 @@ class DesktopWidget(QMainWindow):
             if hasattr(self, "_gif_loop_fallback_timer"):
                 self._gif_loop_fallback_timer.start(max(5000, int(self.interval_ms)))
             return
+        if self._is_single_media_mode_active():
+            self._clear_active_gif_loop_watch()
+            if self._restart_current_gif_loop():
+                return
         self._clear_active_gif_loop_watch()
         self._schedule_next_media()
 
@@ -4724,6 +7090,7 @@ class DesktopWidget(QMainWindow):
 
         if current_path and current_path in self.playlist:
             self.current_idx = self.playlist.index(current_path)
+            self._sync_current_media_cycle_policy()
             return
 
         if prev_playlist != self.playlist:
@@ -4739,6 +7106,7 @@ class DesktopWidget(QMainWindow):
 
     def open_settings(self):
         old_folder = self.folder_path
+        old_exec = str(self.exec_path or "")
         
 
         current_data = {
@@ -4747,10 +7115,15 @@ class DesktopWidget(QMainWindow):
             'gpu_guard_enabled': self.gpu_guard_enabled,
             'folder_path': self.folder_path,
             'exec_path': self.exec_path,
+            'focus_binding_summary': self.get_exec_manual_focus_summary(),
+            'focus_binding_host': self,
             'interval': self.interval_ms // 1000,
             'bg_color_mode': self.bg_color_mode,
             'corner_mode': getattr(self, 'corner_mode', 0),
             'media_fit_mode': int(getattr(self, "media_fit_mode", 0)),
+            'video_transition_mode': int(getattr(self, "video_transition_mode", self.VIDEO_TRANSITION_SINGLE)),
+            'video_decode_mode': int(getattr(self, "video_decode_mode", self.VIDEO_DECODE_ORIGINAL)),
+            'video_dual_fade_ms': int(getattr(self, "_video_swap_fade_duration_ms", self.VIDEO_DUAL_FADE_DEFAULT_MS)),
             'opacity_pct': self.current_opacity_pct,
             'layer_mode': getattr(self, 'layer_mode', self.LAYER_NORMAL),
             'layer_schema_version': int(self.LAYER_SCHEMA_VERSION),
@@ -4766,16 +7139,29 @@ class DesktopWidget(QMainWindow):
             self._apply_mute_state()
             self.gpu_guard_enabled = dialog.gpu_guard_checkbox.isChecked()
             self.exec_path = dialog.exec_path
+            if self._normalize_exec_path(old_exec) != self._normalize_exec_path(self.exec_path):
+                self._clear_bound_exec_window()
+                self._clear_manual_focus_binding(persist=False, clear_bound=False)
             self.folder_path = dialog.folder_path
             self._set_watched_folder(self.folder_path)
             self.interval_ms = dialog.sec_input.value() * 1000
             self.bg_color_mode = dialog.bg_combo.currentIndex()
             self.corner_mode = dialog.corner_combo.currentIndex()
             self.media_fit_mode = int(dialog.media_mode_combo.currentIndex())
+            self.video_transition_mode = self.coerce_video_transition_mode(
+                dialog.video_transition_combo.currentIndex()
+            )
+            self.video_decode_mode = self.coerce_video_decode_mode(
+                dialog.video_decode_combo.currentIndex()
+            )
+            self._video_swap_fade_duration_ms = self.coerce_video_dual_fade_ms(
+                dialog.video_dual_fade_ms_spin.value()
+            )
             
 
             self.apply_window_settings(dialog.layer_combo.currentIndex(), dialog.lock_cb.isChecked())
             self.apply_mask_and_style()
+            self._sync_current_media_cycle_policy()
             
             if old_folder != self.folder_path:
                 self.update_playlist(); self.current_idx = -1; self.next_media()
@@ -4834,10 +7220,18 @@ class DesktopWidget(QMainWindow):
     def save_all_settings(self):
         self.settings.setValue("folder_path", self.folder_path)
         self.settings.setValue("exec_path", self.exec_path)
+        self.settings.setValue("exec_manual_focus_enabled", bool(getattr(self, "_exec_manual_focus_enabled", False)))
+        self.settings.setValue("exec_manual_focus_proc_path", str(getattr(self, "_exec_manual_focus_proc_path", "") or ""))
+        self.settings.setValue("exec_manual_focus_proc_name", str(getattr(self, "_exec_manual_focus_proc_name", "") or ""))
+        self.settings.setValue("exec_manual_focus_title", str(getattr(self, "_exec_manual_focus_title", "") or ""))
+        self.settings.setValue("exec_manual_focus_class", str(getattr(self, "_exec_manual_focus_class", "") or ""))
         self.settings.setValue("interval", self.interval_ms // 1000)
         self.settings.setValue("bg_color_mode", self.bg_color_mode)
         self.settings.setValue("corner_mode", int(getattr(self, "corner_mode", 0)))
         self.settings.setValue("media_fit_mode", int(getattr(self, "media_fit_mode", 0)))
+        self.settings.setValue("video_transition_mode", int(getattr(self, "video_transition_mode", self.VIDEO_TRANSITION_SINGLE)))
+        self.settings.setValue("video_decode_mode", int(getattr(self, "video_decode_mode", self.VIDEO_DECODE_ORIGINAL)))
+        self.settings.setValue("video_dual_fade_ms", int(getattr(self, "_video_swap_fade_duration_ms", self.VIDEO_DUAL_FADE_DEFAULT_MS)))
         self.settings.setValue("is_muted", bool(self.is_muted))
         self.settings.setValue("gpu_guard_enabled", bool(self.gpu_guard_enabled))
         self.settings.setValue("layer_mode", int(getattr(self, "layer_mode", self.LAYER_NORMAL)))
@@ -4857,25 +7251,22 @@ class DesktopWidget(QMainWindow):
     def preview_opacity(self, val_pct):
         self.setWindowOpacity(val_pct / 100.0)
 
-    def next_media(self):
+    def next_media(self, prefer_preload=True):
         # 1. existing timer/playback stop to avoid overlap
         self._media_resetting = True
         self.timer.stop()
         self._clear_active_gif_loop_watch()
         self._cancel_pending_gif_swap()
-        if self.media_player.playbackState() != QMediaPlayer.PlaybackState.StoppedState:
-            self.media_player.stop()
-        self.media_player.setSource(QUrl())  # release previous media source
-
-        if self.movie:
-            self.movie.stop()
-            self.movie.deleteLater()
-            self.movie = None
-        self.current_static_pixmap = None
-        self.current_media_path = None
         self._media_resetting = False
 
         if not self.playlist:
+            self._stop_all_video_players(clear_source=True)
+            if self.movie:
+                self.movie.stop()
+                self.movie.deleteLater()
+                self.movie = None
+            self.current_static_pixmap = None
+            self.current_media_path = None
             self.stack.setCurrentIndex(0)
             self._refresh_icon_overlay_for_current_media()
             return
@@ -4883,20 +7274,31 @@ class DesktopWidget(QMainWindow):
         attempts = len(self.playlist)
         while attempts > 0 and self.playlist:
             # 2. advance index
-            self.current_idx = (self.current_idx + 1) % len(self.playlist)
-            path = self.playlist[self.current_idx]
+            next_idx = (self.current_idx + 1) % len(self.playlist)
+            path = self.playlist[next_idx]
+
+            if bool(prefer_preload) and self._try_start_dual_video_preload(path):
+                self.current_idx = int(next_idx)
+                self.current_media_path = path
+                self._refresh_icon_overlay_for_current_media()
+                if self._performance_paused:
+                    self.set_performance_paused(True, reason="guard_active", force=True)
+                return
+
+            self._stop_all_video_players(clear_source=True)
+            if self.movie:
+                self.movie.stop()
+                self.movie.deleteLater()
+                self.movie = None
+            self.current_static_pixmap = None
+            self.current_media_path = None
+            self.current_idx = int(next_idx)
             self.current_media_path = path
 
             # 3. branch by extension
             if self._is_video_path(path):
-                self.stack.setCurrentIndex(2)
-                self._update_video_aspect_mode()
-                self.media_player.setSource(QUrl.fromLocalFile(path))
-                self._apply_mute_state()
-                self.media_player.play()
-                self._refresh_icon_overlay_for_current_media()
-                if self._performance_paused:
-                    self.set_performance_paused(True, reason="guard_active", force=True)
+                self._set_video_active_slot(int(getattr(self, "_video_active_slot", 0)))
+                self._play_video_path_on_active_player(path)
                 return
 
             if path.lower().endswith('.gif'):
@@ -4940,7 +7342,11 @@ class DesktopWidget(QMainWindow):
 
             self.current_static_pixmap = pix
             self._update_static_pixmap_size()
-            self.timer.start(self.interval_ms)
+            if self._is_single_media_mode_active():
+                if self.timer.isActive():
+                    self.timer.stop()
+            else:
+                self.timer.start(self.interval_ms)
             self._refresh_icon_overlay_for_current_media()
             return
 
@@ -4979,7 +7385,23 @@ class DesktopWidget(QMainWindow):
                 scaled
             )
 
-    def check_video_status(self, s):
+    def check_video_status(self, s, player=None):
+        src_player = player if isinstance(player, QMediaPlayer) else self.sender()
+        if isinstance(src_player, QMediaPlayer):
+            pending_slot = int(getattr(self, "_video_dual_pending_slot", -1))
+            if pending_slot >= 0:
+                pending_player = self._video_player_for_slot(pending_slot)
+                if src_player is pending_player:
+                    if s == QMediaPlayer.MediaStatus.InvalidMedia:
+                        self._video_dbg(
+                            "pending_invalid_status",
+                            seq=int(getattr(self, "_video_dual_pending_seq", 0)),
+                            pending_media=self._debug_media_name(getattr(self, "_video_dual_pending_path", "")),
+                        )
+                        self._fallback_from_dual_pending("pending_invalid_media")
+                    return
+            if src_player is not self.media_player:
+                return
         if self._media_resetting:
             return
         if s in (
@@ -4990,18 +7412,185 @@ class DesktopWidget(QMainWindow):
             self._apply_mute_state()
             return
         if s == QMediaPlayer.MediaStatus.EndOfMedia:
+            if int(getattr(self, "_video_dual_pending_slot", -1)) >= 0:
+                self._video_dbg(
+                    "active_end",
+                    seq=int(getattr(self, "_video_dual_pending_seq", 0)),
+                    pending_ready=bool(getattr(self, "_video_dual_pending_ready", False)),
+                    frame_ready=bool(getattr(self, "_video_dual_pending_frame_ready", False)),
+                    pending_frozen=bool(getattr(self, "_video_dual_pending_frozen", False)),
+                    current=self._debug_media_name(getattr(self, "current_media_path", "")),
+                )
+                if self._is_dual_pending_swap_ready():
+                    if self._swap_to_dual_pending():
+                        return
+                self._video_dual_waiting_for_swap = True
+                if hasattr(self, "_video_dual_end_wait_timer"):
+                    self._video_dual_end_wait_timer.start()
+                return
+            if self._is_single_media_mode_active() and self._is_native_video_infinite_loop_active():
+                try:
+                    self.media_player.play()
+                except Exception:
+                    pass
+                return
+            if self._restart_current_video_loop():
+                return
             self.next_media()
             return
         if s == QMediaPlayer.MediaStatus.InvalidMedia:
             self._skip_current_media("invalid_video_status")
 
-    def _on_video_error(self, error, error_string):
+    def _on_video_error(self, error, error_string, player=None):
+        src_player = player if isinstance(player, QMediaPlayer) else self.sender()
+        if isinstance(src_player, QMediaPlayer):
+            pending_slot = int(getattr(self, "_video_dual_pending_slot", -1))
+            if pending_slot >= 0:
+                pending_player = self._video_player_for_slot(pending_slot)
+                if src_player is pending_player:
+                    self._video_dbg(
+                        "pending_error",
+                        seq=int(getattr(self, "_video_dual_pending_seq", 0)),
+                        error=str(error_string or error),
+                        pending_media=self._debug_media_name(getattr(self, "_video_dual_pending_path", "")),
+                    )
+                    self._fallback_from_dual_pending(f"pending_error:{error_string or error}")
+                    return
+            if src_player is not self.media_player:
+                return
         if self._media_resetting:
             return
         if error == QMediaPlayer.Error.NoError:
             return
         reason = error_string if error_string else str(error)
+        self._video_dbg(
+            "active_error",
+            error=reason,
+            current=self._debug_media_name(getattr(self, "current_media_path", "")),
+        )
         self._skip_current_media(f"video_error:{reason}")
+
+    def _on_video_position_changed(self, position_ms, player=None):
+        src_player = player if isinstance(player, QMediaPlayer) else self.sender()
+        if not isinstance(src_player, QMediaPlayer):
+            return
+        pending_slot = int(getattr(self, "_video_dual_pending_slot", -1))
+        if pending_slot >= 0:
+            pending_player = self._video_player_for_slot(pending_slot)
+            if src_player is pending_player:
+                try:
+                    pos = int(position_ms)
+                except Exception:
+                    pos = -1
+                if pos > 0:
+                    self._video_dual_pending_ready = True
+                    # Preload watchdog is only for "no progress" cases.
+                    if hasattr(self, "_video_dual_preload_timer") and self._video_dual_preload_timer.isActive():
+                        self._video_dual_preload_timer.stop()
+                    if bool(getattr(self, "_video_dual_waiting_for_swap", False)) and self._is_dual_pending_swap_ready():
+                        self._video_dbg(
+                            "pending_ready_during_wait",
+                            seq=int(getattr(self, "_video_dual_pending_seq", 0)),
+                            pos_ms=int(pos),
+                            pending_media=self._debug_media_name(getattr(self, "_video_dual_pending_path", "")),
+                        )
+                        self._video_dual_waiting_for_swap = False
+                        if hasattr(self, "_video_dual_end_wait_timer") and self._video_dual_end_wait_timer.isActive():
+                            self._video_dual_end_wait_timer.stop()
+                        self._swap_to_dual_pending()
+                return
+        if src_player is not self.media_player:
+            return
+        if self._media_resetting:
+            return
+        if int(self.stack.currentIndex()) != 2:
+            return
+        if int(getattr(self, "_video_dual_pending_slot", -1)) >= 0:
+            return
+        if not self._is_dual_video_transition_enabled():
+            return
+        if bool(getattr(self, "_performance_paused", False)):
+            return
+        current_path = str(getattr(self, "current_media_path", "") or "")
+        if not self._is_video_path(current_path):
+            return
+        try:
+            pos = int(position_ms)
+        except Exception:
+            pos = -1
+        if pos < 0:
+            return
+        try:
+            duration = int(src_player.duration())
+        except Exception:
+            duration = 0
+        if duration <= 0:
+            return
+        remain_ms = int(duration - pos)
+        if remain_ms > int(self._dual_preload_lookahead_ms(duration)):
+            return
+        current_key = self._normalize_exec_path(current_path)
+        if current_key and current_key == str(getattr(self, "_video_dual_preload_triggered_for_path", "")):
+            return
+        next_idx, next_path = self._next_playlist_entry()
+        if next_idx < 0 or not next_path:
+            return
+        if not self._is_video_path(next_path):
+            return
+        if self._normalize_exec_path(next_path) == self._normalize_exec_path(current_path):
+            return
+        if self._try_start_dual_video_preload(next_path):
+            self._video_dual_preload_triggered_for_path = current_key
+            self.current_idx = int(next_idx)
+            self.current_media_path = next_path
+            self._refresh_icon_overlay_for_current_media()
+            self._video_dbg(
+                "lookahead_trigger",
+                seq=int(getattr(self, "_video_dual_pending_seq", 0)),
+                remain_ms=int(remain_ms),
+                duration_ms=int(duration),
+                from_media=self._debug_media_name(current_path),
+                to_media=self._debug_media_name(next_path),
+            )
+            if self._performance_paused:
+                self.set_performance_paused(True, reason="guard_active", force=True)
+
+    def _on_video_frame_changed(self, frame, slot=-1):
+        pending_slot = int(getattr(self, "_video_dual_pending_slot", -1))
+        if pending_slot < 0:
+            return
+        if int(slot) != int(pending_slot):
+            return
+        is_valid = False
+        try:
+            is_valid = bool(frame.isValid())
+        except Exception:
+            is_valid = frame is not None
+        if not is_valid:
+            return
+        self._video_dual_pending_frame_ready = True
+        self._video_dual_pending_ready = True
+        if hasattr(self, "_video_dual_preload_timer") and self._video_dual_preload_timer.isActive():
+            self._video_dual_preload_timer.stop()
+        if not bool(getattr(self, "_video_dual_pending_frozen", False)):
+            pending_player = self._video_player_for_slot(pending_slot)
+            if isinstance(pending_player, QMediaPlayer):
+                try:
+                    pending_player.pause()
+                    self._video_dual_pending_frozen = True
+                    self._video_dbg(
+                        "pending_frame_ready",
+                        seq=int(getattr(self, "_video_dual_pending_seq", 0)),
+                        slot=int(pending_slot),
+                        pending_media=self._debug_media_name(getattr(self, "_video_dual_pending_path", "")),
+                    )
+                except Exception:
+                    self._video_dual_pending_frozen = False
+        if bool(getattr(self, "_video_dual_waiting_for_swap", False)) and self._is_dual_pending_swap_ready():
+            self._video_dual_waiting_for_swap = False
+            if hasattr(self, "_video_dual_end_wait_timer") and self._video_dual_end_wait_timer.isActive():
+                self._video_dual_end_wait_timer.stop()
+            self._swap_to_dual_pending()
 
 
     def mousePressEvent(self, e):
@@ -5084,7 +7673,9 @@ class DesktopWidget(QMainWindow):
                     self.manager.save_temp_group_positions(self.profile_id)
                 self._hide_size_hud()
             else:
-                if not self.exec_path or not os.path.exists(self.exec_path):
+                has_manual_focus = bool(getattr(self, "_exec_manual_focus_enabled", False))
+                has_exec_target = bool(self.exec_path and os.path.exists(self.exec_path))
+                if not has_exec_target and not has_manual_focus:
                     print("Executable is not configured or missing.")
                     self.start_pos = None
                     self.is_moving = False
@@ -5093,7 +7684,8 @@ class DesktopWidget(QMainWindow):
                     self._hide_size_hud()
                     self._refresh_resize_ui()
                     return
-                os.startfile(self.exec_path)
+                if not self._launch_or_focus_exec(self.exec_path):
+                    print("Failed to launch or focus executable.")
         self._set_drag_topmost(False)
         self.start_pos = None
         self.is_moving = False
@@ -5124,7 +7716,7 @@ class DesktopWidget(QMainWindow):
         if e.angleDelta().y() > 0:
             self.current_idx = (self.current_idx - 2) % len(self.playlist)
 
-        self.next_media()
+        self.next_media(prefer_preload=False)
 
     def dragEnterEvent(self, event):
         path = self._extract_first_local_drop_path(event)
@@ -5167,6 +7759,9 @@ class DesktopWidget(QMainWindow):
         if not bool(getattr(self, "_initial_media_prepared", False)):
             self.prepare_media_before_show()
         super().showEvent(e)
+        # Hidden pre-warm can still use a stale child size on some starts.
+        # Re-apply once visible so static image size matches final widget geometry.
+        self._apply_media_scale_mode()
         if self._should_clone_desktop_icons() or self._should_punch_desktop_icons():
             self.apply_mask_and_style()
             self._schedule_desktop_icon_overlay_bootstrap(retries=4, delay_ms=60)
@@ -5208,13 +7803,19 @@ class DesktopWidget(QMainWindow):
         self.timer.stop()
         self._clear_active_gif_loop_watch()
         self._cancel_pending_gif_swap()
+        self._cancel_video_crossfade()
+        self._cancel_video_dual_pending(clear_source=True)
+        self._stop_exec_launch_learning()
+        self._clear_bound_exec_window()
         
 
-        self.media_player.stop()
-        self.media_player.setSource(QUrl())
+        self._stop_all_video_players(clear_source=True)
         
 
-        self.media_player.deleteLater()
+        if isinstance(getattr(self, "_video_primary_player", None), QMediaPlayer):
+            self._video_primary_player.deleteLater()
+        if isinstance(getattr(self, "_video_secondary_player", None), QMediaPlayer):
+            self._video_secondary_player.deleteLater()
         self.audio_output.deleteLater()
         if self.movie:
             self.movie.stop()
@@ -5265,6 +7866,7 @@ class MasterController(QMainWindow):
         self.master_settings = QSettings("MyHomeApp", "MasterV3")
         self.widgets = {}
         self._temp_group_ids = set()
+        self._exec_window_claims = {}
         self.profile_rows = {}
         self._startup_queue = []
         self._startup_queue_active = False
@@ -6423,6 +9025,78 @@ class MasterController(QMainWindow):
         for widget in self._temp_group_move_targets(source_pid):
             widget.save_all_settings()
 
+    def _cleanup_exec_window_claims(self):
+        claims = getattr(self, "_exec_window_claims", None)
+        if not isinstance(claims, dict):
+            self._exec_window_claims = {}
+            return
+        alive_profiles = set([str(pid) for pid in getattr(self, "widgets", {}).keys()])
+        for hwnd, owner in list(claims.items()):
+            try:
+                h = int(hwnd)
+            except Exception:
+                claims.pop(hwnd, None)
+                continue
+            if h <= 0:
+                claims.pop(hwnd, None)
+                continue
+            try:
+                if not win32gui.IsWindow(int(h)):
+                    claims.pop(hwnd, None)
+                    continue
+            except Exception:
+                claims.pop(hwnd, None)
+                continue
+            if str(owner) not in alive_profiles:
+                claims.pop(hwnd, None)
+
+    def get_exec_window_owner(self, hwnd):
+        self._cleanup_exec_window_claims()
+        try:
+            h = int(hwnd)
+        except Exception:
+            return ""
+        return str(self._exec_window_claims.get(h, "") or "")
+
+    def claim_exec_window(self, profile_id, hwnd):
+        self._cleanup_exec_window_claims()
+        spid = str(profile_id)
+        try:
+            h = int(hwnd)
+        except Exception:
+            return False
+        if h <= 0:
+            return False
+        owner = str(self._exec_window_claims.get(h, "") or "")
+        if owner and owner != spid:
+            return False
+        for key, value in list(self._exec_window_claims.items()):
+            if str(value) == spid and int(key) != h:
+                self._exec_window_claims.pop(key, None)
+        self._exec_window_claims[int(h)] = spid
+        return True
+
+    def release_exec_window_claim(self, profile_id=None, hwnd=None):
+        self._cleanup_exec_window_claims()
+        if hwnd is not None:
+            try:
+                h = int(hwnd)
+            except Exception:
+                h = 0
+            if h > 0:
+                if profile_id is None:
+                    self._exec_window_claims.pop(h, None)
+                else:
+                    if str(self._exec_window_claims.get(h, "") or "") == str(profile_id):
+                        self._exec_window_claims.pop(h, None)
+            return
+        if profile_id is None:
+            return
+        spid = str(profile_id)
+        for key, value in list(self._exec_window_claims.items()):
+            if str(value) == spid:
+                self._exec_window_claims.pop(key, None)
+
     def set_temp_group_mute(self, source_pid, muted):
         targets = self._temp_group_shortcut_targets(source_pid)
         if not targets:
@@ -7181,12 +9855,15 @@ class MasterController(QMainWindow):
 
         is_running = pid in self.widgets
         s_obj = QSettings("MyHomeApp", f"Profile_{pid}")
+        stored_prev_exec = str(s_obj.value("exec_path", "") or "")
 
         if is_running:
             w = self.widgets[pid]
             current_data = {
                 'folder_path': w.folder_path,
                 'exec_path': w.exec_path,
+                'focus_binding_summary': w.get_exec_manual_focus_summary() if hasattr(w, "get_exec_manual_focus_summary") else "자동 (실행파일 기준)",
+                'focus_binding_host': w,
                 'w': w.width(),
                 'h': w.height(),
                 'layer_mode': getattr(w, 'layer_mode', DesktopWidget.LAYER_NORMAL),
@@ -7196,6 +9873,9 @@ class MasterController(QMainWindow):
                 'bg_color_mode': w.bg_color_mode,
                 'corner_mode': getattr(w, 'corner_mode', 0),
                 'media_fit_mode': int(getattr(w, 'media_fit_mode', 0)),
+                'video_transition_mode': int(getattr(w, 'video_transition_mode', DesktopWidget.VIDEO_TRANSITION_SINGLE)),
+                'video_decode_mode': int(getattr(w, 'video_decode_mode', DesktopWidget.VIDEO_DECODE_ORIGINAL)),
+                'video_dual_fade_ms': int(getattr(w, '_video_swap_fade_duration_ms', DesktopWidget.VIDEO_DUAL_FADE_DEFAULT_MS)),
                 'interval': w.interval_ms // 1000,
                 'is_muted': w.is_muted,
                 'gpu_guard_enabled': getattr(w, 'gpu_guard_enabled', False),
@@ -7205,6 +9885,14 @@ class MasterController(QMainWindow):
             current_data = {
                 'folder_path': s_obj.value("folder_path", ""),
                 'exec_path': s_obj.value("exec_path", ""),
+                'focus_binding_summary': DesktopWidget._format_exec_manual_focus_summary(
+                    _as_bool(s_obj.value("exec_manual_focus_enabled", False), False),
+                    s_obj.value("exec_manual_focus_proc_path", ""),
+                    s_obj.value("exec_manual_focus_proc_name", ""),
+                    s_obj.value("exec_manual_focus_title", ""),
+                    s_obj.value("exec_manual_focus_class", ""),
+                ),
+                'focus_binding_host': None,
                 'w': int(s_obj.value("w", 200)),
                 'h': int(s_obj.value("h", 200)),
                 'layer_mode': DesktopWidget.coerce_layer_mode(
@@ -7217,6 +9905,15 @@ class MasterController(QMainWindow):
                 'bg_color_mode': int(s_obj.value("bg_color_mode", 1)),
                 'corner_mode': int(s_obj.value("corner_mode", 0)),
                 'media_fit_mode': int(s_obj.value("media_fit_mode", 0)),
+                'video_transition_mode': DesktopWidget.coerce_video_transition_mode(
+                    s_obj.value("video_transition_mode", DesktopWidget.VIDEO_TRANSITION_SINGLE)
+                ),
+                'video_decode_mode': DesktopWidget.coerce_video_decode_mode(
+                    s_obj.value("video_decode_mode", DesktopWidget.VIDEO_DECODE_ORIGINAL)
+                ),
+                'video_dual_fade_ms': DesktopWidget.coerce_video_dual_fade_ms(
+                    s_obj.value("video_dual_fade_ms", DesktopWidget.VIDEO_DUAL_FADE_DEFAULT_MS)
+                ),
                 'interval': int(s_obj.value("interval", 5)),
                 'is_muted': _as_bool(s_obj.value("is_muted", True), True),
                 'gpu_guard_enabled': _as_bool(s_obj.value("gpu_guard_enabled", False), False),
@@ -7239,6 +9936,15 @@ class MasterController(QMainWindow):
             new_bg = dialog.bg_combo.currentIndex()
             new_corner = dialog.corner_combo.currentIndex()
             new_media_fit = dialog.media_mode_combo.currentIndex()
+            new_video_transition = DesktopWidget.coerce_video_transition_mode(
+                dialog.video_transition_combo.currentIndex()
+            )
+            new_video_decode_mode = DesktopWidget.coerce_video_decode_mode(
+                dialog.video_decode_combo.currentIndex()
+            )
+            new_video_dual_fade_ms = DesktopWidget.coerce_video_dual_fade_ms(
+                dialog.video_dual_fade_ms_spin.value()
+            )
             new_layer = dialog.layer_combo.currentIndex()
             new_lock = dialog.lock_cb.isChecked()
             new_mute = dialog.mute_checkbox.isChecked()
@@ -7250,11 +9956,20 @@ class MasterController(QMainWindow):
             s_obj.setValue("is_locked", bool(new_lock))
             s_obj.setValue("folder_path", new_folder)
             s_obj.setValue("exec_path", new_exec)
+            if DesktopWidget._normalize_exec_path(stored_prev_exec) != DesktopWidget._normalize_exec_path(new_exec):
+                s_obj.setValue("exec_manual_focus_enabled", False)
+                s_obj.setValue("exec_manual_focus_proc_path", "")
+                s_obj.setValue("exec_manual_focus_proc_name", "")
+                s_obj.setValue("exec_manual_focus_title", "")
+                s_obj.setValue("exec_manual_focus_class", "")
             s_obj.setValue("w", new_w); s_obj.setValue("h", new_h)
             s_obj.setValue("opacity_pct", new_opacity)
             s_obj.setValue("bg_color_mode", new_bg)
             s_obj.setValue("corner_mode", int(new_corner))
             s_obj.setValue("media_fit_mode", int(new_media_fit))
+            s_obj.setValue("video_transition_mode", int(new_video_transition))
+            s_obj.setValue("video_decode_mode", int(new_video_decode_mode))
+            s_obj.setValue("video_dual_fade_ms", int(new_video_dual_fade_ms))
             s_obj.setValue("interval", new_interval // 1000)
             s_obj.setValue("is_muted", bool(new_mute))
             s_obj.setValue("gpu_guard_enabled", bool(new_gpu_guard))
@@ -7274,11 +9989,21 @@ class MasterController(QMainWindow):
                 w.bg_color_mode = new_bg
                 w.corner_mode = int(new_corner)
                 w.media_fit_mode = int(new_media_fit)
+                w.video_transition_mode = int(new_video_transition)
+                w.video_decode_mode = int(new_video_decode_mode)
+                w._video_swap_fade_duration_ms = int(new_video_dual_fade_ms)
                 w.apply_mask_and_style()
+                w._sync_current_media_cycle_policy()
 
                 w.apply_window_settings(new_layer, new_lock)
 
+                prev_exec = str(getattr(w, "exec_path", "") or "")
                 w.exec_path = new_exec
+                if hasattr(w, "_normalize_exec_path") and hasattr(w, "_clear_bound_exec_window"):
+                    if w._normalize_exec_path(prev_exec) != w._normalize_exec_path(new_exec):
+                        w._clear_bound_exec_window()
+                        if hasattr(w, "_clear_manual_focus_binding"):
+                            w._clear_manual_focus_binding(persist=False, clear_bound=False)
                 w.is_muted = new_mute
                 w._apply_mute_state()
                 w.gpu_guard_enabled = bool(new_gpu_guard)
@@ -7541,10 +10266,13 @@ class MasterController(QMainWindow):
         new_settings.setValue("name", "New 세팅")
         new_settings.setValue("w", 200)
         new_settings.setValue("h", 200)
-        new_settings.setValue("layer_mode", int(DesktopWidget.LAYER_BACK))
+        new_settings.setValue("layer_mode", int(DesktopWidget.LAYER_NORMAL))
         new_settings.setValue("layer_schema_version", int(DesktopWidget.LAYER_SCHEMA_VERSION))
         new_settings.setValue("corner_mode", 0)
         new_settings.setValue("media_fit_mode", 0)
+        new_settings.setValue("video_transition_mode", int(DesktopWidget.VIDEO_TRANSITION_SINGLE))
+        new_settings.setValue("video_decode_mode", int(DesktopWidget.VIDEO_DECODE_ORIGINAL))
+        new_settings.setValue("video_dual_fade_ms", int(DesktopWidget.VIDEO_DUAL_FADE_DEFAULT_MS))
         new_settings.setValue("run_enabled", True)
         new_settings.sync()
 
