@@ -3,9 +3,22 @@ import sys
 import os
 import math
 import time
+
+import ctypes
+from ctypes import wintypes
 import win32api
 import win32gui
 import win32con
+try:
+    import win32ui
+except Exception:
+    win32ui = None
+try:
+    import win32com.client
+except Exception:
+    win32com = None
+else:
+    win32com = win32com.client
 try:
     import win32pdh
 except Exception:
@@ -14,7 +27,11 @@ from PyQt6.QtWidgets import *
 from PyQt6.QtCore import *
 from PyQt6.QtGui import *
 from PyQt6.QtMultimedia import *
-from PyQt6.QtMultimediaWidgets import QVideoWidget
+try:
+    from PyQt6.QtMultimediaWidgets import QVideoWidget, QGraphicsVideoItem
+except Exception:
+    from PyQt6.QtMultimediaWidgets import QVideoWidget
+    QGraphicsVideoItem = None
 
 def _as_bool(value, default=False):
     if isinstance(value, bool):
@@ -197,6 +214,205 @@ class ResizeHandleOverlay(QWidget):
                 QPoint(w + o, h - s),
             ])
         )
+
+
+class DesktopIconCloneOverlay(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self._items = []
+        self._font = self._resolve_icon_title_font()
+        self._flags = int(
+            Qt.AlignmentFlag.AlignHCenter
+            | Qt.AlignmentFlag.AlignTop
+            | Qt.TextFlag.TextWordWrap
+            | Qt.TextFlag.TextWrapAnywhere
+            | Qt.TextFlag.TextDontClip
+        )
+
+    @staticmethod
+    def _resolve_icon_title_font():
+        try:
+            class LOGFONTW(ctypes.Structure):
+                _fields_ = [
+                    ("lfHeight", ctypes.c_long),
+                    ("lfWidth", ctypes.c_long),
+                    ("lfEscapement", ctypes.c_long),
+                    ("lfOrientation", ctypes.c_long),
+                    ("lfWeight", ctypes.c_long),
+                    ("lfItalic", ctypes.c_ubyte),
+                    ("lfUnderline", ctypes.c_ubyte),
+                    ("lfStrikeOut", ctypes.c_ubyte),
+                    ("lfCharSet", ctypes.c_ubyte),
+                    ("lfOutPrecision", ctypes.c_ubyte),
+                    ("lfClipPrecision", ctypes.c_ubyte),
+                    ("lfQuality", ctypes.c_ubyte),
+                    ("lfPitchAndFamily", ctypes.c_ubyte),
+                    ("lfFaceName", ctypes.c_wchar * 32),
+                ]
+
+            spi_geticontitlelogfont = 0x001F
+            lf = LOGFONTW()
+            ok = ctypes.windll.user32.SystemParametersInfoW(
+                int(spi_geticontitlelogfont),
+                int(ctypes.sizeof(LOGFONTW)),
+                ctypes.byref(lf),
+                0,
+            )
+            if ok:
+                face = str(lf.lfFaceName or "").strip() or "Segoe UI"
+                font = QFont(face)
+                h = int(abs(int(lf.lfHeight or 0)))
+                if h > 0:
+                    font.setPixelSize(h)
+                weight = int(lf.lfWeight or 400)
+                if weight >= 600:
+                    font.setBold(True)
+                font.setItalic(bool(lf.lfItalic))
+                return font
+        except Exception:
+            pass
+        return QFont("Segoe UI", 9)
+
+    def set_items(self, items):
+        self._items = list(items or [])
+        self.update()
+
+    def _elided_icon_label_text(self, text, label_rect, selected=False, focused=False):
+        raw = str(text or "")
+        if not raw:
+            return ""
+        # Explorer-like behavior: idle desktop labels are visually constrained and elided.
+        if bool(selected) or bool(focused):
+            return raw
+        if not isinstance(label_rect, QRect):
+            return raw
+        max_width = max(10, int(label_rect.width()))
+        max_height = max(10, int(label_rect.height()))
+        fm = QFontMetrics(self._font)
+        line_h = max(1, int(fm.lineSpacing()))
+        max_lines = max(1, min(2, int(max_height // line_h)))
+        src = raw.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
+        if max_lines <= 1:
+            return str(fm.elidedText(src, Qt.TextElideMode.ElideRight, int(max_width)))
+        if fm.horizontalAdvance(src) <= int(max_width):
+            return src
+
+        lines = []
+        remaining = str(src)
+        for i in range(int(max_lines)):
+            if not remaining:
+                break
+            is_last = (i == int(max_lines - 1))
+            if is_last:
+                lines.append(str(fm.elidedText(remaining, Qt.TextElideMode.ElideRight, int(max_width))))
+                remaining = ""
+                break
+            if fm.horizontalAdvance(remaining) <= int(max_width):
+                lines.append(str(remaining))
+                remaining = ""
+                break
+            lo = 1
+            hi = len(remaining)
+            best = 1
+            while lo <= hi:
+                mid = (lo + hi) // 2
+                chunk = remaining[:mid]
+                if fm.horizontalAdvance(chunk) <= int(max_width):
+                    best = int(mid)
+                    lo = int(mid + 1)
+                else:
+                    hi = int(mid - 1)
+            part = str(remaining[:max(1, int(best))]).rstrip()
+            lines.append(part if part else remaining[:1])
+            remaining = str(remaining[max(1, int(best)):]).lstrip()
+
+        if not lines:
+            return str(fm.elidedText(src, Qt.TextElideMode.ElideRight, int(max_width)))
+        return "\n".join([ln for ln in lines if ln])
+
+    def paintEvent(self, event):
+        if not self._items:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        painter.setFont(self._font)
+        for item in self._items:
+            if not isinstance(item, dict):
+                continue
+            edit_rect = item.get("edit_rect")
+            if isinstance(edit_rect, QRect):
+                if int(edit_rect.width()) > 0 and int(edit_rect.height()) > 0:
+                    painter.setPen(QPen(QColor(74, 130, 218, 230), 1))
+                    painter.setBrush(QColor(255, 255, 255, 230))
+                    painter.drawRoundedRect(QRectF(edit_rect), 2.0, 2.0)
+                    txt = str(item.get("edit_text", "") or "")
+                    if txt:
+                        painter.setPen(QColor(18, 18, 18, 255))
+                        painter.drawText(
+                            QRect(
+                                int(edit_rect.x()) + 4,
+                                int(edit_rect.y()) + 1,
+                                max(0, int(edit_rect.width()) - 6),
+                                max(0, int(edit_rect.height()) - 2),
+                            ),
+                            int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                            txt,
+                        )
+                continue
+
+            selected = bool(item.get("selected", False))
+            focused = bool(item.get("focused", False))
+            select_rect = item.get("select_rect")
+            if isinstance(select_rect, QRect) and int(select_rect.width()) > 0 and int(select_rect.height()) > 0:
+                if selected:
+                    painter.setPen(QPen(QColor(112, 170, 255, 230), 1))
+                    painter.setBrush(QColor(64, 136, 255, 96))
+                    painter.drawRoundedRect(QRectF(select_rect), 4.0, 4.0)
+                elif focused:
+                    painter.setPen(QPen(QColor(150, 192, 255, 170), 1, Qt.PenStyle.DotLine))
+                    painter.setBrush(Qt.BrushStyle.NoBrush)
+                    painter.drawRoundedRect(QRectF(select_rect), 4.0, 4.0)
+
+            icon_rect = item.get("icon_rect")
+            icon_pm = item.get("icon_pixmap")
+            if (
+                isinstance(icon_rect, QRect)
+                and isinstance(icon_pm, QPixmap)
+                and not icon_pm.isNull()
+                and int(icon_rect.width()) > 0
+                and int(icon_rect.height()) > 0
+            ):
+                target = QRect(icon_rect)
+                if int(target.width()) != int(icon_pm.width()) or int(target.height()) != int(icon_pm.height()):
+                    target = QRect(
+                        int(icon_rect.x() + ((int(icon_rect.width()) - int(icon_pm.width())) // 2)),
+                        int(icon_rect.y() + ((int(icon_rect.height()) - int(icon_pm.height())) // 2)),
+                        int(icon_pm.width()),
+                        int(icon_pm.height()),
+                    )
+                painter.drawPixmap(target, icon_pm)
+
+            label_rect = item.get("label_rect")
+            text = str(item.get("text", "") or "")
+            if isinstance(label_rect, QRect) and int(label_rect.width()) > 0 and int(label_rect.height()) > 0 and text:
+                # Explorer label bounds are tight; expand slightly to avoid glyph clipping.
+                draw_rect = QRect(label_rect).adjusted(-4, 0, 4, 2)
+                display_text = self._elided_icon_label_text(
+                    text,
+                    draw_rect,
+                    selected=bool(selected),
+                    focused=bool(focused),
+                )
+                if not display_text:
+                    continue
+                shadow_rect = QRect(draw_rect).translated(1, 1)
+                painter.setPen(QColor(0, 0, 0, 190))
+                painter.drawText(shadow_rect, self._flags, display_text)
+                painter.setPen(QColor(255, 255, 255, 255))
+                painter.drawText(draw_rect, self._flags, display_text)
 
 
 class DownwardComboBox(QComboBox):
@@ -417,6 +633,7 @@ class SetManagerDialog(QDialog):
         if self.master.copy_profiles_from_set(source_sid, target_sid):
             self.master.load_profiles()
             self._refresh_info()
+            self.accept()
 
     def _delete_set(self):
         sid = self.master.selected_set_id()
@@ -424,6 +641,7 @@ class SetManagerDialog(QDialog):
             return
         if self.master.delete_set(sid):
             self._refresh_info()
+            self.accept()
 
 
 class SettingsDialog(QDialog):
@@ -433,16 +651,16 @@ class SettingsDialog(QDialog):
         self.setWindowTitle("위젯 상세 설정")
         self.setWindowIcon(QIcon())
         self._title_bar_themed = False
-        self.resize(448, 680)
-        self.setFixedWidth(448)
+        self.resize(760, 680)
+        self.setFixedWidth(760)
         self.setStyleSheet("""
             QDialog#settingsDialog {
                 background-color: #1d2a3d;
             }
             QFrame#settingsHeader {
-                background-color: #2a3d5a;
-                border: 1px solid #4a648a;
-                border-radius: 12px;
+                background-color: transparent;
+                border: none;
+                border-radius: 0px;
             }
             QLabel#settingsTitle {
                 color: #eef3ff;
@@ -457,6 +675,10 @@ class SettingsDialog(QDialog):
                 background-color: #23344d;
                 border: 1px solid #3f567a;
                 border-radius: 12px;
+            }
+            QFrame#settingsRightPanel {
+                background-color: transparent;
+                border: none;
             }
             QLabel {
                 color: #e6eefc;
@@ -592,11 +814,32 @@ class SettingsDialog(QDialog):
         card = QFrame()
         card.setObjectName("settingsCard")
         root.addWidget(card, 1)
-        layout = QFormLayout(card)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setHorizontalSpacing(12)
-        layout.setVerticalSpacing(8)
-        layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(12, 12, 12, 12)
+        card_layout.setSpacing(10)
+
+        content_row = QHBoxLayout()
+        content_row.setContentsMargins(0, 0, 0, 0)
+        content_row.setSpacing(24)
+        card_layout.addLayout(content_row, 1)
+
+        left_panel = QWidget(card)
+        left_form = QFormLayout(left_panel)
+        left_form.setContentsMargins(0, 0, 0, 0)
+        left_form.setHorizontalSpacing(12)
+        left_form.setVerticalSpacing(8)
+        left_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+
+        right_panel = QFrame(card)
+        right_panel.setObjectName("settingsRightPanel")
+        right_form = QFormLayout(right_panel)
+        right_form.setContentsMargins(0, 0, 0, 0)
+        right_form.setHorizontalSpacing(12)
+        right_form.setVerticalSpacing(8)
+        right_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+
+        content_row.addWidget(left_panel, 5)
+        content_row.addWidget(right_panel, 5)
 
         s = settings_data if settings_data else {}
         
@@ -659,13 +902,26 @@ class SettingsDialog(QDialog):
         self.corner_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.corner_combo.setMinimumHeight(36)
 
+        self.media_mode_combo = DownwardComboBox()
+        self.media_mode_combo.addItems(["원본 유지 (전체 보기)", "위젯 채우기 (중앙 크롭)"])
+        self.media_mode_combo.setCurrentIndex(max(0, min(int(s.get('media_fit_mode', 0)), 1)))
+        self.media_mode_combo.setView(QListView())
+        self.media_mode_combo.view().setFrameShape(QFrame.Shape.NoFrame)
+        self.media_mode_combo.setStyle(QStyleFactory.create("Fusion"))
+        self.media_mode_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.media_mode_combo.setMinimumHeight(36)
+
         self.layer_combo = DownwardComboBox()
         self.layer_combo.addItems([
-            "0: 화면 뒤 (아이콘 위)", 
-            "1: 일반", 
+            "0: 화면 뒤 (아이콘 위)",
+            "1: 일반",
             "2: 화면 앞 (최상단)"
         ])
-        self.layer_combo.setCurrentIndex(s.get('layer_mode', 1))
+        layer_idx = DesktopWidget.coerce_layer_mode(
+            s.get('layer_mode', DesktopWidget.LAYER_NORMAL),
+            s.get('layer_schema_version', DesktopWidget.LAYER_SCHEMA_VERSION),
+        )
+        self.layer_combo.setCurrentIndex(layer_idx)
         self.layer_combo.setView(QListView())
         self.layer_combo.view().setFrameShape(QFrame.Shape.NoFrame)
         self.layer_combo.setStyle(QStyleFactory.create("Fusion"))
@@ -721,26 +977,23 @@ class SettingsDialog(QDialog):
         self.master_btn.setObjectName("masterBtn")
 
 
-        layout.addRow("미디어 폴더:", self.folder_btn)
-        layout.addRow("", self.folder_label)
-        layout.addRow("실행 파일:", self.exec_btn)
-        layout.addRow("", self.exec_label)
-        layout.addRow("너비:", self.width_input); layout.addRow("높이:", self.height_input)
-        layout.addRow("재생 간격(초):", self.sec_input)
-        layout.addRow("불투명도(%):", self.opacity_spinbox)
-        layout.addRow("", self.opacity_slider)
-        layout.addRow("배경색:", self.bg_combo)
-        layout.addRow("모서리:", self.corner_combo)
-        layout.addRow("레이어:", self.layer_combo)
-        layout.addRow("클릭 잠금:", self.lock_cb)
-        layout.addRow("음소거:", self.mute_checkbox)
-        layout.addRow("성능 보호:", self.gpu_guard_checkbox)
-        shortcut_wrap = QWidget()
-        shortcut_wrap_layout = QVBoxLayout(shortcut_wrap)
-        shortcut_wrap_layout.setContentsMargins(0, 8, 0, 6)
-        shortcut_wrap_layout.setSpacing(6)
-        shortcut_wrap_layout.addWidget(self.shortcut_toggle, 0, Qt.AlignmentFlag.AlignLeft)
-        layout.addRow(shortcut_wrap)
+        left_form.addRow("미디어 폴더:", self.folder_btn)
+        left_form.addRow("", self.folder_label)
+        left_form.addRow("실행 파일:", self.exec_btn)
+        left_form.addRow("", self.exec_label)
+        left_form.addRow("너비:", self.width_input)
+        left_form.addRow("높이:", self.height_input)
+        left_form.addRow("재생 간격(초):", self.sec_input)
+        left_form.addRow("불투명도(%):", self.opacity_spinbox)
+        left_form.addRow("", self.opacity_slider)
+
+        right_form.addRow("배경색:", self.bg_combo)
+        right_form.addRow("모서리:", self.corner_combo)
+        right_form.addRow("미디어 맞춤:", self.media_mode_combo)
+        right_form.addRow("레이어:", self.layer_combo)
+        right_form.addRow("클릭 잠금:", self.lock_cb)
+        right_form.addRow("음소거:", self.mute_checkbox)
+        right_form.addRow("성능 보호:", self.gpu_guard_checkbox)
         
         btns = QHBoxLayout(); apply = QPushButton("저장"); cancel = QPushButton("취소")
         btns.setSpacing(12)
@@ -753,12 +1006,13 @@ class SettingsDialog(QDialog):
         action_row = QHBoxLayout()
         action_row.setContentsMargins(0, 0, 0, 0)
         action_row.setSpacing(10)
+        action_row.addWidget(self.shortcut_toggle, 0, Qt.AlignmentFlag.AlignLeft)
         action_row.addWidget(self.master_btn, 0, Qt.AlignmentFlag.AlignLeft)
         action_row.addStretch()
         btns.addWidget(cancel)
         btns.addWidget(apply)
         action_row.addLayout(btns)
-        layout.addRow(action_row)
+        card_layout.addLayout(action_row)
         
         self.folder_btn.clicked.connect(self.select_folder)
         self.exec_btn.clicked.connect(self.select_exec)
@@ -866,12 +1120,78 @@ class SettingsDialog(QDialog):
         master = self.parent().manager if hasattr(self.parent(), 'manager') else None
         
         if master:
-            master.show_master_window()
-            self.accept()
+            anchor_rect = self.frameGeometry()
+            QTimer.singleShot(
+                0,
+                lambda m=master, a=QRect(anchor_rect): m.show_master_window(anchor_rect=a, restart=True),
+            )
+            self.reject()
 
 
 
 class DesktopWidget(QMainWindow):
+    _desktop_icon_listview_hwnd = 0
+    _desktop_icon_cache_hwnd = 0
+    _desktop_icon_cache_ts = 0.0
+    _desktop_icon_cache_rects = []
+    _desktop_icon_cache_max_age = 0.16
+    _desktop_caption_path_cache_ts = 0.0
+    _desktop_caption_path_cache = {}
+    _desktop_icon_alpha_cache = {}
+    _desktop_icon_pixmap_cache = {}
+    _desktop_icon_image_cache = {}
+    _desktop_text_alpha_cache = {}
+    _desktop_icon_title_font_cache = None
+    _desktop_icon_title_font_cache_ts = 0.0
+    _desktop_sys_himl_large = 0
+    _desktop_shell_items_cache_ts = 0.0
+    _desktop_shell_items_cache = {}
+    _desktop_shell_items_cache_list = []
+    _desktop_icon_edit_info = {}
+    LAYER_BACK = 0
+    LAYER_NORMAL = 1
+    LAYER_TOPMOST = 2
+    LAYER_SCHEMA_VERSION = 4
+
+    @classmethod
+    def coerce_layer_mode(cls, raw_layer, schema_version=None):
+        try:
+            val = int(raw_layer)
+        except Exception:
+            return int(cls.LAYER_NORMAL)
+        try:
+            schema = int(schema_version) if schema_version is not None else int(cls.LAYER_SCHEMA_VERSION)
+        except Exception:
+            schema = 0
+        if schema >= int(cls.LAYER_SCHEMA_VERSION):
+            return max(int(cls.LAYER_BACK), min(int(cls.LAYER_TOPMOST), int(val)))
+        # v3 layout: 0(retired), 1(back/icon-above), 2(normal), 3(top)
+        if schema == 3:
+            v3_map = {
+                0: int(cls.LAYER_BACK),
+                1: int(cls.LAYER_BACK),
+                2: int(cls.LAYER_NORMAL),
+                3: int(cls.LAYER_TOPMOST),
+            }
+            return int(v3_map.get(int(val), int(cls.LAYER_NORMAL)))
+        # v2 layout: 0(bottom), 1(icon-above), 2(normal), 3(top)
+        if schema == 2:
+            v2_map = {
+                0: int(cls.LAYER_BACK),
+                1: int(cls.LAYER_BACK),
+                2: int(cls.LAYER_NORMAL),
+                3: int(cls.LAYER_TOPMOST),
+            }
+            return int(v2_map.get(int(val), int(cls.LAYER_NORMAL)))
+        # Legacy v1 migration: 0(back), 1(normal), 2(top)
+        legacy_map = {
+            0: int(cls.LAYER_BACK),
+            1: int(cls.LAYER_NORMAL),
+            2: int(cls.LAYER_TOPMOST),
+            3: int(cls.LAYER_TOPMOST),
+        }
+        return int(legacy_map.get(int(val), int(cls.LAYER_NORMAL)))
+
     def __init__(self, profile_id, name, manager):
         super().__init__()
         self.profile_id = profile_id
@@ -879,7 +1199,7 @@ class DesktopWidget(QMainWindow):
         self.settings = QSettings("MyHomeApp", f"Profile_{profile_id}")
         self.setAttribute(Qt.WidgetAttribute.WA_NativeWindow) 
 
-        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool | Qt.WindowType.WindowStaysOnBottomHint)
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setMinimumSize(50, 50)
         self.setAcceptDrops(True)
@@ -899,6 +1219,8 @@ class DesktopWidget(QMainWindow):
         self.selection_overlay.hide()
         self.resize_overlay = ResizeHandleOverlay(self)
         self.resize_overlay.hide()
+        self.desktop_icon_clone_overlay = DesktopIconCloneOverlay(self)
+        self.desktop_icon_clone_overlay.hide()
         self.size_hud = QLabel(self)
         self.size_hud.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.size_hud.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -932,6 +1254,9 @@ class DesktopWidget(QMainWindow):
         self.resize_start_pos = None
         self.resize_start_geo = QRect()
         self.is_moving = False
+        self._drag_topmost_active = False
+        self._drag_restore_layer = None
+        self._drag_restore_lock = None
         self._cursor_inside = False
         self._drag_threshold = 5
         self._axis_snap_threshold = 4
@@ -960,8 +1285,32 @@ class DesktopWidget(QMainWindow):
         self.img_label.setAcceptDrops(True)
         self.stack.addWidget(self.img_label)
         
-
-        self.video_widget = QVideoWidget()
+        self.video_scene = None
+        self.video_item = None
+        self._video_graphics_mode = bool(QGraphicsVideoItem is not None)
+        if self._video_graphics_mode:
+            self.video_widget = QGraphicsView()
+            self.video_widget.setFrameShape(QFrame.Shape.NoFrame)
+            self.video_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            self.video_widget.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            self.video_widget.setInteractive(False)
+            self.video_widget.setStyleSheet("QGraphicsView { background: transparent; border: none; }")
+            self.video_widget.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+            self.video_widget.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.FullViewportUpdate)
+            self.video_scene = QGraphicsScene(self.video_widget)
+            self.video_scene.setBackgroundBrush(QBrush(Qt.BrushStyle.NoBrush))
+            self.video_widget.setScene(self.video_scene)
+            self.video_item = QGraphicsVideoItem()
+            self.video_scene.addItem(self.video_item)
+            try:
+                vp = self.video_widget.viewport()
+                if isinstance(vp, QWidget):
+                    vp.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+                    vp.setAutoFillBackground(False)
+            except Exception:
+                pass
+        else:
+            self.video_widget = QVideoWidget()
         self.video_widget.setMinimumSize(0, 0)
         self.video_widget.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
         self.video_widget.setAcceptDrops(True)
@@ -985,7 +1334,10 @@ class DesktopWidget(QMainWindow):
 
         self.media_player = QMediaPlayer()
         self.audio_output = QAudioOutput(); self.media_player.setAudioOutput(self.audio_output)
-        self.media_player.setVideoOutput(self.video_widget)
+        if self._video_graphics_mode and self.video_item is not None:
+            self.media_player.setVideoOutput(self.video_item)
+        else:
+            self.media_player.setVideoOutput(self.video_widget)
         self._last_unmuted_volume = 1.0
         self._audio_output_attached = True
         self.media_player.mediaStatusChanged.connect(self.check_video_status)
@@ -1001,10 +1353,33 @@ class DesktopWidget(QMainWindow):
         self._failure_scheduled = False
         self._media_resetting = False
         self.gpu_guard_enabled = False
+        self.media_fit_mode = 0  # 0: 원본 유지(전체 표시), 1: 위젯 채우기(중앙 크롭)
         self._performance_paused = False
         self._perf_paused_video = False
         self._perf_paused_gif = False
         self._perf_gif_timer_was_active = False
+        self._gif_loop_watch_active = False
+        self._gif_loop_last_frame = -1
+        self._gif_loop_min_deadline = 0.0
+        self._gif_loop_fallback_timer = QTimer(self)
+        self._gif_loop_fallback_timer.setSingleShot(True)
+        self._gif_loop_fallback_timer.timeout.connect(self._on_gif_loop_fallback_timeout)
+        self._gif_swap_pending_movie = None
+        self._gif_swap_pending_path = ""
+        self._gif_swap_pending_duration_ms = 0
+        self._gif_swap_timeout = QTimer(self)
+        self._gif_swap_timeout.setSingleShot(True)
+        self._gif_swap_timeout.setInterval(3200)
+        self._gif_swap_timeout.timeout.connect(self._on_gif_swap_timeout)
+        self._desktop_icon_clone_enabled = True
+        self._desktop_icon_mask_timer = QTimer(self)
+        self._desktop_icon_mask_timer.setInterval(420)
+        self._desktop_icon_mask_timer.timeout.connect(self._refresh_desktop_icon_mask)
+        self._desktop_icon_bootstrap_timer = QTimer(self)
+        self._desktop_icon_bootstrap_timer.setSingleShot(True)
+        self._desktop_icon_bootstrap_timer.setInterval(120)
+        self._desktop_icon_bootstrap_timer.timeout.connect(self._run_desktop_icon_overlay_bootstrap)
+        self._desktop_icon_bootstrap_retries = 0
         self.folder_watcher = QFileSystemWatcher(self)
         self.folder_watcher.directoryChanged.connect(self._on_folder_changed_signal)
         self.folder_refresh_timer = QTimer(self)
@@ -1012,8 +1387,1976 @@ class DesktopWidget(QMainWindow):
         self.folder_refresh_timer.setInterval(250)
         self.folder_refresh_timer.timeout.connect(self._refresh_playlist_from_folder_change)
 
+        self._initial_media_pending = False
+        self._initial_media_prepared = False
         self.load_settings()
-        if self.folder_path: self.update_playlist(); self.next_media()
+        if self.folder_path:
+            self.update_playlist()
+            self._initial_media_pending = True
+
+    def setWindowOpacity(self, level):
+        try:
+            value = float(level)
+        except Exception:
+            value = 1.0
+        value = max(0.0, min(1.0, value))
+        super().setWindowOpacity(value)
+
+    def _desktop_icon_overlay_base_condition(self):
+        if int(getattr(self, "layer_mode", self.LAYER_NORMAL)) != int(self.LAYER_BACK):
+            return False
+        if not bool(getattr(self, "is_locked", False)):
+            return False
+        return True
+
+    @staticmethod
+    def _is_video_path(path):
+        p = str(path or "").lower()
+        return p.endswith((".mp4", ".avi", ".mov"))
+
+    def _is_current_media_video(self):
+        return self._is_video_path(getattr(self, "current_media_path", ""))
+
+    def _refresh_icon_overlay_for_current_media(self):
+        # Media-type switch (video <-> image/gif) can change icon-overlay strategy.
+        # Apply immediately to avoid one-frame artifacts/flicker.
+        try:
+            self.apply_mask_and_style()
+        except Exception:
+            self._sync_desktop_icon_mask_timer()
+
+    def _should_clone_desktop_icons(self):
+        if not (bool(getattr(self, "_desktop_icon_clone_enabled", True)) and self._desktop_icon_overlay_base_condition()):
+            return False
+        # Fallback for environments where graphics-video path is unavailable.
+        if self._is_current_media_video() and not bool(getattr(self, "_video_graphics_mode", False)):
+            return False
+        return True
+
+    def _should_punch_desktop_icons(self):
+        if self._should_clone_desktop_icons():
+            return False
+        return self._desktop_icon_overlay_base_condition()
+
+    def _sync_desktop_icon_mask_timer(self):
+        if not hasattr(self, "_desktop_icon_mask_timer"):
+            return
+        enabled = (self._should_clone_desktop_icons() or self._should_punch_desktop_icons()) and self.isVisible()
+        if enabled:
+            target_interval = 420
+            if self._should_clone_desktop_icons():
+                target_interval = 120
+            elif self._should_punch_desktop_icons():
+                target_interval = 320
+            try:
+                if int(self._desktop_icon_mask_timer.interval()) != int(target_interval):
+                    self._desktop_icon_mask_timer.setInterval(int(target_interval))
+            except Exception:
+                pass
+            if not self._desktop_icon_mask_timer.isActive():
+                self._desktop_icon_mask_timer.start()
+            return
+        if self._desktop_icon_mask_timer.isActive():
+            self._desktop_icon_mask_timer.stop()
+
+    def _schedule_desktop_icon_overlay_bootstrap(self, retries=3, delay_ms=120):
+        if not hasattr(self, "_desktop_icon_bootstrap_timer"):
+            return
+        if not (self._should_clone_desktop_icons() or self._should_punch_desktop_icons()):
+            self._desktop_icon_bootstrap_retries = 0
+            if self._desktop_icon_bootstrap_timer.isActive():
+                self._desktop_icon_bootstrap_timer.stop()
+            return
+        try:
+            retry_count = max(0, min(8, int(retries)))
+        except Exception:
+            retry_count = 3
+        self._desktop_icon_bootstrap_retries = max(int(self._desktop_icon_bootstrap_retries), int(retry_count))
+        try:
+            wait_ms = max(20, int(delay_ms))
+        except Exception:
+            wait_ms = 120
+        self._desktop_icon_bootstrap_timer.start(int(wait_ms))
+
+    def _run_desktop_icon_overlay_bootstrap(self):
+        if not self.isVisible():
+            return
+        if self._should_clone_desktop_icons():
+            self._refresh_desktop_icon_clone_overlay(force=True)
+        elif self._should_punch_desktop_icons():
+            self.apply_mask_and_style()
+        self._sync_desktop_icon_mask_timer()
+        if int(getattr(self, "_desktop_icon_bootstrap_retries", 0)) > 0:
+            self._desktop_icon_bootstrap_retries = int(self._desktop_icon_bootstrap_retries) - 1
+            if hasattr(self, "_desktop_icon_bootstrap_timer"):
+                self._desktop_icon_bootstrap_timer.start(140)
+
+    def _set_clone_overlay_items(self, items):
+        if not hasattr(self, "desktop_icon_clone_overlay"):
+            return
+        overlay = self.desktop_icon_clone_overlay
+        if not isinstance(overlay, QWidget):
+            return
+        if not items:
+            overlay.set_items([])
+            overlay.hide()
+            return
+        overlay.setGeometry(self.rect())
+        overlay.set_items(items)
+        overlay.show()
+        overlay.raise_()
+
+    def _refresh_desktop_icon_clone_overlay(self, force=False):
+        if not self._should_clone_desktop_icons() or not self.isVisible():
+            self._set_clone_overlay_items([])
+            return
+        items = self._desktop_icon_clone_items_local(force=bool(force))
+        if not items and not force:
+            items = self._desktop_icon_clone_items_local(force=True)
+        self._set_clone_overlay_items(items)
+
+    def _refresh_desktop_icon_mask(self):
+        clone_mode = self._should_clone_desktop_icons()
+        punch_mode = self._should_punch_desktop_icons()
+        if (not clone_mode and not punch_mode) or not self.isVisible():
+            self._set_clone_overlay_items([])
+            self._sync_desktop_icon_mask_timer()
+            return
+        if clone_mode:
+            self._refresh_desktop_icon_clone_overlay(force=False)
+            return
+        self.apply_mask_and_style()
+
+    @classmethod
+    def _resolve_desktop_listview_hwnd(cls, refresh=False):
+        cached = int(getattr(cls, "_desktop_icon_listview_hwnd", 0) or 0)
+        if not refresh and cached:
+            try:
+                if win32gui.IsWindow(cached) and str(win32gui.GetClassName(cached)) == "SysListView32":
+                    return int(cached)
+            except Exception:
+                pass
+        hwnd = 0
+        defview = 0
+        try:
+            prog = int(win32gui.FindWindow("Progman", None) or 0)
+        except Exception:
+            prog = 0
+        if prog:
+            try:
+                defview = int(win32gui.FindWindowEx(int(prog), 0, "SHELLDLL_DefView", None) or 0)
+            except Exception:
+                defview = 0
+        if not defview:
+            found = {"defview": 0}
+
+            def _enum_top(window_hwnd, lparam):
+                try:
+                    dv = int(win32gui.FindWindowEx(int(window_hwnd), 0, "SHELLDLL_DefView", None) or 0)
+                except Exception:
+                    dv = 0
+                if dv:
+                    lparam["defview"] = int(dv)
+                    return False
+                return True
+
+            try:
+                win32gui.EnumWindows(_enum_top, found)
+            except Exception:
+                pass
+            defview = int(found.get("defview") or 0)
+        if defview:
+            try:
+                hwnd = int(win32gui.FindWindowEx(int(defview), 0, "SysListView32", None) or 0)
+            except Exception:
+                hwnd = 0
+        try:
+            if hwnd and win32gui.IsWindow(hwnd) and str(win32gui.GetClassName(hwnd)) == "SysListView32":
+                cls._desktop_icon_listview_hwnd = int(hwnd)
+                return int(hwnd)
+        except Exception:
+            pass
+        cls._desktop_icon_listview_hwnd = 0
+        return 0
+
+    @classmethod
+    def _query_desktop_icon_rects_screen(cls, listview_hwnd):
+        if not listview_hwnd:
+            return []
+        lvm_first = 0x1000
+        lvm_getitemcount = lvm_first + 4
+        lvm_getitemrect = lvm_first + 14
+        lvm_getitemtextw = lvm_first + 115
+        lvm_getitemw = lvm_first + 75
+        lvm_getitemstate = lvm_first + 44
+        lvm_geteditcontrol = lvm_first + 24
+        lvif_image = 0x00000002
+        lvif_text = 0x00000001
+        lvir_icon = 1
+        lvir_label = 2
+        lvir_selectbounds = 3
+        lvis_selected = 0x0002
+        lvis_focused = 0x0001
+        try:
+            count = int(win32gui.SendMessage(int(listview_hwnd), int(lvm_getitemcount), 0, 0) or 0)
+        except Exception:
+            count = 0
+        if count <= 0:
+            cls._desktop_icon_edit_info = {}
+            return []
+
+        class RECT(ctypes.Structure):
+            _fields_ = [
+                ("left", ctypes.c_long),
+                ("top", ctypes.c_long),
+                ("right", ctypes.c_long),
+                ("bottom", ctypes.c_long),
+            ]
+
+        class LVITEMW(ctypes.Structure):
+            _fields_ = [
+                ("mask", wintypes.UINT),
+                ("iItem", ctypes.c_int),
+                ("iSubItem", ctypes.c_int),
+                ("state", wintypes.UINT),
+                ("stateMask", wintypes.UINT),
+                ("pszText", wintypes.LPWSTR),
+                ("cchTextMax", ctypes.c_int),
+                ("iImage", ctypes.c_int),
+                ("lParam", wintypes.LPARAM),
+                ("iIndent", ctypes.c_int),
+                ("iGroupId", ctypes.c_int),
+                ("cColumns", wintypes.UINT),
+                ("puColumns", ctypes.POINTER(wintypes.UINT)),
+                ("piColFmt", ctypes.POINTER(ctypes.c_int)),
+                ("iGroup", ctypes.c_int),
+            ]
+
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+        try:
+            user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+            user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+            kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+            kernel32.OpenProcess.restype = wintypes.HANDLE
+            kernel32.VirtualAllocEx.argtypes = [
+                wintypes.HANDLE,
+                wintypes.LPVOID,
+                ctypes.c_size_t,
+                wintypes.DWORD,
+                wintypes.DWORD,
+            ]
+            kernel32.VirtualAllocEx.restype = wintypes.LPVOID
+            kernel32.ReadProcessMemory.argtypes = [
+                wintypes.HANDLE,
+                wintypes.LPCVOID,
+                wintypes.LPVOID,
+                ctypes.c_size_t,
+                ctypes.POINTER(ctypes.c_size_t),
+            ]
+            kernel32.ReadProcessMemory.restype = wintypes.BOOL
+            kernel32.WriteProcessMemory.argtypes = [
+                wintypes.HANDLE,
+                wintypes.LPVOID,
+                wintypes.LPCVOID,
+                ctypes.c_size_t,
+                ctypes.POINTER(ctypes.c_size_t),
+            ]
+            kernel32.WriteProcessMemory.restype = wintypes.BOOL
+            kernel32.VirtualFreeEx.argtypes = [
+                wintypes.HANDLE,
+                wintypes.LPVOID,
+                ctypes.c_size_t,
+                wintypes.DWORD,
+            ]
+            kernel32.VirtualFreeEx.restype = wintypes.BOOL
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+            kernel32.CloseHandle.restype = wintypes.BOOL
+        except Exception:
+            pass
+
+        pid = wintypes.DWORD(0)
+        try:
+            user32.GetWindowThreadProcessId(int(listview_hwnd), ctypes.byref(pid))
+        except Exception:
+            return []
+        if int(pid.value) <= 0:
+            return []
+
+        process_access = int(0x0400 | 0x0010 | 0x0020 | 0x0008)  # QUERY | VM_READ | VM_WRITE | VM_OPERATION
+        mem_commit_reserve = int(0x1000 | 0x2000)
+        mem_release = int(0x8000)
+        page_readwrite = int(0x04)
+        proc = None
+        remote_ptr = None
+        layouts = []
+        rect_size = int(ctypes.sizeof(RECT))
+        lvitem_size = int(ctypes.sizeof(LVITEMW))
+        text_cch = 280
+        text_buf_size = int(text_cch * ctypes.sizeof(ctypes.c_wchar))
+        align = 16
+        rect_off = 0
+        lvitem_off = int(((rect_size + (align - 1)) // align) * align)
+        text_off = int(((lvitem_off + lvitem_size + (align - 1)) // align) * align)
+        alloc_size = max(rect_size, int(text_off + text_buf_size))
+        shell_items = cls._desktop_shell_items_by_name(refresh=False)
+        shell_items_order = cls._desktop_shell_items_in_order(refresh=False)
+        shell_name_seen = {}
+
+        def _normalize_item_name(value):
+            s = str(value or "").strip().lower()
+            if not s:
+                return ""
+            return " ".join(s.split())
+
+        def _names_similar(a, b):
+            na = _normalize_item_name(a)
+            nb = _normalize_item_name(b)
+            if not na or not nb:
+                return False
+            if na == nb:
+                return True
+            sa = os.path.splitext(na)[0]
+            sb = os.path.splitext(nb)[0]
+            return bool(sa and sb and (sa == sb or sa == nb or sb == na))
+
+        def _read_item_rect(item_index, rect_code, remote_rect):
+            probe = RECT()
+            probe.left = int(rect_code)
+            probe.top = 0
+            probe.right = 0
+            probe.bottom = 0
+            try:
+                written = ctypes.c_size_t(0)
+                ok_write = bool(
+                    kernel32.WriteProcessMemory(
+                        proc,
+                        ctypes.c_void_p(int(remote_rect)),
+                        ctypes.byref(probe),
+                        rect_size,
+                        ctypes.byref(written),
+                    )
+                )
+            except Exception:
+                ok_write = False
+            if not ok_write:
+                return None
+            try:
+                ok = int(
+                    win32gui.SendMessage(
+                        int(listview_hwnd),
+                        int(lvm_getitemrect),
+                        int(item_index),
+                        int(remote_rect),
+                    )
+                    or 0
+                )
+            except Exception:
+                ok = 0
+            if not ok:
+                return None
+            out = RECT()
+            bytes_read = ctypes.c_size_t(0)
+            try:
+                copied = bool(
+                    kernel32.ReadProcessMemory(
+                        proc,
+                        ctypes.c_void_p(int(remote_rect)),
+                        ctypes.byref(out),
+                        rect_size,
+                        ctypes.byref(bytes_read),
+                    )
+                )
+            except Exception:
+                copied = False
+            if not copied or int(bytes_read.value) < rect_size:
+                return None
+            return (int(out.left), int(out.top), int(out.right), int(out.bottom))
+
+        def _read_item_image_index(item_index, remote_lvitem):
+            item = LVITEMW()
+            item.mask = int(lvif_image)
+            item.iItem = int(item_index)
+            item.iSubItem = 0
+            item.iImage = -1
+            try:
+                written = ctypes.c_size_t(0)
+                ok_write = bool(
+                    kernel32.WriteProcessMemory(
+                        proc,
+                        ctypes.c_void_p(int(remote_lvitem)),
+                        ctypes.byref(item),
+                        lvitem_size,
+                        ctypes.byref(written),
+                    )
+                )
+            except Exception:
+                ok_write = False
+            if not ok_write:
+                return -1
+            try:
+                ok = int(
+                    win32gui.SendMessage(
+                        int(listview_hwnd),
+                        int(lvm_getitemw),
+                        0,
+                        int(remote_lvitem),
+                    )
+                    or 0
+                )
+            except Exception:
+                ok = 0
+            if not ok:
+                return -1
+            out = LVITEMW()
+            bytes_read = ctypes.c_size_t(0)
+            try:
+                copied = bool(
+                    kernel32.ReadProcessMemory(
+                        proc,
+                        ctypes.c_void_p(int(remote_lvitem)),
+                        ctypes.byref(out),
+                        lvitem_size,
+                        ctypes.byref(bytes_read),
+                    )
+                )
+            except Exception:
+                copied = False
+            if not copied or int(bytes_read.value) < lvitem_size:
+                return -1
+            try:
+                return int(out.iImage)
+            except Exception:
+                return -1
+
+        def _read_item_text(item_index, remote_lvitem, remote_text):
+            item = LVITEMW()
+            item.mask = int(lvif_text)
+            item.iItem = int(item_index)
+            item.iSubItem = 0
+            item.cchTextMax = int(text_cch)
+            item.pszText = ctypes.cast(ctypes.c_void_p(int(remote_text)), wintypes.LPWSTR)
+            try:
+                written = ctypes.c_size_t(0)
+                ok_write = bool(
+                    kernel32.WriteProcessMemory(
+                        proc,
+                        ctypes.c_void_p(int(remote_lvitem)),
+                        ctypes.byref(item),
+                        lvitem_size,
+                        ctypes.byref(written),
+                    )
+                )
+            except Exception:
+                ok_write = False
+            if not ok_write:
+                return ""
+            try:
+                win32gui.SendMessage(
+                    int(listview_hwnd),
+                    int(lvm_getitemtextw),
+                    int(item_index),
+                    int(remote_lvitem),
+                )
+            except Exception:
+                return ""
+            raw = ctypes.create_string_buffer(text_buf_size)
+            bytes_read = ctypes.c_size_t(0)
+            try:
+                copied = bool(
+                    kernel32.ReadProcessMemory(
+                        proc,
+                        ctypes.c_void_p(int(remote_text)),
+                        raw,
+                        text_buf_size,
+                        ctypes.byref(bytes_read),
+                    )
+                )
+            except Exception:
+                copied = False
+            if not copied:
+                return ""
+            try:
+                text = raw.raw.decode("utf-16-le", errors="ignore").split("\x00", 1)[0]
+            except Exception:
+                text = ""
+            return str(text or "").strip()
+
+        def _read_item_state(item_index, mask):
+            try:
+                st = int(
+                    win32gui.SendMessage(
+                        int(listview_hwnd),
+                        int(lvm_getitemstate),
+                        int(item_index),
+                        int(mask),
+                    )
+                    or 0
+                )
+            except Exception:
+                st = 0
+            return int(st)
+
+        def _client_rect_to_screen(rect_tuple):
+            if not rect_tuple:
+                return None
+            left, top, right, bottom = rect_tuple
+            try:
+                sx1, sy1 = win32gui.ClientToScreen(int(listview_hwnd), (int(left), int(top)))
+                sx2, sy2 = win32gui.ClientToScreen(int(listview_hwnd), (int(right), int(bottom)))
+            except Exception:
+                return None
+            x1 = min(int(sx1), int(sx2))
+            y1 = min(int(sy1), int(sy2))
+            x2 = max(int(sx1), int(sx2))
+            y2 = max(int(sy1), int(sy2))
+            w = max(0, int(x2 - x1))
+            h = max(0, int(y2 - y1))
+            if w <= 0 or h <= 0:
+                return None
+            return QRect(int(x1), int(y1), int(w), int(h))
+
+        try:
+            proc = kernel32.OpenProcess(process_access, False, int(pid.value))
+            if not proc:
+                return []
+            remote_ptr = kernel32.VirtualAllocEx(proc, None, alloc_size, mem_commit_reserve, page_readwrite)
+            if not remote_ptr:
+                return []
+            remote_base = int(remote_ptr)
+            remote_rect = int(remote_base + rect_off)
+            remote_lvitem = int(remote_base + lvitem_off)
+            remote_text = int(remote_base + text_off)
+            for idx in range(int(count)):
+                icon_rect = _client_rect_to_screen(_read_item_rect(int(idx), int(lvir_icon), int(remote_rect)))
+                label_rect = _client_rect_to_screen(_read_item_rect(int(idx), int(lvir_label), int(remote_rect)))
+                select_rect = _client_rect_to_screen(_read_item_rect(int(idx), int(lvir_selectbounds), int(remote_rect)))
+                image_index = _read_item_image_index(int(idx), int(remote_lvitem))
+                label_text = _read_item_text(int(idx), int(remote_lvitem), int(remote_text))
+                state_bits = _read_item_state(int(idx), int(lvis_selected | lvis_focused))
+                if icon_rect is None and label_rect is None:
+                    continue
+                key = str(label_text or "").strip().lower()
+                shell_meta = {}
+                seq_meta = {}
+                if int(idx) < len(shell_items_order):
+                    try:
+                        seq_meta = dict(shell_items_order[int(idx)] or {})
+                    except Exception:
+                        seq_meta = {}
+                if seq_meta:
+                    seq_name = str(seq_meta.get("name", "") or "")
+                    if _names_similar(label_text, seq_name):
+                        shell_meta = dict(seq_meta)
+                if key:
+                    pos = int(shell_name_seen.get(key, 0) or 0)
+                    shell_name_seen[key] = int(pos + 1)
+                    candidates = list(shell_items.get(key, []) or [])
+                    if not shell_meta and pos < len(candidates):
+                        shell_meta = dict(candidates[pos] or {})
+                    elif not shell_items:
+                        shell_items = cls._desktop_shell_items_by_name(refresh=True)
+                        shell_items_order = cls._desktop_shell_items_in_order(refresh=True)
+                        candidates = list(shell_items.get(key, []) or [])
+                        if not shell_meta and pos < len(candidates):
+                            shell_meta = dict(candidates[pos] or {})
+                if not shell_meta and seq_meta:
+                    shell_meta = dict(seq_meta)
+                shell_path = str(shell_meta.get("path", "") or "")
+                shell_virtual = bool(shell_meta.get("is_virtual", False))
+                shell_folder = bool(shell_meta.get("is_folder", False))
+                display_text = str(shell_meta.get("name", "") or "").strip()
+                if not display_text:
+                    display_text = str(label_text or "").strip()
+                if select_rect is None:
+                    merged = None
+                    if isinstance(icon_rect, QRect) and isinstance(label_rect, QRect):
+                        merged = QRect(icon_rect).united(QRect(label_rect))
+                    elif isinstance(icon_rect, QRect):
+                        merged = QRect(icon_rect)
+                    elif isinstance(label_rect, QRect):
+                        merged = QRect(label_rect)
+                    if isinstance(merged, QRect) and int(merged.width()) > 0 and int(merged.height()) > 0:
+                        select_rect = merged.adjusted(-4, -2, 4, 2)
+                if shell_path and not shell_virtual:
+                    try:
+                        shell_folder = bool(os.path.isdir(shell_path))
+                    except Exception:
+                        pass
+                layouts.append(
+                    {
+                        "icon": icon_rect,
+                        "label": label_rect,
+                        "text": display_text,
+                        "image_index": int(image_index),
+                        "shell_path": shell_path,
+                        "shell_is_folder": bool(shell_folder),
+                        "shell_is_virtual": bool(shell_virtual),
+                        "selected": bool(int(state_bits) & int(lvis_selected)),
+                        "focused": bool(int(state_bits) & int(lvis_focused)),
+                        "select": select_rect,
+                    }
+                )
+            edit_info = {}
+            try:
+                edit_hwnd = int(
+                    win32gui.SendMessage(
+                        int(listview_hwnd),
+                        int(lvm_geteditcontrol),
+                        0,
+                        0,
+                    )
+                    or 0
+                )
+            except Exception:
+                edit_hwnd = 0
+            if edit_hwnd:
+                try:
+                    if win32gui.IsWindow(edit_hwnd) and win32gui.IsWindowVisible(edit_hwnd):
+                        left, top, right, bottom = win32gui.GetWindowRect(int(edit_hwnd))
+                        txt = str(win32gui.GetWindowText(int(edit_hwnd)) or "")
+                        edit_info = {
+                            "rect": QRect(
+                                int(left),
+                                int(top),
+                                max(0, int(right - left)),
+                                max(0, int(bottom - top)),
+                            ),
+                            "text": txt,
+                            "hwnd": int(edit_hwnd),
+                        }
+                except Exception:
+                    edit_info = {}
+            cls._desktop_icon_edit_info = dict(edit_info)
+        finally:
+            try:
+                if proc and remote_ptr:
+                    kernel32.VirtualFreeEx(proc, ctypes.c_void_p(int(remote_ptr)), 0, mem_release)
+            except Exception:
+                pass
+            try:
+                if proc:
+                    kernel32.CloseHandle(proc)
+            except Exception:
+                pass
+        return layouts
+
+    @classmethod
+    def _desktop_icon_rects_screen(cls, force=False):
+        now = float(time.monotonic())
+        cache_hwnd = int(getattr(cls, "_desktop_icon_cache_hwnd", 0) or 0)
+        cache_ts = float(getattr(cls, "_desktop_icon_cache_ts", 0.0) or 0.0)
+        cache_rects = list(getattr(cls, "_desktop_icon_cache_rects", []) or [])
+        try:
+            cache_max_age = max(0.05, float(getattr(cls, "_desktop_icon_cache_max_age", 0.16) or 0.16))
+        except Exception:
+            cache_max_age = 0.16
+        if (
+            not force
+            and cache_hwnd
+            and (now - cache_ts) <= cache_max_age
+        ):
+            try:
+                if win32gui.IsWindow(int(cache_hwnd)):
+                    return cache_rects
+            except Exception:
+                pass
+        listview_hwnd = cls._resolve_desktop_listview_hwnd(refresh=bool(force))
+        if not listview_hwnd:
+            cls._desktop_icon_cache_hwnd = 0
+            cls._desktop_icon_cache_ts = now
+            cls._desktop_icon_cache_rects = []
+            cls._desktop_icon_edit_info = {}
+            return []
+        rects = cls._query_desktop_icon_rects_screen(int(listview_hwnd))
+        cls._desktop_icon_cache_hwnd = int(listview_hwnd)
+        cls._desktop_icon_cache_ts = now
+        cls._desktop_icon_cache_rects = list(rects)
+        return list(rects)
+
+    @classmethod
+    def _desktop_icon_edit_info_screen(cls):
+        info = dict(getattr(cls, "_desktop_icon_edit_info", {}) or {})
+        rect = info.get("rect")
+        if isinstance(rect, QRect) and int(rect.width()) > 0 and int(rect.height()) > 0:
+            return info
+        return {}
+
+    @classmethod
+    def _desktop_caption_path_map(cls, refresh=False):
+        now = float(time.monotonic())
+        cache_ts = float(getattr(cls, "_desktop_caption_path_cache_ts", 0.0) or 0.0)
+        cached = dict(getattr(cls, "_desktop_caption_path_cache", {}) or {})
+        if not refresh and cached and (now - cache_ts) <= 6.0:
+            return cached
+
+        mapping = {}
+        dirs = []
+        try:
+            class GUID(ctypes.Structure):
+                _fields_ = [
+                    ("Data1", wintypes.DWORD),
+                    ("Data2", wintypes.WORD),
+                    ("Data3", wintypes.WORD),
+                    ("Data4", ctypes.c_ubyte * 8),
+                ]
+
+            def _guid(text):
+                s = str(text or "").strip().strip("{}")
+                parts = s.split("-")
+                if len(parts) != 5:
+                    return None
+                d4_hex = parts[3] + parts[4]
+                if len(d4_hex) != 16:
+                    return None
+                d4 = (ctypes.c_ubyte * 8)(*([int(d4_hex[i:i + 2], 16) for i in range(0, 16, 2)]))
+                return GUID(int(parts[0], 16), int(parts[1], 16), int(parts[2], 16), d4)
+
+            shell32 = ctypes.windll.shell32
+            ole32 = ctypes.windll.ole32
+            shell32.SHGetKnownFolderPath.argtypes = [
+                ctypes.POINTER(GUID),
+                wintypes.DWORD,
+                wintypes.HANDLE,
+                ctypes.POINTER(ctypes.c_wchar_p),
+            ]
+            shell32.SHGetKnownFolderPath.restype = ctypes.c_long
+
+            def _known_folder_path(guid_text):
+                g = _guid(guid_text)
+                if g is None:
+                    return ""
+                out_ptr = ctypes.c_wchar_p()
+                hr = int(shell32.SHGetKnownFolderPath(ctypes.byref(g), 0, None, ctypes.byref(out_ptr)))
+                if hr != 0:
+                    return ""
+                try:
+                    return str(out_ptr.value or "")
+                finally:
+                    try:
+                        ole32.CoTaskMemFree(out_ptr)
+                    except Exception:
+                        pass
+
+            desktop_dir = _known_folder_path("B4BFCC3A-DB2C-424C-B029-7FE99A87C641")
+            public_desktop_dir = _known_folder_path("C4AA340D-F20F-4863-AFEF-F87EF2E6BA25")
+            if desktop_dir:
+                dirs.append(desktop_dir)
+            if public_desktop_dir:
+                dirs.append(public_desktop_dir)
+        except Exception:
+            pass
+        try:
+            dirs.append(os.path.join(os.path.expanduser("~"), "Desktop"))
+        except Exception:
+            pass
+        try:
+            pub = str(os.environ.get("PUBLIC", "") or "").strip()
+            if pub:
+                dirs.append(os.path.join(pub, "Desktop"))
+        except Exception:
+            pass
+
+        seen_dirs = set()
+        for base in dirs:
+            d = os.path.normpath(str(base or ""))
+            if not d or d in seen_dirs:
+                continue
+            seen_dirs.add(d)
+            if not os.path.isdir(d):
+                continue
+            try:
+                for entry in os.scandir(d):
+                    try:
+                        name = str(entry.name or "")
+                        path = str(entry.path or "")
+                    except Exception:
+                        continue
+                    if not name or not path:
+                        continue
+                    low_full = name.lower()
+                    stem = os.path.splitext(name)[0].lower()
+                    if low_full and low_full not in mapping:
+                        mapping[low_full] = path
+                    if stem and stem not in mapping:
+                        mapping[stem] = path
+            except Exception:
+                continue
+
+        cls._desktop_caption_path_cache = dict(mapping)
+        cls._desktop_caption_path_cache_ts = now
+        return dict(mapping)
+
+    @classmethod
+    def _desktop_caption_to_path(cls, caption):
+        key = str(caption or "").strip().lower()
+        if not key:
+            return ""
+        table = cls._desktop_caption_path_map(refresh=False)
+        path = str(table.get(key, "") or "")
+        if path:
+            return path
+        # Handle trailing ellipsis fallback from narrow icon labels.
+        key2 = key.rstrip(".").strip()
+        if key2:
+            path = str(table.get(key2, "") or "")
+            if path:
+                return path
+        return ""
+
+    @classmethod
+    def _desktop_shell_items_by_name(cls, refresh=False):
+        now = float(time.monotonic())
+        cache_ts = float(getattr(cls, "_desktop_shell_items_cache_ts", 0.0) or 0.0)
+        cached = dict(getattr(cls, "_desktop_shell_items_cache", {}) or {})
+        cached_list = list(getattr(cls, "_desktop_shell_items_cache_list", []) or [])
+        if not refresh and cached and cached_list and (now - cache_ts) <= 2.0:
+            return cached
+        out = {}
+        ordered = []
+        if win32com is None:
+            cls._desktop_shell_items_cache = {}
+            cls._desktop_shell_items_cache_list = []
+            cls._desktop_shell_items_cache_ts = now
+            return {}
+        try:
+            shell = win32com.Dispatch("Shell.Application")
+            ns = shell.Namespace(0)
+            if ns is not None:
+                items = ns.Items()
+                count = int(getattr(items, "Count", 0) or 0)
+                for i in range(count):
+                    try:
+                        it = items.Item(i)
+                    except Exception:
+                        continue
+                    try:
+                        name = str(getattr(it, "Name", "") or "").strip()
+                    except Exception:
+                        name = ""
+                    if not name:
+                        continue
+                    key = name.lower()
+                    try:
+                        path = str(getattr(it, "Path", "") or "").strip()
+                    except Exception:
+                        path = ""
+                    try:
+                        is_folder = bool(getattr(it, "IsFolder", False))
+                    except Exception:
+                        is_folder = False
+                    is_virtual = bool(path.startswith("::")) if path else True
+                    rec = {
+                        "name": str(name),
+                        "path": str(path),
+                        "is_folder": bool(is_folder),
+                        "is_virtual": bool(is_virtual),
+                    }
+                    ordered.append(rec)
+                    out.setdefault(key, []).append(rec)
+        except Exception:
+            out = {}
+            ordered = []
+        cls._desktop_shell_items_cache = dict(out)
+        cls._desktop_shell_items_cache_list = list(ordered)
+        cls._desktop_shell_items_cache_ts = now
+        return dict(out)
+
+    @classmethod
+    def _desktop_shell_items_in_order(cls, refresh=False):
+        now = float(time.monotonic())
+        cache_ts = float(getattr(cls, "_desktop_shell_items_cache_ts", 0.0) or 0.0)
+        cached = list(getattr(cls, "_desktop_shell_items_cache_list", []) or [])
+        if not refresh and cached and (now - cache_ts) <= 2.0:
+            return cached
+        cls._desktop_shell_items_by_name(refresh=bool(refresh))
+        return list(getattr(cls, "_desktop_shell_items_cache_list", []) or [])
+
+    @staticmethod
+    def _is_recycle_caption(caption):
+        key = str(caption or "").strip().lower()
+        if not key:
+            return False
+        recycle_keys = {
+            "recycle bin",
+            "휴지통",
+            "papelera de reciclaje",
+            "corbeille",
+            "cestino",
+            "корзина",
+            "kosz",
+            "lixeira",
+        }
+        return bool(key in recycle_keys)
+
+    @classmethod
+    def _desktop_icon_identity(cls, caption):
+        caption_key = str(caption or "").strip().lower()
+        path = cls._desktop_caption_to_path(caption)
+        stock_recycle = cls._is_recycle_caption(caption)
+        if path and os.path.exists(path):
+            icon_key = str(os.path.normcase(path))
+            return icon_key, str(path), False
+        if stock_recycle:
+            return "stock::recycler", "", True
+        return f"caption::{caption_key}", "", False
+
+    @staticmethod
+    def _as_win_handle(value):
+        try:
+            return int(ctypes.c_void_p(int(value)).value or 0)
+        except Exception:
+            return 0
+
+    @classmethod
+    def _resolve_desktop_sys_himl_large(cls):
+        cached = cls._as_win_handle(getattr(cls, "_desktop_sys_himl_large", 0) or 0)
+        if cached:
+            return int(cached)
+        try:
+            class SHFILEINFOW(ctypes.Structure):
+                _fields_ = [
+                    ("hIcon", ctypes.c_void_p),
+                    ("iIcon", ctypes.c_int),
+                    ("dwAttributes", ctypes.c_uint),
+                    ("szDisplayName", ctypes.c_wchar * 260),
+                    ("szTypeName", ctypes.c_wchar * 80),
+                ]
+
+            shfi = SHFILEINFOW()
+            shgfi_sysiconindex = int(0x000004000)
+            shgfi_large = int(0x000000000)
+            shell32 = ctypes.windll.shell32
+            shell32.SHGetFileInfoW.argtypes = [
+                wintypes.LPCWSTR,
+                wintypes.DWORD,
+                ctypes.POINTER(SHFILEINFOW),
+                ctypes.c_uint,
+                ctypes.c_uint,
+            ]
+            shell32.SHGetFileInfoW.restype = ctypes.c_void_p
+            himl_raw = shell32.SHGetFileInfoW(
+                    ctypes.c_wchar_p("C:\\"),
+                    0,
+                    ctypes.byref(shfi),
+                    ctypes.sizeof(shfi),
+                    int(shgfi_sysiconindex | shgfi_large),
+                )
+            himl = cls._as_win_handle(himl_raw)
+            cls._desktop_sys_himl_large = int(himl)
+            return int(himl)
+        except Exception:
+            cls._desktop_sys_himl_large = 0
+            return 0
+
+    @classmethod
+    def _icon_image_for_sys_index(cls, image_index, icon_px):
+        size = max(12, min(128, int(icon_px)))
+        try:
+            idx = int(image_index)
+        except Exception:
+            idx = -1
+        cache_key = ("sysidx", int(idx), int(size))
+        cached = cls._desktop_icon_image_cache.get(cache_key)
+        if isinstance(cached, QImage):
+            return QImage(cached)
+        if idx < 0:
+            img = QImage()
+            cls._desktop_icon_image_cache[cache_key] = QImage(img)
+            return QImage(img)
+
+        himl = cls._resolve_desktop_sys_himl_large()
+        if not himl:
+            img = QImage()
+            cls._desktop_icon_image_cache[cache_key] = QImage(img)
+            return QImage(img)
+
+        image = QImage()
+        hicon = 0
+        hbm_color = 0
+        hbm_mask = 0
+        try:
+            comctl32 = ctypes.windll.comctl32
+            comctl32.ImageList_GetIcon.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_uint]
+            comctl32.ImageList_GetIcon.restype = ctypes.c_void_p
+            hicon = cls._as_win_handle(comctl32.ImageList_GetIcon(int(himl), int(idx), 0))
+            if hicon:
+                icon_info = win32gui.GetIconInfo(int(hicon))
+                if isinstance(icon_info, tuple) and len(icon_info) >= 5:
+                    hbm_mask = cls._as_win_handle(icon_info[3])
+                    hbm_color = cls._as_win_handle(icon_info[4])
+
+            if hbm_color and win32ui is not None:
+                bmp = win32ui.CreateBitmapFromHandle(int(hbm_color))
+                info = bmp.GetInfo()
+                bits = bmp.GetBitmapBits(True)
+                bw = int(info.get("bmWidth", 0))
+                bh = int(info.get("bmHeight", 0))
+                bpp = int(info.get("bmBitsPixel", 0))
+                stride = int(max(0, bw * 4))
+                if bw > 0 and bh > 0 and bpp >= 32 and stride > 0 and len(bits) >= stride * bh:
+                    qimg = QImage(bits, bw, bh, stride, QImage.Format.Format_ARGB32).copy()
+                    qimg = qimg.scaled(
+                        int(size),
+                        int(size),
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation,
+                    )
+                    canvas = QImage(int(size), int(size), QImage.Format.Format_ARGB32)
+                    canvas.fill(0)
+                    painter = QPainter(canvas)
+                    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+                    dx = int((int(size) - int(qimg.width())) // 2)
+                    dy = int((int(size) - int(qimg.height())) // 2)
+                    painter.drawImage(int(dx), int(dy), qimg)
+                    painter.end()
+                    image = canvas
+        except Exception:
+            image = QImage()
+        finally:
+            try:
+                if hicon:
+                    win32gui.DestroyIcon(int(hicon))
+            except Exception:
+                pass
+            try:
+                if hbm_color:
+                    win32gui.DeleteObject(int(hbm_color))
+            except Exception:
+                pass
+            try:
+                if hbm_mask:
+                    win32gui.DeleteObject(int(hbm_mask))
+            except Exception:
+                pass
+
+        cls._desktop_icon_image_cache[cache_key] = QImage(image)
+        if len(cls._desktop_icon_image_cache) > 480:
+            try:
+                cls._desktop_icon_image_cache.pop(next(iter(cls._desktop_icon_image_cache)))
+            except Exception:
+                pass
+        return QImage(image)
+
+    @classmethod
+    def _icon_pixmap_for_sys_index(cls, image_index, icon_px):
+        size = max(12, min(128, int(icon_px)))
+        try:
+            idx = int(image_index)
+        except Exception:
+            idx = -1
+        cache_key = ("sysidx", int(idx), int(size))
+        cached = cls._desktop_icon_pixmap_cache.get(cache_key)
+        if isinstance(cached, QPixmap) and not cached.isNull():
+            return QPixmap(cached)
+        image = cls._icon_image_for_sys_index(int(idx), int(size))
+        if image.isNull():
+            return QPixmap()
+        pix = QPixmap.fromImage(image)
+        cls._desktop_icon_pixmap_cache[cache_key] = QPixmap(pix)
+        if len(cls._desktop_icon_pixmap_cache) > 480:
+            try:
+                cls._desktop_icon_pixmap_cache.pop(next(iter(cls._desktop_icon_pixmap_cache)))
+            except Exception:
+                pass
+        return QPixmap(pix)
+
+    @classmethod
+    def _image_from_hicon(cls, hicon, icon_px):
+        size = max(12, min(128, int(icon_px)))
+        hicon = cls._as_win_handle(hicon)
+        if not hicon:
+            return QImage()
+        hbm_color = 0
+        hbm_mask = 0
+        try:
+            icon_info = win32gui.GetIconInfo(int(hicon))
+            if isinstance(icon_info, tuple) and len(icon_info) >= 5:
+                hbm_mask = cls._as_win_handle(icon_info[3])
+                hbm_color = cls._as_win_handle(icon_info[4])
+            if hbm_color and win32ui is not None:
+                bmp = win32ui.CreateBitmapFromHandle(int(hbm_color))
+                info = bmp.GetInfo()
+                bits = bmp.GetBitmapBits(True)
+                bw = int(info.get("bmWidth", 0))
+                bh = int(info.get("bmHeight", 0))
+                bpp = int(info.get("bmBitsPixel", 0))
+                stride = int(max(0, bw * 4))
+                if bw > 0 and bh > 0 and bpp >= 32 and stride > 0 and len(bits) >= stride * bh:
+                    qimg = QImage(bits, bw, bh, stride, QImage.Format.Format_ARGB32).copy()
+                    qimg = qimg.scaled(
+                        int(size),
+                        int(size),
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation,
+                    )
+                    canvas = QImage(int(size), int(size), QImage.Format.Format_ARGB32)
+                    canvas.fill(0)
+                    painter = QPainter(canvas)
+                    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+                    dx = int((int(size) - int(qimg.width())) // 2)
+                    dy = int((int(size) - int(qimg.height())) // 2)
+                    painter.drawImage(int(dx), int(dy), qimg)
+                    painter.end()
+                    return canvas
+        except Exception:
+            pass
+        finally:
+            try:
+                if hbm_color:
+                    win32gui.DeleteObject(int(hbm_color))
+            except Exception:
+                pass
+            try:
+                if hbm_mask:
+                    win32gui.DeleteObject(int(hbm_mask))
+            except Exception:
+                pass
+        return QImage()
+
+    @staticmethod
+    def _guid_from_text(text):
+        s = str(text or "").strip().strip("{}")
+        parts = s.split("-")
+        if len(parts) != 5:
+            return None
+
+        class GUID(ctypes.Structure):
+            _fields_ = [
+                ("Data1", wintypes.DWORD),
+                ("Data2", wintypes.WORD),
+                ("Data3", wintypes.WORD),
+                ("Data4", ctypes.c_ubyte * 8),
+            ]
+
+        raw = parts[3] + parts[4]
+        if len(raw) != 16:
+            return None
+        try:
+            d4 = (ctypes.c_ubyte * 8)(*([int(raw[i:i + 2], 16) for i in range(0, 16, 2)]))
+            return GUID(int(parts[0], 16), int(parts[1], 16), int(parts[2], 16), d4)
+        except Exception:
+            return None
+
+    @classmethod
+    def _shell_item_image_for_path(cls, path, icon_px, thumbnail_first=True):
+        size = max(12, min(256, int(icon_px)))
+        path = str(path or "").strip()
+        if not path:
+            return QImage()
+        cache_key = ("shellitem", str(os.path.normcase(path)), int(size), int(bool(thumbnail_first)))
+        cached = cls._desktop_icon_image_cache.get(cache_key)
+        if isinstance(cached, QImage):
+            return QImage(cached)
+
+        image = QImage()
+        hbitmap = 0
+        item_ptr = ctypes.c_void_p()
+        try:
+            shell32 = ctypes.windll.shell32
+            ole32 = ctypes.windll.ole32
+            iid = cls._guid_from_text("{BCC18B79-BA16-442F-80C4-8A59C30C463B}")  # IShellItemImageFactory
+            if iid is None:
+                cls._desktop_icon_image_cache[cache_key] = QImage()
+                return QImage()
+
+            shell32.SHCreateItemFromParsingName.argtypes = [
+                wintypes.LPCWSTR,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.POINTER(ctypes.c_void_p),
+            ]
+            shell32.SHCreateItemFromParsingName.restype = ctypes.c_long
+            coinit = int(ole32.CoInitialize(None))
+            try:
+                hr = int(
+                    shell32.SHCreateItemFromParsingName(
+                        ctypes.c_wchar_p(path),
+                        None,
+                        ctypes.byref(iid),
+                        ctypes.byref(item_ptr),
+                    )
+                )
+                if hr != 0 or not item_ptr.value:
+                    cls._desktop_icon_image_cache[cache_key] = QImage()
+                    return QImage()
+
+                class SIZE(ctypes.Structure):
+                    _fields_ = [("cx", ctypes.c_long), ("cy", ctypes.c_long)]
+
+                siigbf_resizetofit = 0x00
+                siigbf_biggersizeok = 0x01
+                siigbf_icononly = 0x04
+                siigbf_thumbnailonly = 0x08
+                # COM vtable: IUnknown(3) + GetImage(1)
+                vtbl = ctypes.cast(item_ptr, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
+                fn_type = ctypes.WINFUNCTYPE(
+                    ctypes.c_long,
+                    ctypes.c_void_p,
+                    SIZE,
+                    ctypes.c_uint,
+                    ctypes.POINTER(ctypes.c_void_p),
+                )
+                get_image = fn_type(vtbl[3])
+
+                flags = int(siigbf_resizetofit | siigbf_biggersizeok)
+                if thumbnail_first:
+                    flags |= int(siigbf_thumbnailonly)
+                else:
+                    flags |= int(siigbf_icononly)
+
+                hbmp = ctypes.c_void_p()
+                hr_img = int(get_image(item_ptr, SIZE(int(size), int(size)), int(flags), ctypes.byref(hbmp)))
+                if hr_img != 0 or not hbmp.value:
+                    hbmp = ctypes.c_void_p()
+                    flags_fallback = int(siigbf_resizetofit | siigbf_biggersizeok | siigbf_icononly)
+                    hr_img = int(get_image(item_ptr, SIZE(int(size), int(size)), int(flags_fallback), ctypes.byref(hbmp)))
+                if hr_img == 0 and hbmp.value:
+                    hbitmap = cls._as_win_handle(hbmp.value)
+                    if hbitmap and win32ui is not None:
+                        bmp = win32ui.CreateBitmapFromHandle(int(hbitmap))
+                        info = bmp.GetInfo()
+                        bits = bmp.GetBitmapBits(True)
+                        bw = int(info.get("bmWidth", 0))
+                        bh = int(info.get("bmHeight", 0))
+                        bpp = int(info.get("bmBitsPixel", 0))
+                        stride = int(max(0, bw * 4))
+                        if bw > 0 and bh > 0 and bpp >= 32 and stride > 0 and len(bits) >= stride * bh:
+                            qimg = QImage(bits, bw, bh, stride, QImage.Format.Format_ARGB32).copy()
+                            image = qimg.scaled(
+                                int(size),
+                                int(size),
+                                Qt.AspectRatioMode.KeepAspectRatio,
+                                Qt.TransformationMode.SmoothTransformation,
+                            )
+            finally:
+                if coinit in (0, 1):  # S_OK or S_FALSE
+                    try:
+                        ole32.CoUninitialize()
+                    except Exception:
+                        pass
+        except Exception:
+            image = QImage()
+        finally:
+            try:
+                if hbitmap:
+                    win32gui.DeleteObject(int(hbitmap))
+            except Exception:
+                pass
+            try:
+                if item_ptr and item_ptr.value:
+                    vtbl = ctypes.cast(item_ptr, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
+                    rel_t = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)
+                    release = rel_t(vtbl[2])
+                    release(item_ptr)
+            except Exception:
+                pass
+
+        cls._desktop_icon_image_cache[cache_key] = QImage(image)
+        return QImage(image)
+
+    @classmethod
+    def _icon_image_for_path(cls, path, icon_px):
+        size = max(12, min(128, int(icon_px)))
+        path = str(path or "").strip()
+        if not path:
+            return QImage()
+        cache_key = ("path", str(os.path.normcase(path)), int(size))
+        cached = cls._desktop_icon_image_cache.get(cache_key)
+        if isinstance(cached, QImage):
+            return QImage(cached)
+
+        image = cls._shell_item_image_for_path(path, int(size), thumbnail_first=True)
+        if not image.isNull():
+            cls._desktop_icon_image_cache[cache_key] = QImage(image)
+            return QImage(image)
+
+        image = QImage()
+        hicon = 0
+        try:
+            class SHFILEINFOW(ctypes.Structure):
+                _fields_ = [
+                    ("hIcon", ctypes.c_void_p),
+                    ("iIcon", ctypes.c_int),
+                    ("dwAttributes", ctypes.c_uint),
+                    ("szDisplayName", ctypes.c_wchar * 260),
+                    ("szTypeName", ctypes.c_wchar * 80),
+                ]
+
+            shell32 = ctypes.windll.shell32
+            shell32.SHGetFileInfoW.argtypes = [
+                wintypes.LPCWSTR,
+                wintypes.DWORD,
+                ctypes.POINTER(SHFILEINFOW),
+                ctypes.c_uint,
+                ctypes.c_uint,
+            ]
+            shell32.SHGetFileInfoW.restype = ctypes.c_void_p
+            shfi = SHFILEINFOW()
+            shgfi_icon = int(0x000000100)
+            shgfi_large = int(0x000000000)
+            ok_raw = shell32.SHGetFileInfoW(
+                ctypes.c_wchar_p(path),
+                0,
+                ctypes.byref(shfi),
+                ctypes.sizeof(shfi),
+                int(shgfi_icon | shgfi_large),
+            )
+            ok = cls._as_win_handle(ok_raw)
+            if ok and shfi.hIcon:
+                hicon = cls._as_win_handle(shfi.hIcon)
+                image = cls._image_from_hicon(int(hicon), int(size))
+        except Exception:
+            image = QImage()
+        finally:
+            try:
+                if hicon:
+                    win32gui.DestroyIcon(int(hicon))
+            except Exception:
+                pass
+
+        if image.isNull():
+            try:
+                provider = QFileIconProvider()
+                icon = provider.icon(QFileInfo(path))
+                if not icon.isNull():
+                    pm = icon.pixmap(int(size), int(size))
+                    if not pm.isNull():
+                        image = pm.toImage().scaled(
+                            int(size),
+                            int(size),
+                            Qt.AspectRatioMode.KeepAspectRatio,
+                            Qt.TransformationMode.SmoothTransformation,
+                        )
+            except Exception:
+                image = QImage()
+
+        cls._desktop_icon_image_cache[cache_key] = QImage(image)
+        return QImage(image)
+
+    @classmethod
+    def _icon_pixmap_for_path(cls, path, icon_px):
+        size = max(12, min(128, int(icon_px)))
+        path = str(path or "").strip()
+        if not path:
+            return QPixmap()
+        cache_key = ("path", str(os.path.normcase(path)), int(size))
+        cached = cls._desktop_icon_pixmap_cache.get(cache_key)
+        if isinstance(cached, QPixmap) and not cached.isNull():
+            return QPixmap(cached)
+        image = cls._icon_image_for_path(path, int(size))
+        if image.isNull():
+            return QPixmap()
+        pix = QPixmap.fromImage(image)
+        cls._desktop_icon_pixmap_cache[cache_key] = QPixmap(pix)
+        return QPixmap(pix)
+
+    @classmethod
+    def _icon_image_for_stock_id(cls, stock_id, icon_px):
+        size = max(12, min(128, int(icon_px)))
+        try:
+            sid = int(stock_id)
+        except Exception:
+            sid = 0
+        cache_key = ("stock", int(sid), int(size))
+        cached = cls._desktop_icon_image_cache.get(cache_key)
+        if isinstance(cached, QImage):
+            return QImage(cached)
+
+        image = QImage()
+        hicon = 0
+        try:
+            class SHSTOCKICONINFO(ctypes.Structure):
+                _fields_ = [
+                    ("cbSize", wintypes.DWORD),
+                    ("hIcon", ctypes.c_void_p),
+                    ("iSysImageIndex", ctypes.c_int),
+                    ("iIcon", ctypes.c_int),
+                    ("szPath", ctypes.c_wchar * 260),
+                ]
+
+            shell32 = ctypes.windll.shell32
+            sii = SHSTOCKICONINFO()
+            sii.cbSize = int(ctypes.sizeof(SHSTOCKICONINFO))
+            shgsi_icon = int(0x000000100)
+            shgsi_large = int(0x000000000)
+            hr = int(
+                shell32.SHGetStockIconInfo(
+                    int(sid),
+                    int(shgsi_icon | shgsi_large),
+                    ctypes.byref(sii),
+                )
+            )
+            if hr == 0 and sii.hIcon:
+                hicon = cls._as_win_handle(sii.hIcon)
+                image = cls._image_from_hicon(int(hicon), int(size))
+        except Exception:
+            image = QImage()
+        finally:
+            try:
+                if hicon:
+                    win32gui.DestroyIcon(int(hicon))
+            except Exception:
+                pass
+
+        if image.isNull():
+            try:
+                std = QStyle.StandardPixmap.SP_FileIcon
+                if sid in (3, 4):
+                    std = QStyle.StandardPixmap.SP_DirIcon
+                elif sid in (31, 32):
+                    std = QStyle.StandardPixmap.SP_TrashIcon
+                icon = QApplication.style().standardIcon(std)
+                if not icon.isNull():
+                    pm = icon.pixmap(int(size), int(size))
+                    if not pm.isNull():
+                        image = pm.toImage().scaled(
+                            int(size),
+                            int(size),
+                            Qt.AspectRatioMode.KeepAspectRatio,
+                            Qt.TransformationMode.SmoothTransformation,
+                        )
+            except Exception:
+                image = QImage()
+
+        cls._desktop_icon_image_cache[cache_key] = QImage(image)
+        return QImage(image)
+
+    @classmethod
+    def _icon_pixmap_for_stock_id(cls, stock_id, icon_px):
+        size = max(12, min(128, int(icon_px)))
+        try:
+            sid = int(stock_id)
+        except Exception:
+            sid = 0
+        cache_key = ("stock", int(sid), int(size))
+        cached = cls._desktop_icon_pixmap_cache.get(cache_key)
+        if isinstance(cached, QPixmap) and not cached.isNull():
+            return QPixmap(cached)
+        image = cls._icon_image_for_stock_id(int(sid), int(size))
+        if image.isNull():
+            return QPixmap()
+        pix = QPixmap.fromImage(image)
+        cls._desktop_icon_pixmap_cache[cache_key] = QPixmap(pix)
+        return QPixmap(pix)
+
+    @classmethod
+    def _icon_image_for_item(cls, caption, icon_px):
+        size = max(12, min(128, int(icon_px)))
+        icon_key, path, stock_recycle = cls._desktop_icon_identity(caption)
+        cache_key = (str(icon_key), int(size))
+        cached = cls._desktop_icon_image_cache.get(cache_key)
+        if isinstance(cached, QImage):
+            return QImage(cached)
+
+        if not path and not stock_recycle:
+            img = QImage()
+            cls._desktop_icon_image_cache[cache_key] = QImage(img)
+            return QImage(img)
+
+        image = QImage()
+        hicon = 0
+        hbm_color = 0
+        hbm_mask = 0
+        try:
+            class SHFILEINFOW(ctypes.Structure):
+                _fields_ = [
+                    ("hIcon", ctypes.c_void_p),
+                    ("iIcon", ctypes.c_int),
+                    ("dwAttributes", ctypes.c_uint),
+                    ("szDisplayName", ctypes.c_wchar * 260),
+                    ("szTypeName", ctypes.c_wchar * 80),
+                ]
+
+            class SHSTOCKICONINFO(ctypes.Structure):
+                _fields_ = [
+                    ("cbSize", wintypes.DWORD),
+                    ("hIcon", ctypes.c_void_p),
+                    ("iSysImageIndex", ctypes.c_int),
+                    ("iIcon", ctypes.c_int),
+                    ("szPath", ctypes.c_wchar * 260),
+                ]
+
+            def _as_handle(v):
+                try:
+                    return int(ctypes.c_void_p(int(v)).value or 0)
+                except Exception:
+                    return 0
+
+            shell32 = ctypes.windll.shell32
+            shell32.SHGetFileInfoW.argtypes = [
+                wintypes.LPCWSTR,
+                wintypes.DWORD,
+                ctypes.POINTER(SHFILEINFOW),
+                ctypes.c_uint,
+                ctypes.c_uint,
+            ]
+            shell32.SHGetFileInfoW.restype = ctypes.c_void_p
+            if path and os.path.exists(path):
+                shfi = SHFILEINFOW()
+                shgfi_icon = int(0x000000100)
+                shgfi_large = int(0x000000000)
+                ok_raw = shell32.SHGetFileInfoW(
+                    ctypes.c_wchar_p(path),
+                    0,
+                    ctypes.byref(shfi),
+                    ctypes.sizeof(shfi),
+                    shgfi_icon | shgfi_large,
+                )
+                ok = cls._as_win_handle(ok_raw)
+                if ok and shfi.hIcon:
+                    hicon = _as_handle(shfi.hIcon)
+            elif stock_recycle:
+                sii = SHSTOCKICONINFO()
+                sii.cbSize = int(ctypes.sizeof(SHSTOCKICONINFO))
+                siid_recycler = 31
+                shgsi_icon = int(0x000000100)
+                shgsi_large = int(0x000000000)
+                hr = int(
+                    shell32.SHGetStockIconInfo(
+                        int(siid_recycler),
+                        int(shgsi_icon | shgsi_large),
+                        ctypes.byref(sii),
+                    )
+                )
+                if hr == 0 and sii.hIcon:
+                    hicon = _as_handle(sii.hIcon)
+
+            if hicon:
+                icon_info = win32gui.GetIconInfo(int(hicon))
+                if isinstance(icon_info, tuple) and len(icon_info) >= 5:
+                    hbm_mask = _as_handle(icon_info[3])
+                    hbm_color = _as_handle(icon_info[4])
+
+            if hbm_color and win32ui is not None:
+                bmp = win32ui.CreateBitmapFromHandle(int(hbm_color))
+                info = bmp.GetInfo()
+                bits = bmp.GetBitmapBits(True)
+                bw = int(info.get("bmWidth", 0))
+                bh = int(info.get("bmHeight", 0))
+                bpp = int(info.get("bmBitsPixel", 0))
+                stride = int(max(0, bw * 4))
+                if bw > 0 and bh > 0 and bpp >= 32 and stride > 0 and len(bits) >= stride * bh:
+                    qimg = QImage(bits, bw, bh, stride, QImage.Format.Format_ARGB32).copy()
+                    qimg = qimg.scaled(
+                        int(size),
+                        int(size),
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation,
+                    )
+                    canvas = QImage(int(size), int(size), QImage.Format.Format_ARGB32)
+                    canvas.fill(0)
+                    painter = QPainter(canvas)
+                    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+                    dx = int((int(size) - int(qimg.width())) // 2)
+                    dy = int((int(size) - int(qimg.height())) // 2)
+                    painter.drawImage(int(dx), int(dy), qimg)
+                    painter.end()
+                    image = canvas
+        except Exception:
+            image = QImage()
+        finally:
+            try:
+                if hicon:
+                    win32gui.DestroyIcon(int(hicon))
+            except Exception:
+                pass
+            try:
+                if hbm_color:
+                    win32gui.DeleteObject(int(hbm_color))
+            except Exception:
+                pass
+            try:
+                if hbm_mask:
+                    win32gui.DeleteObject(int(hbm_mask))
+            except Exception:
+                pass
+
+        if image.isNull():
+            try:
+                provider = QFileIconProvider()
+                icon = QIcon()
+                if path and os.path.exists(path):
+                    icon = provider.icon(QFileInfo(path))
+                elif stock_recycle:
+                    icon = QApplication.style().standardIcon(QStyle.StandardPixmap.SP_TrashIcon)
+                else:
+                    icon = QApplication.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon)
+                if not icon.isNull():
+                    pm = icon.pixmap(int(size), int(size))
+                    if not pm.isNull():
+                        img = pm.toImage().scaled(
+                            int(size),
+                            int(size),
+                            Qt.AspectRatioMode.KeepAspectRatio,
+                            Qt.TransformationMode.SmoothTransformation,
+                        )
+                        canvas = QImage(int(size), int(size), QImage.Format.Format_ARGB32)
+                        canvas.fill(0)
+                        painter = QPainter(canvas)
+                        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+                        dx = int((int(size) - int(img.width())) // 2)
+                        dy = int((int(size) - int(img.height())) // 2)
+                        painter.drawImage(int(dx), int(dy), img)
+                        painter.end()
+                        image = canvas
+            except Exception:
+                image = QImage()
+
+        cls._desktop_icon_image_cache[cache_key] = QImage(image)
+        if len(cls._desktop_icon_image_cache) > 320:
+            try:
+                cls._desktop_icon_image_cache.pop(next(iter(cls._desktop_icon_image_cache)))
+            except Exception:
+                pass
+        return QImage(image)
+
+    @classmethod
+    def _icon_pixmap_for_item(cls, caption, icon_px):
+        size = max(12, min(128, int(icon_px)))
+        icon_key, _path, _stock_recycle = cls._desktop_icon_identity(caption)
+        cache_key = (str(icon_key), int(size))
+        cached = cls._desktop_icon_pixmap_cache.get(cache_key)
+        if isinstance(cached, QPixmap) and not cached.isNull():
+            return QPixmap(cached)
+        image = cls._icon_image_for_item(caption, int(size))
+        if image.isNull():
+            return QPixmap()
+        pix = QPixmap.fromImage(image)
+        cls._desktop_icon_pixmap_cache[cache_key] = QPixmap(pix)
+        if len(cls._desktop_icon_pixmap_cache) > 320:
+            try:
+                cls._desktop_icon_pixmap_cache.pop(next(iter(cls._desktop_icon_pixmap_cache)))
+            except Exception:
+                pass
+        return QPixmap(pix)
+
+    @staticmethod
+    def _alpha_region_from_image(image, alpha_threshold=22):
+        if image is None or image.isNull():
+            return QRegion()
+        img = image.convertToFormat(QImage.Format.Format_ARGB32)
+        w = int(img.width())
+        h = int(img.height())
+        if w <= 0 or h <= 0:
+            return QRegion()
+        try:
+            stride = int(img.bytesPerLine())
+            total = int(img.sizeInBytes())
+            ptr = img.bits()
+            ptr.setsize(total)
+            raw = ptr.asstring(total)
+        except Exception:
+            return QRegion()
+
+        region = QRegion()
+        threshold = int(max(0, min(255, int(alpha_threshold))))
+        for y in range(h):
+            row = int(y * stride)
+            x = 0
+            while x < w:
+                while x < w and raw[row + (x * 4) + 3] <= threshold:
+                    x += 1
+                if x >= w:
+                    break
+                start = x
+                x += 1
+                while x < w and raw[row + (x * 4) + 3] > threshold:
+                    x += 1
+                length = int(x - start)
+                if length > 0:
+                    region = region.united(QRegion(QRect(int(start), int(y), int(length), 1)))
+        return region
+
+    @classmethod
+    def _icon_alpha_region_for_item(cls, caption, icon_px):
+        size = max(12, min(128, int(icon_px)))
+        icon_key, _path, _stock_recycle = cls._desktop_icon_identity(caption)
+        cache_key = (icon_key, int(size))
+        cached = cls._desktop_icon_alpha_cache.get(cache_key)
+        if isinstance(cached, QRegion):
+            return QRegion(cached)
+
+        image = cls._icon_image_for_item(caption, int(size))
+        if image.isNull():
+            region = QRegion()
+        else:
+            region = cls._alpha_region_from_image(image, alpha_threshold=20)
+
+        cls._desktop_icon_alpha_cache[cache_key] = QRegion(region)
+        if len(cls._desktop_icon_alpha_cache) > 320:
+            try:
+                cls._desktop_icon_alpha_cache.pop(next(iter(cls._desktop_icon_alpha_cache)))
+            except Exception:
+                pass
+        return QRegion(region)
+
+    @classmethod
+    def _desktop_icon_title_font(cls):
+        now = float(time.monotonic())
+        cached = getattr(cls, "_desktop_icon_title_font_cache", None)
+        cache_ts = float(getattr(cls, "_desktop_icon_title_font_cache_ts", 0.0) or 0.0)
+        if isinstance(cached, QFont) and (now - cache_ts) <= 8.0:
+            return QFont(cached)
+        font = DesktopIconCloneOverlay._resolve_icon_title_font()
+        if not isinstance(font, QFont):
+            font = QFont("Segoe UI", 9)
+        cls._desktop_icon_title_font_cache = QFont(font)
+        cls._desktop_icon_title_font_cache_ts = now
+        return QFont(font)
+
+    @classmethod
+    def _label_alpha_region(cls, text, size):
+        if not isinstance(size, QSize):
+            return QRegion()
+        w = max(0, int(size.width()))
+        h = max(0, int(size.height()))
+        label = str(text or "").strip()
+        if not label or w <= 0 or h <= 0:
+            return QRegion()
+        font = cls._desktop_icon_title_font()
+        font_key = (
+            str(font.family() or ""),
+            int(font.pixelSize()),
+            float(font.pointSizeF()),
+            int(font.weight()),
+            bool(font.italic()),
+        )
+        cache_key = (label, int(w), int(h), font_key)
+        cached = cls._desktop_text_alpha_cache.get(cache_key)
+        if isinstance(cached, QRegion):
+            return QRegion(cached)
+
+        pad_x = 6
+        pad_y = 2
+        cw = int(max(1, w + (pad_x * 2)))
+        ch = int(max(1, h + (pad_y * 2)))
+        img = QImage(cw, ch, QImage.Format.Format_ARGB32)
+        img.fill(0)
+        painter = QPainter(img)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        painter.setFont(font)
+        flags = int(
+            Qt.AlignmentFlag.AlignHCenter
+            | Qt.AlignmentFlag.AlignTop
+            | Qt.TextFlag.TextWordWrap
+            | Qt.TextFlag.TextWrapAnywhere
+            | Qt.TextFlag.TextDontClip
+        )
+        draw_rect = QRect(int(pad_x - 4), int(pad_y), int(w + 8), int(h + 2))
+        shadow_rect = QRect(draw_rect).translated(1, 1)
+        # Include icon-label shadow pixels so only visibly rendered text gets punched.
+        painter.setPen(QColor(0, 0, 0, 190))
+        painter.drawText(shadow_rect, flags, label)
+        painter.setPen(QColor(255, 255, 255, 255))
+        painter.drawText(draw_rect, flags, label)
+        painter.end()
+
+        region = cls._alpha_region_from_image(img, alpha_threshold=20)
+        if not region.isEmpty():
+            clip_rect = QRect(int(pad_x), int(pad_y), int(w), int(h))
+            region = region.intersected(QRegion(clip_rect)).translated(-int(pad_x), -int(pad_y))
+        cls._desktop_text_alpha_cache[cache_key] = QRegion(region)
+        if len(cls._desktop_text_alpha_cache) > 1024:
+            try:
+                cls._desktop_text_alpha_cache.pop(next(iter(cls._desktop_text_alpha_cache)))
+            except Exception:
+                pass
+        return QRegion(region)
+
+    def _desktop_icon_clone_items_local(self, force=False):
+        if not self._should_clone_desktop_icons():
+            return []
+        top_left = self._global_top_left()
+        wx = int(top_left.x())
+        wy = int(top_left.y())
+        ww = int(self.width())
+        wh = int(self.height())
+        if ww <= 0 or wh <= 0:
+            return []
+        widget_screen_rect = QRect(wx, wy, ww, wh)
+        rects_screen = self.__class__._desktop_icon_rects_screen(force=bool(force))
+        edit_info_screen = self.__class__._desktop_icon_edit_info_screen()
+        local_items = []
+        for entry in rects_screen:
+            if not isinstance(entry, dict):
+                continue
+            icon_rect = entry.get("icon")
+            label_rect = entry.get("label")
+            select_rect = entry.get("select")
+            caption = str(entry.get("text", "") or "")
+            shell_path = str(entry.get("shell_path", "") or "")
+            shell_is_folder = bool(entry.get("shell_is_folder", False))
+            shell_is_virtual = bool(entry.get("shell_is_virtual", False))
+            selected = bool(entry.get("selected", False))
+            focused = bool(entry.get("focused", False))
+            try:
+                image_index = int(entry.get("image_index", -1))
+            except Exception:
+                image_index = -1
+            local_icon = QRect()
+            local_label = QRect()
+            local_select = QRect()
+            local_icon_visible = QRect()
+            local_label_visible = QRect()
+            if isinstance(icon_rect, QRect):
+                icon_hit = icon_rect.intersected(widget_screen_rect)
+                if int(icon_hit.width()) > 0 and int(icon_hit.height()) > 0:
+                    local_icon_visible = icon_hit.translated(-wx, -wy)
+                    local_icon = QRect(icon_rect).translated(-wx, -wy)
+            if isinstance(label_rect, QRect):
+                label_hit = label_rect.intersected(widget_screen_rect)
+                if int(label_hit.width()) > 0 and int(label_hit.height()) > 0:
+                    local_label_visible = label_hit.translated(-wx, -wy)
+                    local_label = QRect(label_rect).translated(-wx, -wy)
+            if isinstance(select_rect, QRect):
+                select_hit = select_rect.intersected(widget_screen_rect)
+                if int(select_hit.width()) > 0 and int(select_hit.height()) > 0:
+                    local_select = select_hit.translated(-wx, -wy)
+            if int(local_select.width()) <= 0 or int(local_select.height()) <= 0:
+                if bool(selected) or bool(focused):
+                    merged = QRect()
+                    if int(local_icon_visible.width()) > 0 and int(local_icon_visible.height()) > 0:
+                        merged = QRect(local_icon_visible)
+                    if int(local_label_visible.width()) > 0 and int(local_label_visible.height()) > 0:
+                        merged = QRect(local_label_visible) if merged.isNull() else merged.united(QRect(local_label_visible))
+                    if not merged.isNull() and int(merged.width()) > 0 and int(merged.height()) > 0:
+                        local_select = merged.adjusted(-4, -2, 4, 2)
+            if (
+                (int(local_icon_visible.width()) <= 0 or int(local_icon_visible.height()) <= 0)
+                and (int(local_label_visible.width()) <= 0 or int(local_label_visible.height()) <= 0)
+            ):
+                continue
+            icon_side = 0
+            if int(local_icon.width()) > 0 and int(local_icon.height()) > 0:
+                icon_side = max(12, min(int(local_icon.width()), int(local_icon.height())))
+            icon_pixmap = QPixmap()
+            if shell_path and os.path.exists(shell_path):
+                if shell_is_folder:
+                    icon_pixmap = self.__class__._icon_pixmap_for_stock_id(3, int(icon_side or 48))
+                else:
+                    icon_pixmap = self.__class__._icon_pixmap_for_path(shell_path, int(icon_side or 48))
+            elif shell_is_virtual and self.__class__._is_recycle_caption(caption):
+                icon_pixmap = self.__class__._icon_pixmap_for_stock_id(31, int(icon_side or 48))
+            elif image_index >= 0:
+                icon_pixmap = self.__class__._icon_pixmap_for_sys_index(int(image_index), int(icon_side or 48))
+            if icon_pixmap.isNull():
+                icon_pixmap = self.__class__._icon_pixmap_for_item(caption, int(icon_side or 48))
+            if int(local_icon.width()) > 0 and int(local_icon.height()) > 0 and not icon_pixmap.isNull():
+                if int(icon_pixmap.width()) != int(icon_side) or int(icon_pixmap.height()) != int(icon_side):
+                    icon_pixmap = icon_pixmap.scaled(
+                        int(icon_side),
+                        int(icon_side),
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation,
+                    )
+            local_items.append(
+                {
+                    "icon_rect": local_icon,
+                    "icon_pixmap": icon_pixmap,
+                    "label_rect": local_label,
+                    "text": caption,
+                    "select_rect": local_select,
+                    "selected": bool(selected),
+                    "focused": bool(focused),
+                }
+            )
+        if isinstance(edit_info_screen, dict):
+            edit_rect = edit_info_screen.get("rect")
+            if isinstance(edit_rect, QRect):
+                edit_hit = edit_rect.intersected(widget_screen_rect)
+                if int(edit_hit.width()) > 0 and int(edit_hit.height()) > 0:
+                    local_items.append(
+                        {
+                            "edit_rect": edit_hit.translated(-wx, -wy),
+                            "edit_text": str(edit_info_screen.get("text", "") or ""),
+                        }
+                    )
+        return local_items
+
+    def _desktop_icon_hole_rects_local(self, force=False):
+        if not self._should_punch_desktop_icons():
+            return []
+        top_left = self._global_top_left()
+        wx = int(top_left.x())
+        wy = int(top_left.y())
+        ww = int(self.width())
+        wh = int(self.height())
+        if ww <= 0 or wh <= 0:
+            return []
+        widget_screen_rect = QRect(wx, wy, ww, wh)
+        widget_local_region = QRegion(QRect(0, 0, int(ww), int(wh)))
+        rects_screen = self.__class__._desktop_icon_rects_screen(force=bool(force))
+        local_items = []
+        for entry in rects_screen:
+            if not isinstance(entry, dict):
+                continue
+            icon_rect = entry.get("icon")
+            label_rect = entry.get("label")
+            caption = str(entry.get("text", "") or "").strip()
+            shell_path = str(entry.get("shell_path", "") or "")
+            shell_is_folder = bool(entry.get("shell_is_folder", False))
+            shell_is_virtual = bool(entry.get("shell_is_virtual", False))
+            try:
+                image_index = int(entry.get("image_index", -1))
+            except Exception:
+                image_index = -1
+            icon_region = QRegion()
+            text_region = QRegion()
+
+            if isinstance(icon_rect, QRect):
+                icon_hit = icon_rect.intersected(widget_screen_rect)
+                if int(icon_hit.width()) > 0 and int(icon_hit.height()) > 0:
+                    icon_local_full = QRect(icon_rect).translated(-wx, -wy)
+                    side = max(12, min(int(icon_local_full.width()), int(icon_local_full.height())))
+                    alpha_region = QRegion()
+                    if shell_path and os.path.exists(shell_path):
+                        if shell_is_folder:
+                            image = self.__class__._icon_image_for_stock_id(3, int(side))
+                        else:
+                            image = self.__class__._icon_image_for_path(shell_path, int(side))
+                        if not image.isNull():
+                            alpha_region = self.__class__._alpha_region_from_image(image, alpha_threshold=20)
+                    elif shell_is_virtual and self.__class__._is_recycle_caption(caption):
+                        image = self.__class__._icon_image_for_stock_id(31, int(side))
+                        if not image.isNull():
+                            alpha_region = self.__class__._alpha_region_from_image(image, alpha_threshold=20)
+                    elif image_index >= 0:
+                        image = self.__class__._icon_image_for_sys_index(int(image_index), int(side))
+                        if not image.isNull():
+                            alpha_region = self.__class__._alpha_region_from_image(image, alpha_threshold=20)
+                    if alpha_region.isEmpty():
+                        alpha_region = self.__class__._icon_alpha_region_for_item(caption, int(side))
+                    if not alpha_region.isEmpty():
+                        px = int(icon_local_full.x() + ((int(icon_local_full.width()) - int(side)) // 2))
+                        py = int(icon_local_full.y() + ((int(icon_local_full.height()) - int(side)) // 2))
+                        icon_region = alpha_region.translated(int(px), int(py)).intersected(widget_local_region)
+                    if icon_region.isEmpty():
+                        fallback_box = QRect(icon_rect).translated(-wx, -wy)
+                        fb_side = max(10, min(int(fallback_box.width()), int(fallback_box.height())) - 16)
+                        fx = int(fallback_box.x() + ((int(fallback_box.width()) - int(fb_side)) // 2))
+                        fy = int(fallback_box.y() + ((int(fallback_box.height()) - int(fb_side)) // 2))
+                        fallback = QRect(int(fx), int(fy), int(fb_side), int(fb_side))
+                        if int(fallback.width()) > 0 and int(fallback.height()) > 0:
+                            path = QPainterPath()
+                            rr = max(3.0, min(float(fallback.width()), float(fallback.height())) * 0.16)
+                            path.addRoundedRect(QRectF(fallback), rr, rr)
+                            icon_region = QRegion(path.toFillPolygon().toPolygon()).intersected(widget_local_region)
+
+            if isinstance(label_rect, QRect):
+                label_hit = label_rect.intersected(widget_screen_rect)
+                if int(label_hit.width()) > 0 and int(label_hit.height()) > 0:
+                    label_local = QRect(label_rect).translated(-wx, -wy)
+                    glyph_region = self.__class__._label_alpha_region(caption, label_local.size())
+                    if not glyph_region.isEmpty():
+                        text_region = glyph_region.translated(
+                            int(label_local.x()),
+                            int(label_local.y()),
+                        ).intersected(widget_local_region)
+
+            if not icon_region.isEmpty() or not text_region.isEmpty():
+                local_items.append({"icon_region": icon_region, "label_region": text_region})
+        return local_items
 
     def eventFilter(self, watched, event):
         # App-level key handling for widget-local shortcuts.
@@ -1435,6 +3778,42 @@ class DesktopWidget(QMainWindow):
     def show_gpu_guard_hud(self, guard_enabled):
         self._show_action_hud(f"성능 보호 {'ON' if guard_enabled else 'OFF'}", timeout_ms=1300)
 
+    def _set_drag_topmost(self, enabled):
+        enabled = bool(enabled)
+        active = bool(getattr(self, "_drag_topmost_active", False))
+        if enabled == active:
+            return
+
+        self._drag_topmost_active = enabled
+        if enabled:
+            restore_layer = int(getattr(self, "layer_mode", self.LAYER_NORMAL))
+            restore_lock = bool(getattr(self, "is_locked", False))
+            self._drag_restore_layer = int(restore_layer)
+            self._drag_restore_lock = bool(restore_lock)
+            self.apply_window_settings(
+                int(self.LAYER_TOPMOST),
+                bool(restore_lock),
+                cancel_interaction=False,
+            )
+            # Keep configured state logical value unchanged while dragging.
+            self.layer_mode = int(restore_layer)
+            self.is_locked = bool(restore_lock)
+            return
+
+        if not self.isVisible():
+            self._drag_restore_layer = None
+            self._drag_restore_lock = None
+            return
+        restore_layer = int(getattr(self, "_drag_restore_layer", getattr(self, "layer_mode", self.LAYER_NORMAL)))
+        restore_lock = bool(getattr(self, "_drag_restore_lock", getattr(self, "is_locked", False)))
+        self._drag_restore_layer = None
+        self._drag_restore_lock = None
+        self.apply_window_settings(
+            int(restore_layer),
+            bool(restore_lock),
+            cancel_interaction=False,
+        )
+
     def cancel_active_interaction(self):
         """Force-clear dragging/resizing transient states (used by lock toggle)."""
         self.start_pos = None
@@ -1442,6 +3821,7 @@ class DesktopWidget(QMainWindow):
         self.is_resizing = False
         self.resize_corner = None
         self.resize_start_pos = None
+        self._set_drag_topmost(False)
         self._reset_axis_snap()
         self._hide_size_hud()
         self.unsetCursor()
@@ -1451,6 +3831,7 @@ class DesktopWidget(QMainWindow):
         if not self.is_resizing or not self.resize_corner:
             return
 
+        prev_geo = QRect(self.geometry())
         delta = global_pos - self.resize_start_pos
         start = QRect(self.resize_start_geo)
         x = start.x()
@@ -1487,6 +3868,20 @@ class DesktopWidget(QMainWindow):
             h = min_h
 
         self.setGeometry(QRect(int(x), int(y), int(w), int(h)))
+        new_geo = QRect(self.geometry())
+        left_step = int(new_geo.x() - prev_geo.x())
+        top_step = int(new_geo.y() - prev_geo.y())
+        right_step = int((new_geo.x() + new_geo.width()) - (prev_geo.x() + prev_geo.width()))
+        bottom_step = int((new_geo.y() + new_geo.height()) - (prev_geo.y() + prev_geo.height()))
+        if left_step or top_step or right_step or bottom_step:
+            if hasattr(self, "manager") and self.manager and hasattr(self.manager, "resize_temp_group_by_edges"):
+                self.manager.resize_temp_group_by_edges(
+                    self.profile_id,
+                    left_step,
+                    top_step,
+                    right_step,
+                    bottom_step,
+                )
 
     def _reset_axis_snap(self):
         self._snap_lock_x = None
@@ -1591,8 +3986,9 @@ class DesktopWidget(QMainWindow):
         ag = screen.availableGeometry()
         max_x = max(1, ag.width() - self.width())
         max_y = max(1, ag.height() - self.height())
-        rel_x = (self.x() - ag.x()) / max_x
-        rel_y = (self.y() - ag.y()) / max_y
+        gpos = self._global_top_left()
+        rel_x = (gpos.x() - ag.x()) / max_x
+        rel_y = (gpos.y() - ag.y()) / max_y
         rel_x = max(0.0, min(1.0, rel_x))
         rel_y = max(0.0, min(1.0, rel_y))
 
@@ -1675,7 +4071,20 @@ class DesktopWidget(QMainWindow):
         self.setWindowOpacity(self.current_opacity_pct / 100.0)
         self.bg_color_mode = int(self.settings.value("bg_color_mode", 1))
         self.corner_mode = int(self.settings.value("corner_mode", 0))
-        self.layer_mode = int(self.settings.value("layer_mode", 1))
+        self.media_fit_mode = max(0, min(int(self.settings.value("media_fit_mode", 0)), 1))
+        if self.settings.contains("layer_mode"):
+            layer_schema_ver = int(self.settings.value("layer_schema_version", 0))
+            raw_layer_mode = int(self.settings.value("layer_mode", self.LAYER_NORMAL))
+            self.layer_mode = self.coerce_layer_mode(raw_layer_mode, layer_schema_ver)
+            if layer_schema_ver < int(self.LAYER_SCHEMA_VERSION):
+                self.settings.setValue("layer_mode", int(self.layer_mode))
+                self.settings.setValue("layer_schema_version", int(self.LAYER_SCHEMA_VERSION))
+                self.settings.sync()
+        else:
+            self.layer_mode = int(self.LAYER_NORMAL)
+            self.settings.setValue("layer_mode", int(self.layer_mode))
+            self.settings.setValue("layer_schema_version", int(self.LAYER_SCHEMA_VERSION))
+            self.settings.sync()
         self.is_locked = _as_bool(self.settings.value("is_locked", False), False)
         self.gpu_guard_enabled = _as_bool(self.settings.value("gpu_guard_enabled", False), False)
         self.quarantined_media = self._as_path_set(self.settings.value("quarantined_media", []))
@@ -1695,10 +4104,466 @@ class DesktopWidget(QMainWindow):
             self._move_exact((100, 100))
         self._set_watched_folder(self.folder_path)
         self._apply_mute_state()
+        self._update_video_aspect_mode()
         self.apply_window_settings(self.layer_mode, self.is_locked)
         if saved_size:
             self.resize(saved_size)
         self._restore_position_with_screen_fallback(saved_pos)
+
+    def _is_media_fill_mode(self):
+        return int(getattr(self, "media_fit_mode", 0)) == 1
+
+    @staticmethod
+    def _safe_target_size(widget, fallback_size):
+        fw = 0
+        fh = 0
+        if isinstance(fallback_size, QSize):
+            fw = max(0, int(fallback_size.width()))
+            fh = max(0, int(fallback_size.height()))
+
+        if isinstance(widget, QWidget):
+            s = widget.size()
+            sw = int(s.width()) if isinstance(s, QSize) else 0
+            sh = int(s.height()) if isinstance(s, QSize) else 0
+            if sw > 0 and sh > 0:
+                if widget.isVisible():
+                    return QSize(int(sw), int(sh))
+                # Hidden startup state: prefer fallback if widget child is still pre-layout small.
+                if fw <= 0 or fh <= 0:
+                    return QSize(int(sw), int(sh))
+                min_w = max(24, int(fw * 0.90))
+                min_h = max(24, int(fh * 0.90))
+                if sw >= min_w and sh >= min_h:
+                    return QSize(int(sw), int(sh))
+        if fw > 0 and fh > 0:
+            return QSize(int(fw), int(fh))
+        return QSize(1, 1)
+
+    @staticmethod
+    def _scaled_size_for_source(source_size, target_size, fill):
+        if not isinstance(source_size, QSize) or not isinstance(target_size, QSize):
+            return QSize(1, 1)
+        sw = max(1, int(source_size.width()))
+        sh = max(1, int(source_size.height()))
+        tw = max(1, int(target_size.width()))
+        th = max(1, int(target_size.height()))
+        if bool(fill):
+            scale = max(float(tw) / float(sw), float(th) / float(sh))
+        else:
+            scale = min(float(tw) / float(sw), float(th) / float(sh))
+        nw = max(1, int(round(float(sw) * float(scale))))
+        nh = max(1, int(round(float(sh) * float(scale))))
+        return QSize(int(nw), int(nh))
+
+    def _resize_video_surface(self):
+        if not bool(getattr(self, "_video_graphics_mode", False)):
+            return
+        if not isinstance(getattr(self, "video_widget", None), QGraphicsView):
+            return
+        if getattr(self, "video_scene", None) is None or getattr(self, "video_item", None) is None:
+            return
+        try:
+            target = self._safe_target_size(getattr(self, "video_widget", None), self.size())
+            w = max(1, int(target.width()))
+            h = max(1, int(target.height()))
+            self.video_scene.setSceneRect(QRectF(0.0, 0.0, float(w), float(h)))
+            self.video_item.setPos(QPointF(0.0, 0.0))
+            self.video_item.setSize(QSizeF(float(w), float(h)))
+        except Exception:
+            pass
+
+    def _update_video_aspect_mode(self):
+        if not hasattr(self, "video_widget"):
+            return
+        mode = Qt.AspectRatioMode.KeepAspectRatio
+        if self._is_media_fill_mode():
+            mode = getattr(
+                Qt.AspectRatioMode,
+                "KeepAspectRatioByExpanding",
+                Qt.AspectRatioMode.KeepAspectRatio,
+            )
+        if bool(getattr(self, "_video_graphics_mode", False)) and getattr(self, "video_item", None) is not None:
+            try:
+                self.video_item.setAspectRatioMode(mode)
+            except Exception:
+                pass
+            self._resize_video_surface()
+            return
+        try:
+            self.video_widget.setAspectRatioMode(mode)
+        except Exception:
+            pass
+
+    def _update_movie_scaled_size(self):
+        if not self.movie:
+            return
+        self._update_movie_scaled_size_for(self.movie)
+
+    def _update_movie_scaled_size_for(self, movie_obj):
+        if movie_obj is None:
+            return
+        target = self._safe_target_size(getattr(self, "img_label", None), self.size())
+        src = QSize()
+        try:
+            fr = movie_obj.frameRect()
+            if isinstance(fr, QRect):
+                src = fr.size()
+        except Exception:
+            src = QSize()
+        if int(src.width()) <= 0 or int(src.height()) <= 0:
+            try:
+                pm = movie_obj.currentPixmap()
+                if isinstance(pm, QPixmap) and not pm.isNull():
+                    src = pm.size()
+            except Exception:
+                src = QSize()
+        if int(src.width()) <= 0 or int(src.height()) <= 0:
+            src = QSize(int(target.width()), int(target.height()))
+        scaled = self._scaled_size_for_source(src, target, fill=self._is_media_fill_mode())
+        try:
+            movie_obj.setScaledSize(scaled)
+        except Exception:
+            pass
+
+    def _estimate_gif_duration_ms(self, movie_obj):
+        if movie_obj is None:
+            return 0
+        try:
+            frame_count = int(movie_obj.frameCount())
+        except Exception:
+            frame_count = 0
+        if frame_count <= 0:
+            return 0
+        try:
+            frame_delay = int(movie_obj.nextFrameDelay())
+        except Exception:
+            frame_delay = 0
+        if frame_delay <= 0:
+            return 0
+        # Cheap estimate only: avoid frame-by-frame seeking that can stall startup.
+        return int(max(0, min(600000, int(frame_count) * int(frame_delay))))
+
+    def _clear_active_gif_loop_watch(self):
+        if hasattr(self, "_gif_loop_fallback_timer") and self._gif_loop_fallback_timer.isActive():
+            self._gif_loop_fallback_timer.stop()
+        self._gif_loop_watch_active = False
+        self._gif_loop_last_frame = -1
+        self._gif_loop_min_deadline = 0.0
+        self._gif_wait_for_finished_only = False
+        if self.movie is None:
+            return
+        try:
+            self.movie.frameChanged.disconnect(self._on_active_gif_frame_changed)
+        except Exception:
+            pass
+        try:
+            self.movie.finished.disconnect(self._on_active_gif_finished)
+        except Exception:
+            pass
+
+    def _start_active_gif_loop_watch(self):
+        if self.movie is None:
+            self._clear_active_gif_loop_watch()
+            return
+        self._clear_active_gif_loop_watch()
+        self._gif_loop_watch_active = True
+        try:
+            loop_count = int(self.movie.loopCount())
+        except Exception:
+            loop_count = -1
+        # Finite-loop GIFs should advance only when playback actually finishes.
+        self._gif_wait_for_finished_only = (loop_count != -1)
+        try:
+            self._gif_loop_last_frame = int(self.movie.currentFrameNumber())
+        except Exception:
+            self._gif_loop_last_frame = -1
+        self._gif_loop_min_deadline = float(time.monotonic()) + (max(1, int(self.interval_ms)) / 1000.0)
+        try:
+            if not self._gif_wait_for_finished_only:
+                self.movie.frameChanged.connect(self._on_active_gif_frame_changed)
+        except Exception:
+            pass
+        try:
+            self.movie.finished.connect(self._on_active_gif_finished)
+        except Exception:
+            pass
+        # Safety fallback: prevent getting stuck forever if frame signals stop unexpectedly.
+        try:
+            # Use a generous watchdog so long GIFs are not cut early.
+            fallback_ms = max(300000, int(self.interval_ms) * 12)
+        except Exception:
+            fallback_ms = 300000
+        if hasattr(self, "_gif_loop_fallback_timer"):
+            self._gif_loop_fallback_timer.start(int(fallback_ms))
+
+    def _on_active_gif_frame_changed(self, frame_number):
+        if not bool(getattr(self, "_gif_loop_watch_active", False)):
+            return
+        if bool(getattr(self, "_gif_wait_for_finished_only", False)):
+            return
+        if self.movie is None or self.stack.currentIndex() != 1:
+            self._clear_active_gif_loop_watch()
+            return
+        sender_obj = self.sender()
+        if sender_obj is not self.movie:
+            return
+        try:
+            frame_idx = int(frame_number)
+        except Exception:
+            frame_idx = -1
+        last = int(getattr(self, "_gif_loop_last_frame", -1))
+        if last > 0 and frame_idx == 0:
+            now = float(time.monotonic())
+            if now >= float(getattr(self, "_gif_loop_min_deadline", 0.0)):
+                self._clear_active_gif_loop_watch()
+                self._schedule_next_media()
+                return
+        self._gif_loop_last_frame = int(frame_idx)
+
+    def _on_active_gif_finished(self):
+        if self.movie is None or self.stack.currentIndex() != 1:
+            return
+        sender_obj = self.sender()
+        if sender_obj is not self.movie:
+            return
+        if self.timer.isActive():
+            self.timer.stop()
+        now = float(time.monotonic())
+        deadline = float(getattr(self, "_gif_loop_min_deadline", 0.0))
+        self._clear_active_gif_loop_watch()
+        if now >= deadline:
+            self._schedule_next_media()
+            return
+        remain_ms = max(1, int(round((deadline - now) * 1000.0)))
+        active_movie = self.movie
+        QTimer.singleShot(
+            int(remain_ms),
+            lambda m=active_movie: (
+                self._schedule_next_media()
+                if (self.movie is m and self.stack.currentIndex() == 1)
+                else None
+            ),
+        )
+
+    def _on_gif_loop_fallback_timeout(self):
+        if not bool(getattr(self, "_gif_loop_watch_active", False)):
+            return
+        if bool(getattr(self, "_performance_paused", False)):
+            if hasattr(self, "_gif_loop_fallback_timer"):
+                self._gif_loop_fallback_timer.start(max(5000, int(self.interval_ms)))
+            return
+        self._clear_active_gif_loop_watch()
+        self._schedule_next_media()
+
+    def _apply_media_scale_mode(self):
+        self._update_video_aspect_mode()
+        if self.movie:
+            try:
+                # Keep GIF behavior aligned with legacy logic to avoid resize-time artifacts.
+                self.movie.setScaledSize(self.size())
+            except Exception:
+                pass
+            return
+        if self.current_static_pixmap and not self.current_static_pixmap.isNull():
+            self._update_static_pixmap_size()
+
+    def _cancel_pending_gif_swap(self):
+        if hasattr(self, "_gif_swap_timeout") and self._gif_swap_timeout.isActive():
+            self._gif_swap_timeout.stop()
+        pending = getattr(self, "_gif_swap_pending_movie", None)
+        self._gif_swap_pending_movie = None
+        self._gif_swap_pending_path = ""
+        self._gif_swap_pending_duration_ms = 0
+        if pending is None:
+            return
+        try:
+            pending.frameChanged.disconnect(self._on_gif_swap_frame_changed)
+        except Exception:
+            pass
+        try:
+            pending.stop()
+        except Exception:
+            pass
+        try:
+            pending.deleteLater()
+        except Exception:
+            pass
+
+    def _schedule_gif_swap(self, path):
+        self._cancel_pending_gif_swap()
+        movie = QMovie(path)
+        if not movie.isValid():
+            try:
+                movie.deleteLater()
+            except Exception:
+                pass
+            return False
+        self._gif_swap_pending_movie = movie
+        self._gif_swap_pending_path = str(path)
+        self._gif_swap_pending_duration_ms = 0
+        movie.frameChanged.connect(self._on_gif_swap_frame_changed)
+        movie.start()
+        try:
+            first_ready = bool(movie.jumpToFrame(0))
+        except Exception:
+            first_ready = False
+        if first_ready:
+            try:
+                movie.setPaused(True)
+            except Exception:
+                pass
+            self._update_movie_scaled_size_for(movie)
+            self._gif_swap_pending_duration_ms = int(self._estimate_gif_duration_ms(movie))
+            QTimer.singleShot(0, self._complete_gif_swap)
+            return True
+        if hasattr(self, "_gif_swap_timeout"):
+            self._gif_swap_timeout.start()
+        return True
+
+    def _start_gif_direct(self, path):
+        movie = QMovie(path)
+        if not movie.isValid():
+            try:
+                movie.deleteLater()
+            except Exception:
+                pass
+            return False
+        self.movie = movie
+        self.stack.setCurrentIndex(1)
+        self.img_label.setUpdatesEnabled(False)
+        self._update_movie_scaled_size_for(self.movie)
+        self.img_label.setMovie(self.movie)
+        try:
+            self.movie.jumpToFrame(0)
+        except Exception:
+            pass
+        self._update_movie_scaled_size_for(self.movie)
+        self.img_label.setUpdatesEnabled(True)
+        self.movie.start()
+        if self.movie.state() != QMovie.MovieState.Running:
+            self.movie.start()
+        gif_total_duration = int(self._estimate_gif_duration_ms(self.movie))
+        try:
+            loop_count = int(self.movie.loopCount())
+        except Exception:
+            loop_count = -1
+        if loop_count == 1:
+            wait_time = max(self.interval_ms, gif_total_duration) if gif_total_duration > 0 else self.interval_ms
+            self.timer.start(wait_time)
+            self._clear_active_gif_loop_watch()
+        else:
+            self._start_active_gif_loop_watch()
+        if self._performance_paused:
+            self.set_performance_paused(True, reason="guard_active", force=True)
+        return True
+
+    def _complete_gif_swap(self):
+        pending = getattr(self, "_gif_swap_pending_movie", None)
+        if pending is None:
+            return False
+        if hasattr(self, "_gif_swap_timeout") and self._gif_swap_timeout.isActive():
+            self._gif_swap_timeout.stop()
+        try:
+            pending.frameChanged.disconnect(self._on_gif_swap_frame_changed)
+        except Exception:
+            pass
+        self._gif_swap_pending_movie = None
+        self._gif_swap_pending_path = ""
+        pending_duration = int(getattr(self, "_gif_swap_pending_duration_ms", 0) or 0)
+        self._gif_swap_pending_duration_ms = 0
+        self.movie = pending
+        self.stack.setCurrentIndex(1)
+        self.img_label.setUpdatesEnabled(False)
+        self._update_movie_scaled_size_for(self.movie)
+        self.img_label.setMovie(self.movie)
+        try:
+            self.movie.jumpToFrame(0)
+        except Exception:
+            pass
+        self._update_movie_scaled_size_for(self.movie)
+        self.img_label.setUpdatesEnabled(True)
+        try:
+            self.movie.setPaused(False)
+        except Exception:
+            pass
+        if self.movie.state() != QMovie.MovieState.Running:
+            self.movie.start()
+        gif_total_duration = int(pending_duration)
+        if gif_total_duration <= 0:
+            gif_total_duration = int(self._estimate_gif_duration_ms(self.movie))
+        try:
+            loop_count = int(self.movie.loopCount())
+        except Exception:
+            loop_count = -1
+        if loop_count == 1:
+            wait_time = max(self.interval_ms, gif_total_duration) if gif_total_duration > 0 else self.interval_ms
+            self.timer.start(wait_time)
+            self._clear_active_gif_loop_watch()
+        else:
+            self._start_active_gif_loop_watch()
+        self._refresh_icon_overlay_for_current_media()
+        if self._performance_paused:
+            self.set_performance_paused(True, reason="guard_active", force=True)
+        return True
+
+    def _on_gif_swap_frame_changed(self, frame_number):
+        if int(frame_number) < 0:
+            return
+        pending = getattr(self, "_gif_swap_pending_movie", None)
+        if pending is None:
+            return
+        sender_obj = self.sender()
+        if sender_obj is not pending:
+            return
+        try:
+            pending.setPaused(True)
+        except Exception:
+            pass
+        self._update_movie_scaled_size_for(pending)
+        self._gif_swap_pending_duration_ms = int(self._estimate_gif_duration_ms(pending))
+        self._complete_gif_swap()
+
+    def _on_gif_swap_timeout(self):
+        pending = getattr(self, "_gif_swap_pending_movie", None)
+        if pending is None:
+            return
+        fallback_path = str(getattr(self, "_gif_swap_pending_path", "") or "")
+        if int(pending.currentFrameNumber()) >= 0:
+            self._complete_gif_swap()
+            return
+        self._cancel_pending_gif_swap()
+        if fallback_path and str(getattr(self, "current_media_path", "")) == fallback_path:
+            if self._start_gif_direct(fallback_path):
+                self._refresh_icon_overlay_for_current_media()
+                return
+        self._skip_current_media("gif_preload_timeout")
+
+    def prepare_media_before_show(self):
+        """Prime first media frame while hidden so opening doesn't pop from small->large."""
+        if bool(getattr(self, "_initial_media_prepared", False)):
+            self._apply_media_scale_mode()
+            return
+        pending = bool(getattr(self, "_initial_media_pending", False))
+        if not pending:
+            self._apply_media_scale_mode()
+            self._initial_media_prepared = True
+            return
+
+        self._initial_media_pending = False
+        if not self.folder_path:
+            self._initial_media_prepared = True
+            return
+        if not self.playlist:
+            self.update_playlist()
+        if not self.playlist:
+            self._initial_media_prepared = True
+            return
+        if not self.current_media_path:
+            self.current_idx = -1
+            self.next_media()
+        else:
+            self._apply_media_scale_mode()
+        self._initial_media_prepared = True
 
     def is_visible_on_any_screen(self):
         for screen in QGuiApplication.screens():
@@ -1728,6 +4593,20 @@ class DesktopWidget(QMainWindow):
         except Exception:
             self.move(int(x), int(y))
 
+    def _global_top_left(self):
+        try:
+            gp = self.mapToGlobal(QPoint(0, 0))
+            if isinstance(gp, QPoint):
+                return QPoint(int(gp.x()), int(gp.y()))
+        except Exception:
+            pass
+        try:
+            hwnd = int(self.winId())
+            left, top, _right, _bottom = win32gui.GetWindowRect(hwnd)
+            return QPoint(int(left), int(top))
+        except Exception:
+            return QPoint(int(self.x()), int(self.y()))
+
     def apply_mask_and_style(self):
         radius = 0 if int(getattr(self, "corner_mode", 0)) == 1 else 20
 
@@ -1741,6 +4620,15 @@ class DesktopWidget(QMainWindow):
             self.placeholder.setStyleSheet(f"background: #222; border-radius: {radius}px;")
      
 
+        self._sync_desktop_icon_mask_timer()
+        clone_icons = self._should_clone_desktop_icons()
+        if clone_icons:
+            self._refresh_desktop_icon_clone_overlay(force=False)
+        else:
+            self._set_clone_overlay_items([])
+
+        if hasattr(self, "desktop_icon_clone_overlay") and self.desktop_icon_clone_overlay.isVisible():
+            self.desktop_icon_clone_overlay.raise_()
         if hasattr(self, 'selection_overlay'):
             self.selection_overlay.raise_()
         if hasattr(self, 'resize_overlay'):
@@ -1751,11 +4639,32 @@ class DesktopWidget(QMainWindow):
             self.action_hud.raise_()
         if hasattr(self, "group_badge") and self.group_badge.isVisible():
             self.group_badge.raise_()
-        
+
+        punch_icons = self._should_punch_desktop_icons()
+        mask_region = None
         if radius > 0:
             path = QPainterPath()
             path.addRoundedRect(QRectF(self.rect()), radius, radius)
-            self.setMask(QRegion(path.toFillPolygon().toPolygon()))
+            mask_region = QRegion(path.toFillPolygon().toPolygon())
+        elif punch_icons:
+            mask_region = QRegion(self.rect())
+
+        if punch_icons and mask_region is not None:
+            local_holes = self._desktop_icon_hole_rects_local(force=False)
+            if not local_holes:
+                local_holes = self._desktop_icon_hole_rects_local(force=True)
+            for hole in local_holes:
+                if not isinstance(hole, dict):
+                    continue
+                label_region = hole.get("label_region")
+                if isinstance(label_region, QRegion) and not label_region.isEmpty():
+                    mask_region = mask_region.subtracted(label_region)
+                icon_region = hole.get("icon_region")
+                if isinstance(icon_region, QRegion) and not icon_region.isEmpty():
+                    mask_region = mask_region.subtracted(icon_region)
+
+        if mask_region is not None:
+            self.setMask(mask_region)
         else:
             self.clearMask()
 
@@ -1841,8 +4750,10 @@ class DesktopWidget(QMainWindow):
             'interval': self.interval_ms // 1000,
             'bg_color_mode': self.bg_color_mode,
             'corner_mode': getattr(self, 'corner_mode', 0),
+            'media_fit_mode': int(getattr(self, "media_fit_mode", 0)),
             'opacity_pct': self.current_opacity_pct,
-            'layer_mode': getattr(self, 'layer_mode', 0),
+            'layer_mode': getattr(self, 'layer_mode', self.LAYER_NORMAL),
+            'layer_schema_version': int(self.LAYER_SCHEMA_VERSION),
             'is_locked': getattr(self, 'is_locked', False)
         }
         
@@ -1860,6 +4771,7 @@ class DesktopWidget(QMainWindow):
             self.interval_ms = dialog.sec_input.value() * 1000
             self.bg_color_mode = dialog.bg_combo.currentIndex()
             self.corner_mode = dialog.corner_combo.currentIndex()
+            self.media_fit_mode = int(dialog.media_mode_combo.currentIndex())
             
 
             self.apply_window_settings(dialog.layer_combo.currentIndex(), dialog.lock_cb.isChecked())
@@ -1867,8 +4779,8 @@ class DesktopWidget(QMainWindow):
             
             if old_folder != self.folder_path:
                 self.update_playlist(); self.current_idx = -1; self.next_media()
-            elif self.movie:
-                self.movie.setScaledSize(self.size())
+            else:
+                self._apply_media_scale_mode()
 
             self.current_opacity_pct = dialog.opacity_slider.value()
             self.setWindowOpacity(self.current_opacity_pct / 100.0)
@@ -1878,35 +4790,34 @@ class DesktopWidget(QMainWindow):
         else:
              self.setWindowOpacity(self.current_opacity_pct / 100.0)
 
-    def apply_window_settings(self, layer, lock):
+    def apply_window_settings(self, layer, lock, cancel_interaction=True):
+        # Prevent stale drag/resize state from leaking across lock toggles.
+        if bool(cancel_interaction) and hasattr(self, "cancel_active_interaction"):
+            self.cancel_active_interaction()
+        layer = self.coerce_layer_mode(layer, self.LAYER_SCHEMA_VERSION)
         self.layer_mode = layer
         self.is_locked = lock
         was_visible = self.isVisible()
-
+        current_pos = self._global_top_left()
+        current_size = self.size()
 
         flags = Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool
-        
-
-        if layer == 0:
+        if int(layer) == int(self.LAYER_BACK):
             flags |= Qt.WindowType.WindowStaysOnBottomHint
-        elif layer == 2:
+        elif int(layer) == int(self.LAYER_TOPMOST):
             flags |= Qt.WindowType.WindowStaysOnTopHint
-
-
-
         if lock:
             flags |= Qt.WindowType.WindowTransparentForInput
-            
-        current_pos = self.pos()
-        current_size = self.size()
-        self.setWindowFlags(flags)
-        
 
+        self.setWindowFlags(flags)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         if was_visible:
             self.show()
         self.resize(current_size)
         self._move_exact(current_pos)
+        self.setWindowOpacity(float(self.current_opacity_pct) / 100.0)
         self.apply_mask_and_style()
+        self._schedule_desktop_icon_overlay_bootstrap(retries=3, delay_ms=60)
         self._refresh_resize_ui()
         self._refresh_group_badge()
 
@@ -1926,15 +4837,17 @@ class DesktopWidget(QMainWindow):
         self.settings.setValue("interval", self.interval_ms // 1000)
         self.settings.setValue("bg_color_mode", self.bg_color_mode)
         self.settings.setValue("corner_mode", int(getattr(self, "corner_mode", 0)))
+        self.settings.setValue("media_fit_mode", int(getattr(self, "media_fit_mode", 0)))
         self.settings.setValue("is_muted", bool(self.is_muted))
         self.settings.setValue("gpu_guard_enabled", bool(self.gpu_guard_enabled))
-        self.settings.setValue("layer_mode", int(getattr(self, "layer_mode", 1)))
+        self.settings.setValue("layer_mode", int(getattr(self, "layer_mode", self.LAYER_NORMAL)))
+        self.settings.setValue("layer_schema_version", int(self.LAYER_SCHEMA_VERSION))
         self.settings.setValue("is_locked", bool(getattr(self, "is_locked", False)))
         self.settings.setValue("opacity_pct", self.current_opacity_pct)
         self.settings.setValue("w", self.width())
         self.settings.setValue("h", self.height())
         
-        self.settings.setValue("pos", self.pos())
+        self.settings.setValue("pos", self._global_top_left())
         self.settings.setValue("size", self.size())
         self._save_position_metadata()
         self._save_quarantined_media()
@@ -1948,6 +4861,8 @@ class DesktopWidget(QMainWindow):
         # 1. existing timer/playback stop to avoid overlap
         self._media_resetting = True
         self.timer.stop()
+        self._clear_active_gif_loop_watch()
+        self._cancel_pending_gif_swap()
         if self.media_player.playbackState() != QMediaPlayer.PlaybackState.StoppedState:
             self.media_player.stop()
         self.media_player.setSource(QUrl())  # release previous media source
@@ -1962,6 +4877,7 @@ class DesktopWidget(QMainWindow):
 
         if not self.playlist:
             self.stack.setCurrentIndex(0)
+            self._refresh_icon_overlay_for_current_media()
             return
 
         attempts = len(self.playlist)
@@ -1972,11 +4888,13 @@ class DesktopWidget(QMainWindow):
             self.current_media_path = path
 
             # 3. branch by extension
-            if path.lower().endswith(('.mp4', '.avi', '.mov')):
+            if self._is_video_path(path):
                 self.stack.setCurrentIndex(2)
+                self._update_video_aspect_mode()
                 self.media_player.setSource(QUrl.fromLocalFile(path))
                 self._apply_mute_state()
                 self.media_player.play()
+                self._refresh_icon_overlay_for_current_media()
                 if self._performance_paused:
                     self.set_performance_paused(True, reason="guard_active", force=True)
                 return
@@ -1994,20 +4912,18 @@ class DesktopWidget(QMainWindow):
                     attempts -= 1
                     continue
 
-                self.movie.setScaledSize(self.size())
+                try:
+                    self.movie.setScaledSize(self.size())
+                except Exception:
+                    pass
                 self.img_label.setMovie(self.movie)
                 self.movie.start()
-                self.movie.jumpToFrame(0)
-                f_count = self.movie.frameCount()
-                f_delay = self.movie.nextFrameDelay()
-
-                if f_count > 0 and f_delay > 0:
-                    gif_total_duration = f_count * f_delay
-                    wait_time = max(self.interval_ms, gif_total_duration)
-                else:
-                    wait_time = self.interval_ms
-
-                self.timer.start(wait_time)
+                try:
+                    self.movie.jumpToFrame(0)
+                except Exception:
+                    pass
+                self._start_active_gif_loop_watch()
+                self._refresh_icon_overlay_for_current_media()
                 if self._performance_paused:
                     self.set_performance_paused(True, reason="guard_active", force=True)
                 return
@@ -2025,19 +4941,42 @@ class DesktopWidget(QMainWindow):
             self.current_static_pixmap = pix
             self._update_static_pixmap_size()
             self.timer.start(self.interval_ms)
+            self._refresh_icon_overlay_for_current_media()
             return
 
         self.current_media_path = None
         self.stack.setCurrentIndex(0)
+        self._refresh_icon_overlay_for_current_media()
 
     def _update_static_pixmap_size(self):
         if self.current_static_pixmap and not self.current_static_pixmap.isNull():
-            self.img_label.setPixmap(
-                self.current_static_pixmap.scaled(
-                    self.size(),
+            target = self._safe_target_size(getattr(self, "img_label", None), self.size())
+            fill_mode = self._is_media_fill_mode()
+            expand_mode = getattr(
+                Qt.AspectRatioMode,
+                "KeepAspectRatioByExpanding",
+                Qt.AspectRatioMode.KeepAspectRatio,
+            )
+            if fill_mode:
+                scaled = self.current_static_pixmap.scaled(
+                    target,
+                    expand_mode,
+                    Qt.TransformationMode.SmoothTransformation
+                )
+                if int(scaled.width()) > int(target.width()) or int(scaled.height()) > int(target.height()):
+                    cut_w = min(int(target.width()), int(scaled.width()))
+                    cut_h = min(int(target.height()), int(scaled.height()))
+                    cut_x = max(0, (int(scaled.width()) - int(cut_w)) // 2)
+                    cut_y = max(0, (int(scaled.height()) - int(cut_h)) // 2)
+                    scaled = scaled.copy(int(cut_x), int(cut_y), int(cut_w), int(cut_h))
+            else:
+                scaled = self.current_static_pixmap.scaled(
+                    target,
                     Qt.AspectRatioMode.KeepAspectRatio,
                     Qt.TransformationMode.SmoothTransformation
                 )
+            self.img_label.setPixmap(
+                scaled
             )
 
     def check_video_status(self, s):
@@ -2067,6 +5006,9 @@ class DesktopWidget(QMainWindow):
 
     def mousePressEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
+            if bool(getattr(self, "is_locked", False)):
+                self.cancel_active_interaction()
+                return
             self._reset_axis_snap()
             local_pos = e.position().toPoint() if hasattr(e, "position") else self.mapFromGlobal(e.globalPosition().toPoint())
             if self._is_shift_down() and not getattr(self, "is_locked", False):
@@ -2086,6 +5028,12 @@ class DesktopWidget(QMainWindow):
             self.is_moving = False
 
     def mouseMoveEvent(self, e):
+        if bool(getattr(self, "is_locked", False)):
+            if self.start_pos or self.is_moving or self.is_resizing:
+                self.cancel_active_interaction()
+            else:
+                self._refresh_resize_ui()
+            return
         if self.is_resizing:
             self._apply_corner_resize(e.globalPosition().toPoint())
             self._show_size_hud()
@@ -2096,6 +5044,8 @@ class DesktopWidget(QMainWindow):
             current_global = e.globalPosition().toPoint()
             delta = current_global - self.start_pos
             if delta.manhattanLength() > self._drag_threshold:
+                if not self.is_moving:
+                    self._set_drag_topmost(True)
                 self.is_moving = True
                 prev_x = self.x()
                 prev_y = self.y()
@@ -2114,12 +5064,17 @@ class DesktopWidget(QMainWindow):
 
     def mouseReleaseEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
+            if bool(getattr(self, "is_locked", False)):
+                self.cancel_active_interaction()
+                return
             if self.is_resizing:
                 self.is_resizing = False
                 self.resize_corner = None
                 self.resize_start_pos = None
                 self._reset_axis_snap()
                 self.save_all_settings()
+                if hasattr(self, "manager") and self.manager and hasattr(self.manager, "save_temp_group_positions"):
+                    self.manager.save_temp_group_positions(self.profile_id)
                 self._hide_size_hud()
                 self._refresh_resize_ui()
                 return
@@ -2133,11 +5088,13 @@ class DesktopWidget(QMainWindow):
                     print("Executable is not configured or missing.")
                     self.start_pos = None
                     self.is_moving = False
+                    self._set_drag_topmost(False)
                     self._reset_axis_snap()
                     self._hide_size_hud()
                     self._refresh_resize_ui()
                     return
                 os.startfile(self.exec_path)
+        self._set_drag_topmost(False)
         self.start_pos = None
         self.is_moving = False
         self._reset_axis_snap()
@@ -2206,7 +5163,19 @@ class DesktopWidget(QMainWindow):
         if hasattr(self, "manager") and self.manager and hasattr(self.manager, "show_master_window"):
             self.manager.show_master_window()
 
+    def showEvent(self, e):
+        if not bool(getattr(self, "_initial_media_prepared", False)):
+            self.prepare_media_before_show()
+        super().showEvent(e)
+        if self._should_clone_desktop_icons() or self._should_punch_desktop_icons():
+            self.apply_mask_and_style()
+            self._schedule_desktop_icon_overlay_bootstrap(retries=4, delay_ms=60)
+
     def resizeEvent(self, e):
+        if hasattr(self, "desktop_icon_clone_overlay"):
+            self.desktop_icon_clone_overlay.setGeometry(self.rect())
+            if self.desktop_icon_clone_overlay.isVisible():
+                self.desktop_icon_clone_overlay.raise_()
         if hasattr(self, 'selection_overlay'):
             self.selection_overlay.setGeometry(self.rect())
             self.selection_overlay.raise_()
@@ -2223,18 +5192,22 @@ class DesktopWidget(QMainWindow):
         if hasattr(self, "action_hud") and self.action_hud.isVisible():
             self._refresh_action_hud()
 
-        if self.movie:
-            self.movie.setScaledSize(self.size())
-        else:
-            self._update_static_pixmap_size()
+        self._apply_media_scale_mode()
 
         self.apply_mask_and_style()
         self._refresh_resize_ui()
         self._refresh_group_badge()
         super().resizeEvent(e)
 
+    def moveEvent(self, e):
+        if self._should_clone_desktop_icons() or self._should_punch_desktop_icons():
+            self.apply_mask_and_style()
+        super().moveEvent(e)
+
     def closeEvent(self, event):
         self.timer.stop()
+        self._clear_active_gif_loop_watch()
+        self._cancel_pending_gif_swap()
         
 
         self.media_player.stop()
@@ -2256,7 +5229,12 @@ class DesktopWidget(QMainWindow):
         app = QApplication.instance()
         if app:
             app.removeEventFilter(self)
-            
+        if hasattr(self, "_desktop_icon_mask_timer") and self._desktop_icon_mask_timer.isActive():
+            self._desktop_icon_mask_timer.stop()
+        if hasattr(self, "_desktop_icon_bootstrap_timer") and self._desktop_icon_bootstrap_timer.isActive():
+            self._desktop_icon_bootstrap_timer.stop()
+        self._set_clone_overlay_items([])
+             
         self.save_all_settings()
         super().closeEvent(event)
 
@@ -2288,6 +5266,11 @@ class MasterController(QMainWindow):
         self.widgets = {}
         self._temp_group_ids = set()
         self.profile_rows = {}
+        self._startup_queue = []
+        self._startup_queue_active = False
+        self._startup_queue_timer = QTimer(self)
+        self._startup_queue_timer.setSingleShot(True)
+        self._startup_queue_timer.timeout.connect(self._run_next_startup_item)
 
 
         self.tray_icon = QSystemTrayIcon(self)
@@ -2770,7 +5753,10 @@ class MasterController(QMainWindow):
 
         self.load_profiles()
         QTimer.singleShot(100, self.restore_last_session)
-        QApplication.instance().focusChanged.connect(self.handle_focus_change)
+        app = QApplication.instance()
+        if app:
+            app.focusChanged.connect(self.handle_focus_change)
+            app.installEventFilter(self)
         self._alt_click_pressed_prev = False
         self._alt_click_poll_timer = QTimer(self)
         self._alt_click_poll_timer.setInterval(25)
@@ -3174,12 +6160,117 @@ class MasterController(QMainWindow):
         self.master_settings.sync()
         return len(orphan_ids)
 
+    def _profile_startup_media_kind(self, pid):
+        spid = str(pid)
+        settings = QSettings("MyHomeApp", f"Profile_{spid}")
+        folder_path = str(settings.value("folder_path", "") or "").strip()
+        if not folder_path or not os.path.isdir(folder_path):
+            return "other"
+        ext = (".png", ".jpg", ".jpeg", ".gif", ".mp4", ".avi", ".mov", ".ico", ".jfif", ".webp")
+        try:
+            files = os.listdir(folder_path)
+        except OSError:
+            return "other"
+        candidates = sorted([name for name in files if str(name).lower().endswith(ext)])
+        if not candidates:
+            return "other"
+        first_name = str(candidates[0]).lower()
+        if first_name.endswith((".mp4", ".avi", ".mov")):
+            return "video"
+        if first_name.endswith(".gif"):
+            return "gif"
+        return "other"
+
+    @staticmethod
+    def _startup_delay_for_kind(kind):
+        key = str(kind or "").strip().lower()
+        if key == "video":
+            return 450
+        if key == "gif":
+            return 320
+        return 80
+
+    def _cancel_startup_queue(self):
+        if hasattr(self, "_startup_queue_timer") and self._startup_queue_timer.isActive():
+            self._startup_queue_timer.stop()
+        self._startup_queue = []
+        self._startup_queue_active = False
+
+    def _build_set_startup_queue(self, set_id):
+        sid = str(set_id)
+        data = self._set_defs.get(sid, {})
+        ordered = []
+        for order_idx, pid in enumerate(data.get("profiles", [])):
+            spid = str(pid)
+            if not self._profile_run_enabled(spid):
+                continue
+            name = QSettings("MyHomeApp", f"Profile_{spid}").value("name", "New 세팅")
+            kind = self._profile_startup_media_kind(spid)
+            if kind == "video":
+                priority = 1
+            elif kind == "gif":
+                priority = 2
+            else:
+                priority = 0
+            ordered.append((int(priority), int(order_idx), spid, str(name), str(kind)))
+        ordered.sort(key=lambda x: (x[0], x[1]))
+        return [(pid, name, kind) for _prio, _idx, pid, name, kind in ordered]
+
+    def _begin_startup_queue(self, entries):
+        self._cancel_startup_queue()
+        self._startup_queue = list(entries)
+        self._startup_queue_active = bool(self._startup_queue)
+        if not self._startup_queue_active:
+            self.update_active_status()
+            self.load_profiles()
+            self._refresh_apply_button_state()
+            return
+        self._run_next_startup_item()
+
+    def _run_next_startup_item(self):
+        if not bool(getattr(self, "_startup_queue_active", False)):
+            return
+        if not self._startup_queue:
+            self._startup_queue_active = False
+            self.update_active_status()
+            self.load_profiles()
+            self._refresh_apply_button_state()
+            return
+
+        pid, name, kind = self._startup_queue.pop(0)
+        self._start_widget_instance(pid, name)
+        self.update_active_status()
+
+        if not self._startup_queue:
+            self._startup_queue_active = False
+            self.load_profiles()
+            self._refresh_apply_button_state()
+            return
+        self._startup_queue_timer.start(self._startup_delay_for_kind(kind))
+
     def _start_widget_instance(self, pid, name):
         spid = str(pid)
         if spid in self.widgets:
             return False
-        self.widgets[spid] = DesktopWidget(spid, name, self)
-        self.widgets[spid].show()
+        widget = DesktopWidget(spid, name, self)
+        try:
+            widget.prepare_media_before_show()
+        except Exception:
+            pass
+        self.widgets[spid] = widget
+        widget.show()
+        try:
+            widget = self.widgets[spid]
+            QTimer.singleShot(
+                0,
+                lambda w=widget: (
+                    w._schedule_desktop_icon_overlay_bootstrap(retries=4, delay_ms=50)
+                    if isinstance(w, DesktopWidget)
+                    else None
+                ),
+            )
+        except Exception:
+            pass
         if spid in self._temp_group_ids:
             self.widgets[spid]._refresh_group_badge()
         if self._gpu_guard_paused and bool(getattr(self.widgets[spid], "gpu_guard_enabled", False)):
@@ -3189,6 +6280,7 @@ class MasterController(QMainWindow):
         return True
 
     def _stop_all_widgets_bulk(self):
+        self._cancel_startup_queue()
         self.clear_temp_group(silent=True)
         changed = False
         for pid in list(self.widgets.keys()):
@@ -3266,14 +6358,66 @@ class MasterController(QMainWindow):
                 continue
             if not widget.isVisible():
                 continue
+            if bool(getattr(widget, "is_locked", False)):
+                continue
             targets.append(widget)
         return targets
 
     def move_temp_group_by_delta(self, source_pid, dx, dy):
         if not dx and not dy:
             return
+        src = self.widgets.get(str(source_pid))
+        if isinstance(src, DesktopWidget) and bool(getattr(src, "is_locked", False)):
+            return
         for widget in self._temp_group_move_targets(source_pid):
             widget._move_exact((widget.x() + int(dx), widget.y() + int(dy)))
+
+    def resize_temp_group_by_edges(self, source_pid, left_step, top_step, right_step, bottom_step):
+        try:
+            d_left = int(left_step)
+            d_top = int(top_step)
+            d_right = int(right_step)
+            d_bottom = int(bottom_step)
+        except Exception:
+            return
+        if not (d_left or d_top or d_right or d_bottom):
+            return
+
+        src = self.widgets.get(str(source_pid))
+        if isinstance(src, DesktopWidget) and bool(getattr(src, "is_locked", False)):
+            return
+
+        for widget in self._temp_group_move_targets(source_pid):
+            old_left = int(widget.x())
+            old_top = int(widget.y())
+            old_right = int(widget.x() + widget.width())
+            old_bottom = int(widget.y() + widget.height())
+
+            new_left = int(old_left + d_left)
+            new_top = int(old_top + d_top)
+            new_right = int(old_right + d_right)
+            new_bottom = int(old_bottom + d_bottom)
+
+            min_w = max(50, int(widget.minimumWidth()))
+            min_h = max(50, int(widget.minimumHeight()))
+
+            width = int(new_right - new_left)
+            height = int(new_bottom - new_top)
+
+            if width < int(min_w):
+                if d_left != 0 and d_right == 0:
+                    new_left = int(new_right - int(min_w))
+                else:
+                    new_right = int(new_left + int(min_w))
+                width = int(min_w)
+            if height < int(min_h):
+                if d_top != 0 and d_bottom == 0:
+                    new_top = int(new_bottom - int(min_h))
+                else:
+                    new_bottom = int(new_top + int(min_h))
+                height = int(min_h)
+
+            widget.setGeometry(QRect(int(new_left), int(new_top), int(width), int(height)))
 
     def save_temp_group_positions(self, source_pid):
         for widget in self._temp_group_move_targets(source_pid):
@@ -3340,7 +6484,7 @@ class MasterController(QMainWindow):
             if hasattr(widget, "cancel_active_interaction"):
                 widget.cancel_active_interaction()
         for widget in targets:
-            widget.apply_window_settings(int(getattr(widget, "layer_mode", 1)), lock_val)
+            widget.apply_window_settings(int(getattr(widget, "layer_mode", DesktopWidget.LAYER_NORMAL)), lock_val)
             widget.save_all_settings()
             if hasattr(widget, "show_lock_hud"):
                 widget.show_lock_hud(lock_val)
@@ -3354,23 +6498,17 @@ class MasterController(QMainWindow):
         if sid not in self._set_defs:
             return
 
+        self._cancel_startup_queue()
         self._set_current_set_id(sid, persist=True)
         self.clear_all_highlights()
         self.clear_temp_group(silent=True)
         self._stop_all_widgets_bulk()
-
-        for pid in self._set_defs[sid].get("profiles", []):
-            if not self._profile_run_enabled(pid):
-                continue
-            name = QSettings("MyHomeApp", f"Profile_{pid}").value("name", "New 세팅")
-            self._start_widget_instance(pid, str(name))
+        startup_entries = self._build_set_startup_queue(sid)
 
         self._applied_set_id = sid
         self.master_settings.setValue("applied_set_id", sid)
         self.master_settings.sync()
-        self.update_active_status()
-        self.load_profiles()
-        self._refresh_apply_button_state()
+        self._begin_startup_queue(startup_entries)
 
     def create_empty_set(self, name):
         clean_name = str(name).strip()
@@ -3485,15 +6623,73 @@ class MasterController(QMainWindow):
             QMessageBox.information(self, "세트 삭제", "최소 1개의 세트는 유지되어야 합니다.")
             return False
 
-        set_name = self._set_defs[sid].get("name", f"세트{sid}")
-        confirm = QMessageBox.question(
-            self,
-            "세트 삭제",
-            f"'{set_name}' 세트를 삭제하시겠습니까?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-        if confirm != QMessageBox.StandardButton.Yes:
+        set_name = str(self._set_defs[sid].get("name", f"세트{sid}"))
+        removed_profiles = [str(pid) for pid in self._set_defs[sid].get("profiles", [])]
+        remaining_set_ids = [str(x) for x in self._set_order if str(x) != sid]
+        if not remaining_set_ids:
+            QMessageBox.information(self, "세트 삭제", "최소 1개의 세트는 유지되어야 합니다.")
             return False
+        absorb_target_sid = str(remaining_set_ids[0])
+        absorb_target_name = str(self._set_defs.get(absorb_target_sid, {}).get("name", f"세트{absorb_target_sid}"))
+
+        delete_profiles = False
+        if removed_profiles:
+            choice_box = QMessageBox(self)
+            choice_box.setWindowTitle("세트 삭제")
+            choice_box.setIcon(QMessageBox.Icon.Warning)
+            choice_box.setText(f"'{set_name}' 세트를 삭제합니다.")
+            choice_box.setInformativeText(
+                f"포함된 프로필 {len(removed_profiles)}개 처리 방식을 선택하세요.\n"
+                f"- 흡수: '{absorb_target_name}'(첫번째 세트)로 이동\n"
+                f"- 삭제: 프로필도 함께 완전 삭제"
+            )
+            absorb_btn = choice_box.addButton("첫번째 세트로 흡수", QMessageBox.ButtonRole.AcceptRole)
+            purge_btn = choice_box.addButton("프로필도 함께 삭제", QMessageBox.ButtonRole.DestructiveRole)
+            cancel_btn = choice_box.addButton("취소", QMessageBox.ButtonRole.RejectRole)
+            choice_box.setDefaultButton(absorb_btn)
+            choice_box.exec()
+            clicked = choice_box.clickedButton()
+            if clicked is cancel_btn:
+                return False
+            delete_profiles = (clicked is purge_btn)
+        else:
+            confirm = QMessageBox.question(
+                self,
+                "세트 삭제",
+                f"'{set_name}' 세트를 삭제하시겠습니까?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if confirm != QMessageBox.StandardButton.Yes:
+                return False
+
+        if delete_profiles and removed_profiles:
+            remove_ids = set([str(pid) for pid in removed_profiles])
+            for pid in list(remove_ids):
+                if pid in self._temp_group_ids:
+                    self._temp_group_ids.remove(pid)
+                if pid in self.widgets:
+                    widget = self.widgets.get(pid)
+                    if widget is not None:
+                        widget.close()
+                        widget.deleteLater()
+                    self.widgets.pop(pid, None)
+                profile_settings = QSettings("MyHomeApp", f"Profile_{pid}")
+                profile_settings.clear()
+                profile_settings.sync()
+
+            profile_ids = [pid for pid in self._all_profile_ids() if str(pid) not in remove_ids]
+            self.master_settings.setValue("profile_ids", profile_ids)
+            active_ids = self._as_list(self.master_settings.value("active_profiles", []))
+            self.master_settings.setValue(
+                "active_profiles",
+                [pid for pid in active_ids if str(pid) not in remove_ids],
+            )
+        elif removed_profiles:
+            target_profiles = list(self._set_defs.get(absorb_target_sid, {}).get("profiles", []))
+            merged_profiles = target_profiles + [pid for pid in removed_profiles if pid not in target_profiles]
+            if absorb_target_sid in self._set_defs:
+                self._set_defs[absorb_target_sid]["profiles"] = merged_profiles
+            self.master_settings.setValue(self._set_key(absorb_target_sid, "profiles"), merged_profiles)
 
         self.master_settings.remove(f"sets/{sid}")
         self._set_defs.pop(sid, None)
@@ -3501,11 +6697,16 @@ class MasterController(QMainWindow):
         self.master_settings.setValue("set_ids", list(self._set_order))
         self.master_settings.sync()
 
-        if self.selected_set_id() == sid:
-            next_sid = self._set_order[0]
-            self.apply_set(next_sid)
+        selected_sid = self.selected_set_id()
+        if selected_sid == sid:
+            self.apply_set(absorb_target_sid)
+        elif str(getattr(self, "_applied_set_id", "")) == sid:
+            fallback_sid = selected_sid if selected_sid in self._set_defs else absorb_target_sid
+            self.apply_set(fallback_sid)
         else:
             self._refresh_set_ui()
+            self._sync_temp_group_badges()
+            self.update_active_status()
             self.load_profiles()
         return True
 
@@ -3567,6 +6768,9 @@ class MasterController(QMainWindow):
         self.gpu_cfg_panel.setGeometry(x, y, popup_w, popup_h)
 
     def eventFilter(self, obj, event):
+        if event.type() in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick):
+            if self._is_master_internal_object(obj):
+                QTimer.singleShot(0, self._activate_from_internal_click)
         if obj is getattr(self, "gpu_cfg_panel", None):
             if event.type() == QEvent.Type.Hide and self.gpu_cfg_toggle.isChecked():
                 prev = self.gpu_cfg_toggle.blockSignals(True)
@@ -3578,6 +6782,26 @@ class MasterController(QMainWindow):
             if event.type() == QEvent.Type.Leave:
                 self._set_hovered_profile_row(None)
         return super().eventFilter(obj, event)
+
+    def _is_master_internal_object(self, obj):
+        if obj is self:
+            return True
+        if not isinstance(obj, QWidget):
+            return False
+        if obj is getattr(self, "gpu_cfg_panel", None):
+            return True
+        if self.isAncestorOf(obj):
+            return True
+        top = obj.window()
+        return top is self or top is getattr(self, "gpu_cfg_panel", None)
+
+    def _activate_from_internal_click(self):
+        if not self.isVisible():
+            return
+        if self.isMinimized():
+            self.showNormal()
+        self.raise_()
+        self.activateWindow()
 
     def _apply_gpu_guard_thresholds(self, high_pct, low_pct, persist=True):
         try:
@@ -3756,12 +6980,12 @@ class MasterController(QMainWindow):
                 background-color: #1a2740;
                 border: 1px solid #4a6288;
                 border-radius: 8px;
-                padding: 2px 10px;
+                padding: 2px 8px;
             }
             QComboBox::drop-down {
                 subcontrol-origin: padding;
                 subcontrol-position: top right;
-                width: 18px;
+                width: 0px;
                 border: none;
                 background: transparent;
             }
@@ -3769,10 +6993,7 @@ class MasterController(QMainWindow):
                 image: none;
                 width: 0px;
                 height: 0px;
-                border-left: 5px solid transparent;
-                border-right: 5px solid transparent;
-                border-top: 6px solid #dbe7ff;
-                margin-right: 5px;
+                margin: 0px;
             }
             QComboBox QAbstractItemView {
                 background-color: #23344d;
@@ -3800,6 +7021,8 @@ class MasterController(QMainWindow):
     def _prompt_text_dialog(self, title, label, default_text=""):
         dialog = QInputDialog(self)
         dialog.setWindowTitle(str(title))
+        dialog.setMinimumSize(250, 190)
+        dialog.resize(250, 190)
         dialog.setInputMode(QInputDialog.InputMode.TextInput)
         dialog.setLabelText(str(label))
         dialog.setTextValue(str(default_text))
@@ -3814,6 +7037,8 @@ class MasterController(QMainWindow):
     def _prompt_choice_dialog(self, title, label, choices):
         dialog = QInputDialog(self)
         dialog.setWindowTitle(str(title))
+        dialog.setMinimumSize(360, 220)
+        dialog.resize(360, 220)
         dialog.setLabelText(str(label))
         dialog.setComboBoxEditable(False)
         dialog.setComboBoxItems([str(v) for v in choices])
@@ -3964,11 +7189,13 @@ class MasterController(QMainWindow):
                 'exec_path': w.exec_path,
                 'w': w.width(),
                 'h': w.height(),
-                'layer_mode': getattr(w, 'layer_mode', 1),
+                'layer_mode': getattr(w, 'layer_mode', DesktopWidget.LAYER_NORMAL),
+                'layer_schema_version': int(DesktopWidget.LAYER_SCHEMA_VERSION),
                 'is_locked': getattr(w, 'is_locked', False),
                 'opacity_pct': w.current_opacity_pct,
                 'bg_color_mode': w.bg_color_mode,
                 'corner_mode': getattr(w, 'corner_mode', 0),
+                'media_fit_mode': int(getattr(w, 'media_fit_mode', 0)),
                 'interval': w.interval_ms // 1000,
                 'is_muted': w.is_muted,
                 'gpu_guard_enabled': getattr(w, 'gpu_guard_enabled', False),
@@ -3980,11 +7207,16 @@ class MasterController(QMainWindow):
                 'exec_path': s_obj.value("exec_path", ""),
                 'w': int(s_obj.value("w", 200)),
                 'h': int(s_obj.value("h", 200)),
-                'layer_mode': int(s_obj.value("layer_mode", 1)),
+                'layer_mode': DesktopWidget.coerce_layer_mode(
+                    int(s_obj.value("layer_mode", DesktopWidget.LAYER_NORMAL)),
+                    int(s_obj.value("layer_schema_version", 0)),
+                ),
+                'layer_schema_version': int(DesktopWidget.LAYER_SCHEMA_VERSION),
                 'is_locked': _as_bool(s_obj.value("is_locked", False), False),
                 'opacity_pct': int(s_obj.value("opacity_pct", 100)),
                 'bg_color_mode': int(s_obj.value("bg_color_mode", 1)),
                 'corner_mode': int(s_obj.value("corner_mode", 0)),
+                'media_fit_mode': int(s_obj.value("media_fit_mode", 0)),
                 'interval': int(s_obj.value("interval", 5)),
                 'is_muted': _as_bool(s_obj.value("is_muted", True), True),
                 'gpu_guard_enabled': _as_bool(s_obj.value("gpu_guard_enabled", False), False),
@@ -4006,6 +7238,7 @@ class MasterController(QMainWindow):
             new_opacity = dialog.opacity_slider.value()
             new_bg = dialog.bg_combo.currentIndex()
             new_corner = dialog.corner_combo.currentIndex()
+            new_media_fit = dialog.media_mode_combo.currentIndex()
             new_layer = dialog.layer_combo.currentIndex()
             new_lock = dialog.lock_cb.isChecked()
             new_mute = dialog.mute_checkbox.isChecked()
@@ -4013,6 +7246,7 @@ class MasterController(QMainWindow):
 
 
             s_obj.setValue("layer_mode", new_layer)
+            s_obj.setValue("layer_schema_version", int(DesktopWidget.LAYER_SCHEMA_VERSION))
             s_obj.setValue("is_locked", bool(new_lock))
             s_obj.setValue("folder_path", new_folder)
             s_obj.setValue("exec_path", new_exec)
@@ -4020,6 +7254,7 @@ class MasterController(QMainWindow):
             s_obj.setValue("opacity_pct", new_opacity)
             s_obj.setValue("bg_color_mode", new_bg)
             s_obj.setValue("corner_mode", int(new_corner))
+            s_obj.setValue("media_fit_mode", int(new_media_fit))
             s_obj.setValue("interval", new_interval // 1000)
             s_obj.setValue("is_muted", bool(new_mute))
             s_obj.setValue("gpu_guard_enabled", bool(new_gpu_guard))
@@ -4038,6 +7273,7 @@ class MasterController(QMainWindow):
                 
                 w.bg_color_mode = new_bg
                 w.corner_mode = int(new_corner)
+                w.media_fit_mode = int(new_media_fit)
                 w.apply_mask_and_style()
 
                 w.apply_window_settings(new_layer, new_lock)
@@ -4063,6 +7299,8 @@ class MasterController(QMainWindow):
                     w.current_idx = -1
                     w.next_media()
                 else:
+                    if hasattr(w, "_apply_media_scale_mode"):
+                        w._apply_media_scale_mode()
 
                     if w.timer.isActive():
                         w.timer.setInterval(new_interval)
@@ -4135,10 +7373,49 @@ class MasterController(QMainWindow):
         if hasattr(self, "gpu_cfg_panel") and self.gpu_cfg_panel.isVisible():
             self._place_gpu_cfg_panel()
 
-    def show_master_window(self):
-        """숨겨지거나 최소화된 창을 강제로 끄집어내는 함수"""
-        self.show()
+    def _move_master_near_anchor(self, anchor_rect):
+        if not isinstance(anchor_rect, QRect):
+            return
+
+        anchor = QRect(anchor_rect)
+        screen = QGuiApplication.screenAt(anchor.center()) or self.screen() or QGuiApplication.primaryScreen()
+        if not screen:
+            return
+
+        ag = screen.availableGeometry()
+        gap = 12
+        margin = 8
+        w = max(100, int(self.width()))
+        h = max(100, int(self.height()))
+
+        # Prefer right side of settings dialog; fallback to left when out of bounds.
+        x = int(anchor.right()) + gap
+        y = int(anchor.top())
+        if x + w > int(ag.right()) - margin:
+            x = int(anchor.left()) - gap - w
+
+        min_x = int(ag.left()) + margin
+        max_x = int(ag.right()) - w - margin
+        min_y = int(ag.top()) + margin
+        max_y = int(ag.bottom()) - h - margin
+
+        x = max(min_x, min(int(x), max_x))
+        y = max(min_y, min(int(y), max_y))
+        self.move(int(x), int(y))
+
+    def show_master_window(self, anchor_rect=None, restart=False):
+        """컨트롤러를 보이게 하고 필요 시 앵커 옆에 재배치한다."""
+        if bool(restart) and self.isVisible():
+            self.hide()
+            try:
+                QApplication.processEvents()
+            except Exception:
+                pass
+
         self.showNormal()
+        if isinstance(anchor_rect, QRect):
+            self._move_master_near_anchor(anchor_rect)
+        self.show()
         self.raise_()
         self.activateWindow()
 
@@ -4148,7 +7425,7 @@ class MasterController(QMainWindow):
             if not isinstance(w, QWidget) or not w.isVisible():
                 continue
             if w.geometry().contains(global_pos):
-                layer = int(getattr(w, "layer_mode", 1))
+                layer = int(getattr(w, "layer_mode", DesktopWidget.LAYER_NORMAL))
                 candidates.append((layer, int(w.winId()), w))
 
         if not candidates:
@@ -4173,7 +7450,7 @@ class MasterController(QMainWindow):
                     else:
                         if hasattr(target, "cancel_active_interaction"):
                             target.cancel_active_interaction()
-                        target.apply_window_settings(int(getattr(target, "layer_mode", 1)), new_lock)
+                        target.apply_window_settings(int(getattr(target, "layer_mode", DesktopWidget.LAYER_NORMAL)), new_lock)
                         target.save_all_settings()
                     self.load_profiles()
                     print(f"[alt-click-lock] profile={target.profile_id} lock={new_lock}")
@@ -4264,7 +7541,10 @@ class MasterController(QMainWindow):
         new_settings.setValue("name", "New 세팅")
         new_settings.setValue("w", 200)
         new_settings.setValue("h", 200)
+        new_settings.setValue("layer_mode", int(DesktopWidget.LAYER_BACK))
+        new_settings.setValue("layer_schema_version", int(DesktopWidget.LAYER_SCHEMA_VERSION))
         new_settings.setValue("corner_mode", 0)
+        new_settings.setValue("media_fit_mode", 0)
         new_settings.setValue("run_enabled", True)
         new_settings.sync()
 
@@ -4355,7 +7635,11 @@ class MasterController(QMainWindow):
     def closeEvent(self, event):
         if hasattr(self, "gpu_cfg_panel") and self.gpu_cfg_panel.isVisible():
             self.gpu_cfg_panel.hide()
-        if self.tray_icon.isVisible(): self.hide(); event.ignore()
+        if self.tray_icon.isVisible():
+            self.hide()
+            event.ignore()
+            return
+        super().closeEvent(event)
 
     def quit_app(self):
         if hasattr(self, "_alt_click_poll_timer"):
@@ -4440,6 +7724,7 @@ class MasterController(QMainWindow):
         self.master_settings.setValue("active_profiles", active_ids)
         self.master_settings.sync()
 
+
 if __name__ == "__main__":
 
     sys.excepthook = lambda cls, exception, traceback: sys.__excepthook__(cls, exception, traceback)
@@ -4457,3 +7742,6 @@ if __name__ == "__main__":
         import traceback
         traceback.print_exc()
         input("엔터를 누르면 종료합니다...") # 에러 확인을 위해 잠시 멈춤
+
+
+
