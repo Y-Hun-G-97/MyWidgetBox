@@ -676,6 +676,18 @@ class SettingsDialog(QDialog):
                 color: #c2d1ea;
                 font-size: 12px;
             }
+            QLabel#settingsSectionTitle {
+                color: #a7c1eb;
+                font-size: 13px;
+                font-weight: 700;
+                letter-spacing: 0.4px;
+            }
+            QFrame#settingsSectionLine {
+                background-color: #3f567a;
+                border: none;
+                min-height: 1px;
+                max-height: 1px;
+            }
             QFrame#settingsCard {
                 background-color: #23344d;
                 border: 1px solid #3f567a;
@@ -939,8 +951,10 @@ class SettingsDialog(QDialog):
         self.bg_combo.setMinimumHeight(36)
 
         self.corner_combo = DownwardComboBox()
-        self.corner_combo.addItems(["곡선", "직각"])
-        self.corner_combo.setCurrentIndex(max(0, min(int(s.get('corner_mode', 0)), 1)))
+        self.corner_combo.addItems(["곡선", "직각", "원형 (최대)"])
+        self.corner_combo.setCurrentIndex(
+            DesktopWidget.coerce_corner_mode(s.get('corner_mode', DesktopWidget.CORNER_ROUNDED))
+        )
         self.corner_combo.setView(QListView())
         self.corner_combo.view().setFrameShape(QFrame.Shape.NoFrame)
         self.corner_combo.setStyle(QStyleFactory.create("Fusion"))
@@ -1091,32 +1105,56 @@ class SettingsDialog(QDialog):
         self.master_btn = QPushButton("위젯 컨트롤러 열기")
         self.master_btn.setObjectName("masterBtn")
 
+        def _add_section_header(form_layout, title_text):
+            row_widget = QWidget()
+            row_layout = QHBoxLayout(row_widget)
+            row_layout.setContentsMargins(0, 8, 0, 2)
+            row_layout.setSpacing(8)
+            title = QLabel(str(title_text))
+            title.setObjectName("settingsSectionTitle")
+            line = QFrame()
+            line.setObjectName("settingsSectionLine")
+            line.setFrameShape(QFrame.Shape.HLine)
+            line.setFrameShadow(QFrame.Shadow.Plain)
+            row_layout.addWidget(title, 0)
+            row_layout.addWidget(line, 1)
+            form_layout.addRow(row_widget)
 
+        _add_section_header(left_form, "실행 / 연동")
         left_form.addRow("미디어 폴더:", self.folder_btn)
         left_form.addRow("", self.folder_label)
         left_form.addRow("실행 파일:", self.exec_btn)
         left_form.addRow("", self.exec_label)
         left_form.addRow("포커싱 대상:", self.focus_binding_label)
         left_form.addRow("", self._focus_bind_row_widget)
+
+        _add_section_header(left_form, "위젯")
         left_form.addRow("너비:", self.width_input)
         left_form.addRow("높이:", self.height_input)
-        left_form.addRow("재생 간격(초):", self.sec_input)
         left_form.addRow("불투명도(%):", self.opacity_spinbox)
         left_form.addRow("", self.opacity_slider)
+        left_form.addRow("레이어:", self.layer_combo)
+        left_form.addRow("클릭 잠금:", self.lock_cb)
 
-        right_form.addRow("배경색:", self.bg_combo)
-        right_form.addRow("모서리:", self.corner_combo)
+        _add_section_header(left_form, "외형")
+        left_form.addRow("배경색:", self.bg_combo)
+        left_form.addRow("모서리:", self.corner_combo)
+
+        _add_section_header(right_form, "재생 / 전환")
+        right_form.addRow("전환 간격(초):", self.sec_input)
         right_form.addRow("미디어 맞춤:", self.media_mode_combo)
         right_form.addRow("영상 전환:", self.video_transition_combo)
         right_form.addRow("", self.video_transition_hint)
+        right_form.addRow("듀얼 페이드:", self.video_dual_fade_ms_spin)
+        right_form.addRow("", self.video_dual_fade_hint)
+
+        _add_section_header(right_form, "영상 품질 / 캐시")
         right_form.addRow("영상 디코드:", self.video_decode_combo)
         right_form.addRow("", self.video_decode_hint)
         right_form.addRow("영상 캐시:", self.video_cache_usage_label)
         right_form.addRow("", self.video_cache_action_row_widget)
-        right_form.addRow("듀얼 페이드:", self.video_dual_fade_ms_spin)
-        right_form.addRow("", self.video_dual_fade_hint)
-        right_form.addRow("레이어:", self.layer_combo)
-        right_form.addRow("클릭 잠금:", self.lock_cb)
+
+        _add_section_header(right_form, "오디오 / 성능")
         right_form.addRow("음소거:", self.mute_checkbox)
         right_form.addRow("성능 보호:", self.gpu_guard_checkbox)
         self._video_dual_fade_label = right_form.labelForField(self.video_dual_fade_ms_spin)
@@ -1174,22 +1212,51 @@ class SettingsDialog(QDialog):
         if self.layout():
             self.layout().invalidate()
             self.layout().activate()
-        target_height = max(420, self.minimumSizeHint().height())
+        try:
+            self.adjustSize()
+        except Exception:
+            pass
+        target_height = max(
+            420,
+            int(self.minimumSizeHint().height()),
+            int(self.sizeHint().height()),
+        )
         if self.height() != target_height:
             self.resize(self.width(), target_height)
+        self.updateGeometry()
+        self.update()
+
+    def _set_form_row_visible(self, form_layout, field_widget, visible):
+        if form_layout is None or field_widget is None:
+            return
+        want_visible = bool(visible)
+        # Qt6 provides row-level visibility; use it first to avoid stale row spacing.
+        try:
+            if hasattr(form_layout, "setRowVisible"):
+                form_layout.setRowVisible(field_widget, want_visible)
+                return
+        except Exception:
+            pass
+        label = None
+        try:
+            label = form_layout.labelForField(field_widget)
+        except Exception:
+            label = None
+        if isinstance(label, QWidget):
+            label.setVisible(want_visible)
+        if isinstance(field_widget, QWidget):
+            field_widget.setVisible(want_visible)
 
     def _sync_video_transition_dependent_ui(self):
         is_dual = (
             int(self.video_transition_combo.currentIndex())
             == int(DesktopWidget.VIDEO_TRANSITION_DUAL)
         )
-        self.video_dual_fade_ms_spin.setVisible(bool(is_dual))
-        self.video_dual_fade_hint.setVisible(bool(is_dual))
-        if getattr(self, "_video_dual_fade_label", None) is not None:
-            self._video_dual_fade_label.setVisible(bool(is_dual))
-        if getattr(self, "_video_dual_fade_hint_label", None) is not None:
-            self._video_dual_fade_hint_label.setVisible(bool(is_dual))
-        self._sync_dialog_height()
+        form_layout = getattr(self, "_right_form", None)
+        self._set_form_row_visible(form_layout, self.video_dual_fade_ms_spin, bool(is_dual))
+        self._set_form_row_visible(form_layout, self.video_dual_fade_hint, bool(is_dual))
+        # Defer resize until combo popup settles to reduce repaint artifacts.
+        QTimer.singleShot(0, self._sync_dialog_height)
 
     @staticmethod
     def _format_size_bytes(num_bytes):
@@ -1368,7 +1435,7 @@ class SettingsDialog(QDialog):
     def showEvent(self, event):
         super().showEvent(event)
         self._apply_title_bar_theme()
-        self._sync_dialog_height()
+        self._sync_video_transition_dependent_ui()
         self._refresh_focus_binding_label()
         if self.shortcut_toggle.isChecked():
             self._place_shortcut_panel()
@@ -1419,12 +1486,9 @@ class SettingsDialog(QDialog):
         self.focus_bind_btn.setEnabled(self._focus_binding_supported)
         self.focus_bind_clear_btn.setEnabled(self._focus_binding_supported)
         self._refresh_focus_binding_label()
-        if str(message or "").strip():
-            print(f"[focus-bind] {str(message)}")
 
     def _start_focus_capture(self):
         if not self._focus_binding_supported:
-            print("[focus-bind] 실행 중인 위젯에서만 지정할 수 있습니다.")
             return
         if self._focus_capture_timer.isActive():
             return
@@ -1519,6 +1583,9 @@ class DesktopWidget(QMainWindow):
     LAYER_NORMAL = 1
     LAYER_TOPMOST = 2
     LAYER_SCHEMA_VERSION = 4
+    CORNER_ROUNDED = 0
+    CORNER_SQUARE = 1
+    CORNER_ROUND = 2
     VIDEO_TRANSITION_SINGLE = 0
     VIDEO_TRANSITION_DUAL = 1
     VIDEO_DUAL_FADE_DEFAULT_MS = 90
@@ -1574,6 +1641,21 @@ class DesktopWidget(QMainWindow):
             mode = int(cls.VIDEO_TRANSITION_SINGLE)
         if mode not in (int(cls.VIDEO_TRANSITION_SINGLE), int(cls.VIDEO_TRANSITION_DUAL)):
             mode = int(cls.VIDEO_TRANSITION_SINGLE)
+        return int(mode)
+
+    @classmethod
+    def coerce_corner_mode(cls, raw_mode):
+        try:
+            mode = int(raw_mode)
+        except Exception:
+            mode = int(cls.CORNER_ROUNDED)
+        valid = {
+            int(cls.CORNER_ROUNDED),
+            int(cls.CORNER_SQUARE),
+            int(cls.CORNER_ROUND),
+        }
+        if mode not in valid:
+            mode = int(cls.CORNER_ROUNDED)
         return int(mode)
 
     @classmethod
@@ -3926,7 +4008,8 @@ class DesktopWidget(QMainWindow):
                             else:
                                 self.toggle_gpu_guard_shortcut()
                         elif key == Qt.Key.Key_R:
-                            next_corner = 0 if int(getattr(self, "corner_mode", 0)) == 1 else 1
+                            curr_corner = self.coerce_corner_mode(getattr(self, "corner_mode", self.CORNER_ROUNDED))
+                            next_corner = (int(curr_corner) + 1) % 3
                             if hasattr(self, "manager") and self.manager and hasattr(self.manager, "set_temp_group_corner_mode"):
                                 self.manager.set_temp_group_corner_mode(self.profile_id, next_corner)
                             else:
@@ -4005,7 +4088,6 @@ class DesktopWidget(QMainWindow):
             self.current_idx = -1
             self.next_media()
             self.save_all_settings()
-            print(f"[drop-folder] profile={self.profile_id} folder={path}")
             return True
         if os.path.isfile(path):
             if self._normalize_exec_path(path) != self._normalize_exec_path(getattr(self, "exec_path", "")):
@@ -4013,7 +4095,6 @@ class DesktopWidget(QMainWindow):
                 self._clear_manual_focus_binding(persist=False, clear_bound=False)
             self.exec_path = path
             self.save_all_settings()
-            print(f"[drop-exec] profile={self.profile_id} exec={path}")
             return True
         return False
 
@@ -4996,15 +5077,8 @@ class DesktopWidget(QMainWindow):
         self.is_muted = bool(muted)
         self._apply_mute_state(force_refresh=True)
         self.save_all_settings()
-        if not log:
-            return
-        playback_state = self.media_player.playbackState().name if self.media_player else "n/a"
-        media_path = self.current_media_path if self.current_media_path else "none"
-        print(
-            f"[mute-toggle] profile={self.profile_id} muted={self.is_muted} "
-            f"output_muted={self.audio_output.isMuted()} volume={self.audio_output.volume():.2f} "
-            f"output_attached={self._audio_output_attached} state={playback_state} media={media_path}"
-        )
+        # keep `log` arg for compatibility with existing call sites.
+        _ = bool(log)
 
     def toggle_mute_shortcut(self):
         self.set_mute_shortcut_state(not bool(self.is_muted), log=True)
@@ -5019,26 +5093,21 @@ class DesktopWidget(QMainWindow):
         self.save_all_settings()
         if show_hud:
             self.show_gpu_guard_hud(self.gpu_guard_enabled)
-        if log:
-            print(f"[gpu-guard-toggle] profile={self.profile_id} enabled={self.gpu_guard_enabled}")
+        _ = bool(log)
 
     def toggle_gpu_guard_shortcut(self):
         self.set_gpu_guard_shortcut_state(not bool(self.gpu_guard_enabled), log=True, show_hud=True)
 
     def set_corner_mode_shortcut_state(self, mode, log=False):
-        mode_int = int(mode)
-        if mode_int not in (0, 1):
-            mode_int = 0
+        mode_int = self.coerce_corner_mode(mode)
         self.corner_mode = mode_int
         self.apply_mask_and_style()
         self.save_all_settings()
-        if log:
-            mode_text = "곡선" if self.corner_mode == 0 else "직각"
-            print(f"[corner-toggle] profile={self.profile_id} corner_mode={mode_text}")
+        _ = bool(log)
 
     def toggle_corner_mode_shortcut(self):
-        curr = int(getattr(self, "corner_mode", 0))
-        self.set_corner_mode_shortcut_state(0 if curr == 1 else 1, log=True)
+        curr = self.coerce_corner_mode(getattr(self, "corner_mode", self.CORNER_ROUNDED))
+        self.set_corner_mode_shortcut_state((int(curr) + 1) % 3, log=True)
 
     def set_performance_paused(self, paused, reason="", force=False):
         paused = bool(paused)
@@ -5063,8 +5132,6 @@ class DesktopWidget(QMainWindow):
                     self.timer.stop()
                     self._perf_gif_timer_was_active = True
 
-            if reason:
-                print(f"[gpu-guard-pause] profile={self.profile_id} reason={reason}")
             return
 
         if self._perf_paused_video and self.stack.currentIndex() == 2:
@@ -5078,8 +5145,6 @@ class DesktopWidget(QMainWindow):
         self._perf_paused_video = False
         self._perf_paused_gif = False
         self._perf_gif_timer_was_active = False
-        if reason:
-            print(f"[gpu-guard-resume] profile={self.profile_id} reason={reason}")
 
     def _is_cursor_over_widget(self):
         if not self.isVisible():
@@ -5504,7 +5569,9 @@ class DesktopWidget(QMainWindow):
         self.current_opacity_pct = int(self.settings.value("opacity_pct", 100))
         self.setWindowOpacity(self.current_opacity_pct / 100.0)
         self.bg_color_mode = int(self.settings.value("bg_color_mode", 1))
-        self.corner_mode = int(self.settings.value("corner_mode", 0))
+        self.corner_mode = self.coerce_corner_mode(
+            self.settings.value("corner_mode", self.CORNER_ROUNDED)
+        )
         self.media_fit_mode = max(0, min(int(self.settings.value("media_fit_mode", 0)), 1))
         self.video_transition_mode = self.coerce_video_transition_mode(
             self.settings.value("video_transition_mode", self.VIDEO_TRANSITION_SINGLE)
@@ -5636,11 +5703,77 @@ class DesktopWidget(QMainWindow):
             base = os.path.expanduser("~")
         return os.path.join(base, "MyHomeApp", "video_proxy_cache")
 
+    @staticmethod
+    def _runtime_binary_dirs():
+        dirs = []
+        try:
+            meipass = str(getattr(sys, "_MEIPASS", "") or "").strip()
+            if meipass:
+                dirs.append(meipass)
+        except Exception:
+            pass
+        try:
+            exe_path = str(getattr(sys, "executable", "") or "").strip()
+            if exe_path:
+                exe_dir = os.path.dirname(os.path.abspath(exe_path))
+                if exe_dir:
+                    dirs.append(exe_dir)
+        except Exception:
+            pass
+        try:
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            if script_dir:
+                dirs.append(script_dir)
+        except Exception:
+            pass
+        out = []
+        seen = set()
+        for raw in dirs:
+            base = str(raw or "").strip()
+            if not base:
+                continue
+            for candidate in (base, os.path.join(base, "bin")):
+                key = os.path.normcase(os.path.normpath(str(candidate)))
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(str(candidate))
+        return out
+
+    @classmethod
+    def _find_runtime_binary(cls, name):
+        raw = str(name or "").strip()
+        if not raw:
+            return ""
+        names = [raw]
+        if os.name == "nt" and not raw.lower().endswith(".exe"):
+            names.insert(0, f"{raw}.exe")
+        for folder in cls._runtime_binary_dirs():
+            for fname in names:
+                candidate = os.path.join(folder, fname)
+                try:
+                    if os.path.isfile(candidate):
+                        return candidate
+                except Exception:
+                    continue
+        return ""
+
     def _resolve_ffmpeg_path(self):
         cached = getattr(self, "_video_proxy_ffmpeg_path", None)
         if cached is not None:
             return str(cached or "")
-        path = str(shutil.which("ffmpeg") or "")
+        env_override = str(os.environ.get("MYWIDGET_FFMPEG", "") or "").strip()
+        path = ""
+        if env_override:
+            try:
+                if os.path.isfile(env_override):
+                    path = env_override
+            except Exception:
+                path = ""
+        if not path:
+            path = str(self._find_runtime_binary("ffmpeg") or "")
+        if not path:
+            path = str(shutil.which("ffmpeg") or "")
         self._video_proxy_ffmpeg_path = path
         return path
 
@@ -5648,13 +5781,27 @@ class DesktopWidget(QMainWindow):
         cached = getattr(self, "_video_proxy_ffprobe_path", None)
         if cached is not None:
             return str(cached or "")
-        path = str(shutil.which("ffprobe") or "")
+        env_override = str(os.environ.get("MYWIDGET_FFPROBE", "") or "").strip()
+        path = ""
+        if env_override:
+            try:
+                if os.path.isfile(env_override):
+                    path = env_override
+            except Exception:
+                path = ""
+        if not path:
+            path = str(self._find_runtime_binary("ffprobe") or "")
+        if not path:
+            path = str(shutil.which("ffprobe") or "")
         if not path:
             ffmpeg_path = self._resolve_ffmpeg_path()
             if ffmpeg_path:
-                candidate = os.path.join(os.path.dirname(ffmpeg_path), "ffprobe.exe")
-                if os.path.exists(candidate):
-                    path = candidate
+                probe_names = ["ffprobe.exe"] if os.name == "nt" else ["ffprobe"]
+                for probe_name in probe_names:
+                    candidate = os.path.join(os.path.dirname(ffmpeg_path), probe_name)
+                    if os.path.exists(candidate):
+                        path = candidate
+                        break
         self._video_proxy_ffprobe_path = path
         return path
 
@@ -6974,7 +7121,14 @@ class DesktopWidget(QMainWindow):
             return QPoint(int(self.x()), int(self.y()))
 
     def apply_mask_and_style(self):
-        radius = 0 if int(getattr(self, "corner_mode", 0)) == 1 else 20
+        corner_mode = self.coerce_corner_mode(getattr(self, "corner_mode", self.CORNER_ROUNDED))
+        self.corner_mode = int(corner_mode)
+        if int(corner_mode) == int(self.CORNER_SQUARE):
+            radius = 0
+        elif int(corner_mode) == int(self.CORNER_ROUND):
+            radius = max(1, min(int(self.width()), int(self.height())) // 2)
+        else:
+            radius = 20
 
         bg_options = ["transparent", "black", "white"]
         bg_idx = max(0, min(int(self.bg_color_mode), len(bg_options) - 1))
@@ -7119,7 +7273,7 @@ class DesktopWidget(QMainWindow):
             'focus_binding_host': self,
             'interval': self.interval_ms // 1000,
             'bg_color_mode': self.bg_color_mode,
-            'corner_mode': getattr(self, 'corner_mode', 0),
+            'corner_mode': self.coerce_corner_mode(getattr(self, 'corner_mode', self.CORNER_ROUNDED)),
             'media_fit_mode': int(getattr(self, "media_fit_mode", 0)),
             'video_transition_mode': int(getattr(self, "video_transition_mode", self.VIDEO_TRANSITION_SINGLE)),
             'video_decode_mode': int(getattr(self, "video_decode_mode", self.VIDEO_DECODE_ORIGINAL)),
@@ -7146,7 +7300,7 @@ class DesktopWidget(QMainWindow):
             self._set_watched_folder(self.folder_path)
             self.interval_ms = dialog.sec_input.value() * 1000
             self.bg_color_mode = dialog.bg_combo.currentIndex()
-            self.corner_mode = dialog.corner_combo.currentIndex()
+            self.corner_mode = self.coerce_corner_mode(dialog.corner_combo.currentIndex())
             self.media_fit_mode = int(dialog.media_mode_combo.currentIndex())
             self.video_transition_mode = self.coerce_video_transition_mode(
                 dialog.video_transition_combo.currentIndex()
@@ -7227,7 +7381,10 @@ class DesktopWidget(QMainWindow):
         self.settings.setValue("exec_manual_focus_class", str(getattr(self, "_exec_manual_focus_class", "") or ""))
         self.settings.setValue("interval", self.interval_ms // 1000)
         self.settings.setValue("bg_color_mode", self.bg_color_mode)
-        self.settings.setValue("corner_mode", int(getattr(self, "corner_mode", 0)))
+        self.settings.setValue(
+            "corner_mode",
+            int(self.coerce_corner_mode(getattr(self, "corner_mode", self.CORNER_ROUNDED))),
+        )
         self.settings.setValue("media_fit_mode", int(getattr(self, "media_fit_mode", 0)))
         self.settings.setValue("video_transition_mode", int(getattr(self, "video_transition_mode", self.VIDEO_TRANSITION_SINGLE)))
         self.settings.setValue("video_decode_mode", int(getattr(self, "video_decode_mode", self.VIDEO_DECODE_ORIGINAL)))
@@ -7676,7 +7833,6 @@ class DesktopWidget(QMainWindow):
                 has_manual_focus = bool(getattr(self, "_exec_manual_focus_enabled", False))
                 has_exec_target = bool(self.exec_path and os.path.exists(self.exec_path))
                 if not has_exec_target and not has_manual_focus:
-                    print("Executable is not configured or missing.")
                     self.start_pos = None
                     self.is_moving = False
                     self._set_drag_topmost(False)
@@ -7684,8 +7840,7 @@ class DesktopWidget(QMainWindow):
                     self._hide_size_hud()
                     self._refresh_resize_ui()
                     return
-                if not self._launch_or_focus_exec(self.exec_path):
-                    print("Failed to launch or focus executable.")
+                self._launch_or_focus_exec(self.exec_path)
         self._set_drag_topmost(False)
         self.start_pos = None
         self.is_moving = False
@@ -8915,7 +9070,6 @@ class MasterController(QMainWindow):
             self._temp_group_ids.add(spid)
             grouped = True
         self._sync_temp_group_badges()
-        print(f"[temp-group] profile={spid} grouped={grouped} members={sorted(self._temp_group_ids)}")
         return grouped
 
     def clear_temp_group(self, silent=False):
@@ -8924,8 +9078,6 @@ class MasterController(QMainWindow):
         count = len(self._temp_group_ids)
         self._temp_group_ids.clear()
         self._sync_temp_group_badges()
-        if not silent:
-            print(f"[temp-group] cleared count={count}")
         return count
 
     def _temp_group_shortcut_targets(self, source_pid):
@@ -9103,8 +9255,6 @@ class MasterController(QMainWindow):
             return
         for idx, widget in enumerate(targets):
             widget.set_mute_shortcut_state(bool(muted), log=(idx == 0))
-        if len(targets) > 1:
-            print(f"[temp-group-mute] source={source_pid} members={len(targets)} muted={bool(muted)}")
 
     def set_temp_group_gpu_guard(self, source_pid, enabled):
         targets = self._temp_group_shortcut_targets(source_pid)
@@ -9112,19 +9262,14 @@ class MasterController(QMainWindow):
             return
         for idx, widget in enumerate(targets):
             widget.set_gpu_guard_shortcut_state(bool(enabled), log=(idx == 0), show_hud=True)
-        if len(targets) > 1:
-            print(f"[temp-group-gpu-guard] source={source_pid} members={len(targets)} enabled={bool(enabled)}")
 
     def set_temp_group_corner_mode(self, source_pid, mode):
-        mode_int = 0 if int(mode) != 1 else 1
+        mode_int = DesktopWidget.coerce_corner_mode(mode)
         targets = self._temp_group_shortcut_targets(source_pid)
         if not targets:
             return
         for idx, widget in enumerate(targets):
             widget.set_corner_mode_shortcut_state(mode_int, log=(idx == 0))
-        if len(targets) > 1:
-            mode_text = "곡선" if mode_int == 0 else "직각"
-            print(f"[temp-group-corner] source={source_pid} members={len(targets)} mode={mode_text}")
 
     def adjust_temp_group_opacity(self, source_pid, delta_pct):
         try:
@@ -9136,7 +9281,6 @@ class MasterController(QMainWindow):
         targets = self._temp_group_shortcut_targets(source_pid)
         if not targets:
             return
-        changed = 0
         for widget in targets:
             old_val = int(getattr(widget, "current_opacity_pct", 100))
             new_val = max(10, min(100, old_val + delta))
@@ -9145,9 +9289,6 @@ class MasterController(QMainWindow):
             widget.current_opacity_pct = new_val
             widget.setWindowOpacity(new_val / 100.0)
             widget.save_all_settings()
-            changed += 1
-        if len(targets) > 1 and changed > 0:
-            print(f"[temp-group-opacity] source={source_pid} members={len(targets)} delta={delta}")
 
     def set_temp_group_lock(self, source_pid, lock):
         targets = self._temp_group_shortcut_targets(source_pid)
@@ -9163,8 +9304,6 @@ class MasterController(QMainWindow):
             if hasattr(widget, "show_lock_hud"):
                 widget.show_lock_hud(lock_val)
         self._sync_temp_group_badges()
-        if len(targets) > 1:
-            print(f"[temp-group-lock] source={source_pid} members={len(targets)} lock={lock_val}")
         return len(targets)
 
     def apply_set(self, set_id):
@@ -9871,7 +10010,7 @@ class MasterController(QMainWindow):
                 'is_locked': getattr(w, 'is_locked', False),
                 'opacity_pct': w.current_opacity_pct,
                 'bg_color_mode': w.bg_color_mode,
-                'corner_mode': getattr(w, 'corner_mode', 0),
+                'corner_mode': DesktopWidget.coerce_corner_mode(getattr(w, 'corner_mode', DesktopWidget.CORNER_ROUNDED)),
                 'media_fit_mode': int(getattr(w, 'media_fit_mode', 0)),
                 'video_transition_mode': int(getattr(w, 'video_transition_mode', DesktopWidget.VIDEO_TRANSITION_SINGLE)),
                 'video_decode_mode': int(getattr(w, 'video_decode_mode', DesktopWidget.VIDEO_DECODE_ORIGINAL)),
@@ -9903,7 +10042,9 @@ class MasterController(QMainWindow):
                 'is_locked': _as_bool(s_obj.value("is_locked", False), False),
                 'opacity_pct': int(s_obj.value("opacity_pct", 100)),
                 'bg_color_mode': int(s_obj.value("bg_color_mode", 1)),
-                'corner_mode': int(s_obj.value("corner_mode", 0)),
+                'corner_mode': DesktopWidget.coerce_corner_mode(
+                    s_obj.value("corner_mode", DesktopWidget.CORNER_ROUNDED)
+                ),
                 'media_fit_mode': int(s_obj.value("media_fit_mode", 0)),
                 'video_transition_mode': DesktopWidget.coerce_video_transition_mode(
                     s_obj.value("video_transition_mode", DesktopWidget.VIDEO_TRANSITION_SINGLE)
@@ -9934,7 +10075,7 @@ class MasterController(QMainWindow):
             new_interval = dialog.sec_input.value() * 1000
             new_opacity = dialog.opacity_slider.value()
             new_bg = dialog.bg_combo.currentIndex()
-            new_corner = dialog.corner_combo.currentIndex()
+            new_corner = DesktopWidget.coerce_corner_mode(dialog.corner_combo.currentIndex())
             new_media_fit = dialog.media_mode_combo.currentIndex()
             new_video_transition = DesktopWidget.coerce_video_transition_mode(
                 dialog.video_transition_combo.currentIndex()
@@ -9987,7 +10128,7 @@ class MasterController(QMainWindow):
                 w.setWindowOpacity(new_opacity / 100.0)
                 
                 w.bg_color_mode = new_bg
-                w.corner_mode = int(new_corner)
+                w.corner_mode = DesktopWidget.coerce_corner_mode(new_corner)
                 w.media_fit_mode = int(new_media_fit)
                 w.video_transition_mode = int(new_video_transition)
                 w.video_decode_mode = int(new_video_decode_mode)
@@ -10178,7 +10319,6 @@ class MasterController(QMainWindow):
                         target.apply_window_settings(int(getattr(target, "layer_mode", DesktopWidget.LAYER_NORMAL)), new_lock)
                         target.save_all_settings()
                     self.load_profiles()
-                    print(f"[alt-click-lock] profile={target.profile_id} lock={new_lock}")
 
             self._alt_click_pressed_prev = chord_down
         except Exception:
