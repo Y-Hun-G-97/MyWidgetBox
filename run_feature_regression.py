@@ -15,7 +15,7 @@ from PyQt6.QtGui import QContextMenuEvent
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication
 
-import MyWidgetBox as mw
+import MyCanvas as mw
 
 
 @dataclass
@@ -494,7 +494,7 @@ def test_position_restore_screen_fallback(image_folder: Path, app: QApplication,
 
 
 def test_utf8_text_cleanup() -> TestResult:
-    src = Path("MyWidgetBox.py")
+    src = Path("MyCanvas.py")
     try:
         text = src.read_text(encoding="utf-8")
     except UnicodeDecodeError as e:
@@ -713,7 +713,7 @@ def test_video_interactions(
         moved = abs(after.x() - before.x()) > 5 or abs(after.y() - before.y()) > 5
 
         # Left-click launch action with mocked startfile.
-        with patch("MyWidgetBox.os.startfile") as mock_startfile:
+        with patch("MyCanvas.os.startfile") as mock_startfile:
             click_pos = w.video_widget.rect().center()
             QTest.mouseClick(w.video_widget, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, click_pos, delay=20)
             pump(app, 120)

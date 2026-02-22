@@ -1,12 +1,23 @@
 # -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import collect_submodules
+
+hiddenimports = ['pythoncom', 'pywintypes', 'PyQt6.QtMultimediaWidgets']
+hiddenimports += collect_submodules('win32com')
+
+binaries = [
+    ('C:\\\\ffmpeg\\\\bin\\\\ffmpeg.exe', '.'),
+    ('C:\\\\ffmpeg\\\\bin\\\\ffprobe.exe', '.'),
+]
+
+datas = []
 
 
 a = Analysis(
-    ['MyWidgetBox.py'],
+    ['MyCanvas.py'],
     pathex=[],
-    binaries=[],
-    datas=[],
-    hiddenimports=[],
+    binaries=binaries,
+    datas=datas,
+    hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -22,7 +33,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='MyWidgetBox',
+    name='MyCanvas',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -35,5 +46,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['MyWidgetBox.ico'],
+    icon=['MyCanvas.ico'],
 )

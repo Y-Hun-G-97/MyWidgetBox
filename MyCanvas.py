@@ -1,6 +1,7 @@
 ﻿# -*- coding: utf-8 -*-
 import sys
 import os
+import json
 import math
 import time
 import hashlib
@@ -15,16 +16,6 @@ import win32api
 import win32gui
 import win32con
 try:
-    import win32ui
-except Exception:
-    win32ui = None
-try:
-    import win32com.client
-except Exception:
-    win32com = None
-else:
-    win32com = win32com.client
-try:
     import win32pdh
 except Exception:
     win32pdh = None
@@ -37,6 +28,40 @@ try:
 except Exception:
     from PyQt6.QtMultimediaWidgets import QVideoWidget
     QGraphicsVideoItem = None
+
+from image_upscale_tool import (
+    find_ffmpeg_binary,
+    upscale_image_file,
+)
+
+_win32ui_mod = None
+_win32ui_checked = False
+_win32com_client_mod = None
+_win32com_client_checked = False
+
+
+def _get_win32ui():
+    global _win32ui_mod, _win32ui_checked
+    if not bool(_win32ui_checked):
+        try:
+            import win32ui as _loaded_win32ui
+        except Exception:
+            _loaded_win32ui = None
+        _win32ui_mod = _loaded_win32ui
+        _win32ui_checked = True
+    return _win32ui_mod
+
+
+def _get_win32com_client():
+    global _win32com_client_mod, _win32com_client_checked
+    if not bool(_win32com_client_checked):
+        try:
+            import win32com.client as _loaded_win32com_client
+        except Exception:
+            _loaded_win32com_client = None
+        _win32com_client_mod = _loaded_win32com_client
+        _win32com_client_checked = True
+    return _win32com_client_mod
 
 def _as_bool(value, default=False):
     if isinstance(value, bool):
@@ -232,7 +257,6 @@ class DesktopIconCloneOverlay(QWidget):
             Qt.AlignmentFlag.AlignHCenter
             | Qt.AlignmentFlag.AlignTop
             | Qt.TextFlag.TextWordWrap
-            | Qt.TextFlag.TextWrapAnywhere
             | Qt.TextFlag.TextDontClip
         )
 
@@ -329,9 +353,20 @@ class DesktopIconCloneOverlay(QWidget):
                     lo = int(mid + 1)
                 else:
                     hi = int(mid - 1)
-            part = str(remaining[:max(1, int(best))]).rstrip()
+            consume = max(1, int(best))
+            # Prefer wrapping at whitespace so labels like "Google Chrome" break as
+            # "Google" + "Chrome" instead of splitting inside a word.
+            segment = str(remaining[:consume])
+            space_pos = segment.rfind(" ")
+            if space_pos > 0:
+                consume = int(space_pos + 1)
+                part = str(remaining[:space_pos]).rstrip()
+            else:
+                part = segment.rstrip()
+            if not part:
+                part = str(remaining[:max(1, consume)]).rstrip()
             lines.append(part if part else remaining[:1])
-            remaining = str(remaining[max(1, int(best)):]).lstrip()
+            remaining = str(remaining[max(1, consume):]).lstrip()
 
         if not lines:
             return str(fm.elidedText(src, Qt.TextElideMode.ElideRight, int(max_width)))
@@ -510,6 +545,443 @@ class SetNameLabel(QLabel):
         super().mouseDoubleClickEvent(event)
 
 
+class MediaToolWorker(QThread):
+    succeeded = pyqtSignal(dict)
+    failed = pyqtSignal(str)
+
+    def __init__(self, func, kwargs=None, parent=None):
+        super().__init__(parent)
+        self._func = func
+        self._kwargs = dict(kwargs or {})
+
+    def run(self):
+        try:
+            result = self._func(**self._kwargs)
+            if not isinstance(result, dict):
+                result = {}
+            self.succeeded.emit(result)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class ImageUpscaleDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("imageToolDialog")
+        self.setWindowTitle("이미지 업스케일")
+        self.setWindowIcon(QIcon())
+        self.resize(760, 520)
+        self.setMinimumSize(700, 500)
+        self._worker = None
+        self._worker_action = ""
+        self._ffmpeg_path = ""
+        self._title_bar_themed = False
+        self.setStyleSheet("""
+            QDialog#imageToolDialog {
+                background-color: #1d2a3d;
+            }
+            QFrame#toolCard {
+                background-color: #23344d;
+                border: 1px solid #3f567a;
+                border-radius: 12px;
+            }
+            QLabel {
+                color: #e6eefc;
+                font-size: 12px;
+            }
+            QLabel#toolTitle {
+                color: #eef3ff;
+                font-size: 18px;
+                font-weight: 700;
+            }
+            QLabel#toolSubtitle {
+                color: #c2d1ea;
+                font-size: 12px;
+            }
+            QLabel#sectionTitle {
+                color: #a7c1eb;
+                font-size: 13px;
+                font-weight: 700;
+            }
+            QLabel#statusLabel {
+                color: #d8e6ff;
+                font-size: 12px;
+                font-weight: 600;
+            }
+            QLineEdit, QSpinBox, QComboBox {
+                min-height: 32px;
+                color: #edf3ff;
+                background-color: #35507a;
+                border: 1px solid #5977a4;
+                border-radius: 9px;
+                padding: 2px 10px;
+            }
+            QLineEdit:focus, QSpinBox:focus, QComboBox:focus {
+                border: 1px solid #77a3f2;
+            }
+            QPlainTextEdit {
+                color: #e6eefc;
+                background-color: #1a2740;
+                border: 1px solid #4a6288;
+                border-radius: 10px;
+                padding: 8px;
+                font-family: Consolas, 'Courier New', monospace;
+                font-size: 12px;
+            }
+            QPushButton {
+                min-height: 32px;
+                border-radius: 9px;
+                font-size: 12px;
+                font-weight: 600;
+                color: #e8efff;
+                background-color: #35507a;
+                border: 1px solid #5977a4;
+                padding: 0 10px;
+            }
+            QPushButton:hover {
+                background-color: #3f5e8e;
+            }
+            QPushButton#primaryBtn {
+                background-color: #4f79de;
+                border: 1px solid #7e9eeb;
+            }
+            QPushButton#primaryBtn:hover {
+                background-color: #5d86e6;
+            }
+            QCheckBox {
+                color: #e6eefc;
+                spacing: 6px;
+                min-height: 24px;
+            }
+        """)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(14, 14, 14, 14)
+        root.setSpacing(10)
+
+        header = QFrame(self)
+        header_layout = QVBoxLayout(header)
+        header_layout.setContentsMargins(10, 6, 10, 6)
+        header_layout.setSpacing(2)
+        title = QLabel("이미지 업스케일")
+        title.setObjectName("toolTitle")
+        subtitle = QLabel("ffmpeg 기반 업스케일 기능만 제공합니다.")
+        subtitle.setObjectName("toolSubtitle")
+        subtitle.setWordWrap(True)
+        header_layout.addWidget(title)
+        header_layout.addWidget(subtitle)
+        root.addWidget(header)
+
+        card = QFrame(self)
+        card.setObjectName("toolCard")
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(12, 12, 12, 12)
+        card_layout.setSpacing(10)
+        root.addWidget(card, 1)
+
+        ffmpeg_row = QHBoxLayout()
+        ffmpeg_row.setContentsMargins(0, 0, 0, 0)
+        ffmpeg_row.setSpacing(8)
+        ffmpeg_row.addWidget(QLabel("ffmpeg:"), 0)
+        self.ffmpeg_path_label = QLabel("검색 중...")
+        self.ffmpeg_path_label.setWordWrap(True)
+        self.ffmpeg_refresh_btn = QPushButton("재검색")
+        self.ffmpeg_refresh_btn.setFixedWidth(86)
+        ffmpeg_row.addWidget(self.ffmpeg_path_label, 1)
+        ffmpeg_row.addWidget(self.ffmpeg_refresh_btn, 0)
+        card_layout.addLayout(ffmpeg_row)
+
+        src_form = QFormLayout()
+        src_form.setContentsMargins(0, 0, 0, 0)
+        src_form.setHorizontalSpacing(10)
+        src_form.setVerticalSpacing(8)
+        self.src_path_edit = QLineEdit()
+        self.src_path_edit.setPlaceholderText("입력 이미지 선택")
+        src_btn = QPushButton("이미지 선택")
+        src_btn.setFixedWidth(100)
+        src_row = QHBoxLayout()
+        src_row.setContentsMargins(0, 0, 0, 0)
+        src_row.setSpacing(6)
+        src_row.addWidget(self.src_path_edit, 1)
+        src_row.addWidget(src_btn, 0)
+        src_widget = QWidget()
+        src_widget.setLayout(src_row)
+        src_form.addRow("입력 이미지:", src_widget)
+        card_layout.addLayout(src_form)
+
+        up_title = QLabel("업스케일 옵션")
+        up_title.setObjectName("sectionTitle")
+        card_layout.addWidget(up_title)
+
+        up_form = QFormLayout()
+        up_form.setContentsMargins(0, 0, 0, 0)
+        up_form.setHorizontalSpacing(10)
+        up_form.setVerticalSpacing(8)
+        self.up_out_edit = QLineEdit()
+        self.up_out_edit.setPlaceholderText("업스케일 결과 이미지 경로")
+        up_out_btn = QPushButton("저장 경로")
+        up_out_btn.setFixedWidth(100)
+        up_out_row = QHBoxLayout()
+        up_out_row.setContentsMargins(0, 0, 0, 0)
+        up_out_row.setSpacing(6)
+        up_out_row.addWidget(self.up_out_edit, 1)
+        up_out_row.addWidget(up_out_btn, 0)
+        up_out_widget = QWidget()
+        up_out_widget.setLayout(up_out_row)
+        up_form.addRow("출력 이미지:", up_out_widget)
+
+        self.up_scale_combo = DownwardComboBox()
+        self.up_scale_combo.addItem("1.5x", 1.5)
+        self.up_scale_combo.addItem("2x (추천)", 2.0)
+        self.up_scale_combo.addItem("4x", 4.0)
+        self.up_scale_combo.setCurrentIndex(1)
+        self.up_scale_combo.setView(QListView())
+        self.up_scale_combo.view().setFrameShape(QFrame.Shape.NoFrame)
+        self.up_scale_combo.setStyle(QStyleFactory.create("Fusion"))
+        up_form.addRow("배율:", self.up_scale_combo)
+
+        self.up_sharpen_cb = QCheckBox("샤픈 강화 (윤곽 선명도)")
+        self.up_sharpen_cb.setChecked(True)
+        up_form.addRow("추가 옵션:", self.up_sharpen_cb)
+
+        self.up_run_btn = QPushButton("업스케일 실행")
+        self.up_run_btn.setObjectName("primaryBtn")
+        up_form.addRow("", self.up_run_btn)
+        card_layout.addLayout(up_form)
+
+        self.status_label = QLabel("대기 중")
+        self.status_label.setObjectName("statusLabel")
+        card_layout.addWidget(self.status_label)
+
+        self.log_edit = QPlainTextEdit()
+        self.log_edit.setReadOnly(True)
+        self.log_edit.setMinimumHeight(150)
+        card_layout.addWidget(self.log_edit, 1)
+
+        bottom = QHBoxLayout()
+        bottom.setContentsMargins(0, 0, 0, 0)
+        bottom.setSpacing(8)
+        self.close_btn = QPushButton("닫기")
+        bottom.addStretch(1)
+        bottom.addWidget(self.close_btn)
+        card_layout.addLayout(bottom)
+
+        src_btn.clicked.connect(self._pick_src_image)
+        up_out_btn.clicked.connect(self._pick_upscale_output)
+        self.ffmpeg_refresh_btn.clicked.connect(self._refresh_ffmpeg_path)
+        self.up_run_btn.clicked.connect(self._run_upscale)
+        self.close_btn.clicked.connect(self.reject)
+
+        if parent is not None and hasattr(parent, "app_icon"):
+            try:
+                self.setWindowIcon(parent.app_icon)
+            except Exception:
+                pass
+        QTimer.singleShot(0, self._refresh_ffmpeg_path)
+        QTimer.singleShot(0, self._apply_title_bar_theme)
+
+    def _append_log(self, text):
+        line = str(text or "").strip()
+        if not line:
+            return
+        self.log_edit.appendPlainText(f"[{time.strftime('%H:%M:%S')}] {line}")
+
+    def _show_message(self, icon, title, text):
+        box = QMessageBox(self)
+        box.setIcon(icon)
+        box.setWindowTitle(str(title or "알림"))
+        msg = str(text or "").strip()
+        if not msg:
+            msg = "상세 메시지가 비어 있습니다."
+        box.setText(msg)
+        box.setStandardButtons(QMessageBox.StandardButton.Ok)
+        box.setDefaultButton(QMessageBox.StandardButton.Ok)
+        box.setStyleSheet(
+            """
+            QMessageBox {
+                background-color: #1d2a3d;
+            }
+            QMessageBox QLabel {
+                color: #eef3ff;
+                min-width: 420px;
+                font-size: 12px;
+            }
+            QMessageBox QPushButton {
+                min-width: 88px;
+                min-height: 30px;
+                border-radius: 8px;
+                font-size: 12px;
+                font-weight: 600;
+                color: #e8efff;
+                background-color: #35507a;
+                border: 1px solid #5977a4;
+                padding: 0 10px;
+            }
+            QMessageBox QPushButton:hover {
+                background-color: #3f5e8e;
+            }
+            """
+        )
+        try:
+            parent = self.parent()
+            if parent is not None and hasattr(parent, "_apply_window_title_bar_theme"):
+                parent._apply_window_title_bar_theme(box)
+            else:
+                MasterController._apply_window_title_bar_theme(box)
+        except Exception:
+            pass
+        box.exec()
+
+    def _set_busy(self, busy, status_text=""):
+        state = bool(busy)
+        controls = [
+            self.src_path_edit,
+            self.up_out_edit,
+            self.up_scale_combo,
+            self.up_sharpen_cb,
+            self.ffmpeg_refresh_btn,
+            self.up_run_btn,
+            self.close_btn,
+        ]
+        for w in controls:
+            w.setEnabled(not state)
+        if status_text:
+            self.status_label.setText(str(status_text))
+
+    def _refresh_ffmpeg_path(self):
+        self._ffmpeg_path = str(find_ffmpeg_binary() or "")
+        if self._ffmpeg_path:
+            self.ffmpeg_path_label.setText(self._ffmpeg_path)
+            self._append_log(f"ffmpeg 확인: {self._ffmpeg_path}")
+        else:
+            self.ffmpeg_path_label.setText("미발견")
+            self._append_log("ffmpeg를 찾지 못했습니다.")
+
+    def _pick_src_image(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "입력 이미지 선택",
+            "",
+            "이미지 파일 (*.png *.jpg *.jpeg *.bmp *.webp *.tif *.tiff);;모든 파일 (*)",
+        )
+        if not path:
+            return
+        self.src_path_edit.setText(path)
+        root, ext = os.path.splitext(path)
+        ext = ext if ext else ".png"
+        self.up_out_edit.setText(f"{root}_upscaled{ext}")
+
+    def _pick_upscale_output(self):
+        src = str(self.src_path_edit.text() or "").strip()
+        base_dir = os.path.dirname(src) if src else ""
+        default_name = "upscaled.png"
+        if src:
+            src_root, src_ext = os.path.splitext(os.path.basename(src))
+            default_name = f"{src_root}_upscaled{src_ext if src_ext else '.png'}"
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "업스케일 출력 경로",
+            os.path.join(base_dir, default_name),
+            "PNG (*.png);;JPEG (*.jpg *.jpeg);;WEBP (*.webp);;BMP (*.bmp);;모든 파일 (*)",
+        )
+        if path:
+            self.up_out_edit.setText(path)
+
+    def _start_worker(self, action_name, func, kwargs, require_ffmpeg=False):
+        if self._worker is not None and self._worker.isRunning():
+            self._show_message(QMessageBox.Icon.Warning, "작업 중", "이미 작업이 진행 중입니다.")
+            return
+        payload = dict(kwargs or {})
+        if bool(require_ffmpeg):
+            if not self._ffmpeg_path:
+                self._refresh_ffmpeg_path()
+            if not self._ffmpeg_path:
+                self._show_message(
+                    QMessageBox.Icon.Critical,
+                    "ffmpeg 미발견",
+                    "ffmpeg를 찾지 못했습니다.\nffmpeg.exe를 MyCanvas.exe 폴더 또는 PATH에 배치하세요.",
+                )
+                return
+            payload["ffmpeg_path"] = self._ffmpeg_path
+        self._worker_action = str(action_name)
+        self._worker = MediaToolWorker(func, payload, self)
+        self._worker.succeeded.connect(self._on_worker_success)
+        self._worker.failed.connect(self._on_worker_failed)
+        self._worker.finished.connect(self._on_worker_finished)
+        self._set_busy(True, f"{self._worker_action} 실행 중...")
+        self._append_log(f"{self._worker_action} 시작")
+        self._worker.start()
+
+    def _run_upscale(self):
+        src = str(self.src_path_edit.text() or "").strip()
+        out = str(self.up_out_edit.text() or "").strip()
+        if not src:
+            self._show_message(QMessageBox.Icon.Warning, "입력 필요", "입력 이미지를 선택하세요.")
+            return
+        if not out:
+            self._show_message(QMessageBox.Icon.Warning, "출력 필요", "업스케일 출력 경로를 지정하세요.")
+            return
+        self._start_worker(
+            "이미지 업스케일",
+            upscale_image_file,
+            {
+                "input_path": src,
+                "output_path": out,
+                "scale": float(self.up_scale_combo.currentData() or 2.0),
+                "sharpen": bool(self.up_sharpen_cb.isChecked()),
+            },
+            require_ffmpeg=True,
+        )
+
+    def _on_worker_success(self, result):
+        out = ""
+        if isinstance(result, dict):
+            out = str(result.get("output_path", "") or "").strip()
+        if out:
+            self._append_log(f"{self._worker_action} 완료: {out}")
+        else:
+            self._append_log(f"{self._worker_action} 완료")
+        self.status_label.setText(f"{self._worker_action} 완료")
+        self._show_message(QMessageBox.Icon.Information, "완료", f"{self._worker_action}이 완료되었습니다.")
+
+    def _on_worker_failed(self, message):
+        raw = str(message or "").strip()
+        if not raw:
+            raw = "알 수 없는 오류"
+        self._append_log(f"{self._worker_action} 실패: {raw}")
+        self.status_label.setText(f"{self._worker_action} 실패")
+        self._show_message(QMessageBox.Icon.Critical, "실패", raw)
+
+    def _on_worker_finished(self):
+        self._set_busy(False)
+        if self._worker is not None:
+            self._worker.deleteLater()
+        self._worker = None
+        if self.status_label.text().strip().endswith("실행 중..."):
+            self.status_label.setText("대기 중")
+
+    def _apply_title_bar_theme(self):
+        if self._title_bar_themed:
+            return
+        self._title_bar_themed = True
+        parent = self.parent()
+        if parent is not None and hasattr(parent, "_apply_window_title_bar_theme"):
+            try:
+                parent._apply_window_title_bar_theme(self)
+                return
+            except Exception:
+                pass
+        try:
+            MasterController._apply_window_title_bar_theme(self)
+        except Exception:
+            pass
+
+    def closeEvent(self, event):
+        if self._worker is not None and self._worker.isRunning():
+            self._show_message(QMessageBox.Icon.Warning, "작업 중", "현재 작업이 끝난 뒤 창을 닫아주세요.")
+            event.ignore()
+            return
+        super().closeEvent(event)
 class SetManagerDialog(QDialog):
     def __init__(self, master, parent=None):
         super().__init__(parent if parent is not None else master)
@@ -798,9 +1270,27 @@ class SettingsDialog(QDialog):
             QToolButton#shortcutToggle:hover {
                 background-color: #3f5e8e;
             }
+            QToolButton#folderHelpBtn {
+                color: #e8efff;
+                background: transparent;
+                border: none;
+                padding: 0px;
+                font-weight: 700;
+            }
+            QToolButton#folderHelpBtn:hover {
+                background: transparent;
+            }
+            QToolButton#folderHelpBtn:checked {
+                background: transparent;
+            }
             QFrame#shortcutPanel {
                 background-color: #233854;
                 border: 1px solid #5879a9;
+                border-radius: 10px;
+            }
+            QFrame#folderHelpPanel {
+                background-color: #20324b;
+                border: 1px solid #4f6e97;
                 border-radius: 10px;
             }
             QLabel#shortcutText {
@@ -854,6 +1344,7 @@ class SettingsDialog(QDialog):
         right_form.setHorizontalSpacing(12)
         right_form.setVerticalSpacing(8)
         right_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        self._left_form = left_form
         self._right_form = right_form
 
         content_row.addWidget(left_panel, 5)
@@ -863,11 +1354,63 @@ class SettingsDialog(QDialog):
         
         self.folder_path = s.get('folder_path', "")
         self.exec_path = s.get('exec_path', "")
-        
+
         self.folder_label = QLabel(self.folder_path if self.folder_path else "미지정")
         self.folder_label.setObjectName("pathLabel")
         self.folder_label.setWordWrap(True)
+        self.folder_label.setToolTip(self.folder_path if self.folder_path else "")
+        self.folder_hint_label = None
         self.folder_btn = QPushButton("폴더 선택")
+        self.folder_help_btn = QToolButton()
+        self.folder_help_btn.setObjectName("folderHelpBtn")
+        self.folder_help_btn.setText("")
+        self.folder_help_btn.setToolTip("미디어 폴더 모드 설명")
+        self.folder_help_btn.setCheckable(True)
+        self.folder_help_btn.setAutoRaise(True)
+        help_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_MessageBoxQuestion)
+        if help_icon.isNull():
+            help_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarContextHelpButton)
+        if help_icon.isNull():
+            self.folder_help_btn.setText("?")
+            self.folder_help_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+            fallback_font = QFont(self.folder_help_btn.font())
+            fallback_font.setBold(True)
+            fallback_font.setPointSize(max(14, int(fallback_font.pointSize()) + 2))
+            self.folder_help_btn.setFont(fallback_font)
+            self.folder_help_btn.setFixedSize(32, 32)
+        else:
+            self.folder_help_btn.setIcon(help_icon)
+            self.folder_help_btn.setIconSize(QSize(28, 28))
+            self.folder_help_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+            self.folder_help_btn.setFixedSize(36, 36)
+        self._folder_btn_row_widget = QWidget()
+        folder_btn_row = QHBoxLayout(self._folder_btn_row_widget)
+        folder_btn_row.setContentsMargins(0, 0, 0, 0)
+        folder_btn_row.setSpacing(6)
+        folder_btn_row.addWidget(self.folder_btn, 1)
+        folder_btn_row.addWidget(self.folder_help_btn, 0)
+
+        self.folder_help_panel = QFrame(self)
+        self.folder_help_panel.setObjectName("folderHelpPanel")
+        self.folder_help_panel.setWindowFlags(
+            Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint
+        )
+        self.folder_help_panel.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.folder_help_panel.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        folder_help_layout = QVBoxLayout(self.folder_help_panel)
+        folder_help_layout.setContentsMargins(10, 8, 10, 10)
+        folder_help_layout.setSpacing(6)
+        folder_help_text = (
+            "미디어 폴더 모드 안내\n"
+            "- 폴더 내부 이미지/영상 파일을 이름 순서대로 재생합니다."
+        )
+        self.folder_help_text = QLabel(
+            folder_help_text
+        )
+        self.folder_help_text.setObjectName("shortcutText")
+        self.folder_help_text.setWordWrap(True)
+        folder_help_layout.addWidget(self.folder_help_text)
+        self.folder_help_panel.hide()
         self.exec_label = QLabel(os.path.basename(self.exec_path) if self.exec_path else "미지정")
         self.exec_label.setObjectName("pathLabel")
         self.exec_label.setWordWrap(True)
@@ -1121,8 +1664,10 @@ class SettingsDialog(QDialog):
             form_layout.addRow(row_widget)
 
         _add_section_header(left_form, "실행 / 연동")
-        left_form.addRow("미디어 폴더:", self.folder_btn)
+        left_form.addRow("미디어 폴더:", self._folder_btn_row_widget)
         left_form.addRow("", self.folder_label)
+        if self.folder_hint_label is not None:
+            left_form.addRow("", self.folder_hint_label)
         left_form.addRow("실행 파일:", self.exec_btn)
         left_form.addRow("", self.exec_label)
         left_form.addRow("포커싱 대상:", self.focus_binding_label)
@@ -1180,6 +1725,7 @@ class SettingsDialog(QDialog):
         card_layout.addLayout(action_row)
         
         self.folder_btn.clicked.connect(self.select_folder)
+        self.folder_help_btn.toggled.connect(self._set_folder_help_panel_visible)
         self.exec_btn.clicked.connect(self.select_exec)
         self.focus_bind_btn.clicked.connect(self._start_focus_capture)
         self.focus_bind_clear_btn.clicked.connect(self._clear_focus_binding)
@@ -1187,6 +1733,7 @@ class SettingsDialog(QDialog):
         self.video_cache_clear_btn.clicked.connect(self._clear_video_proxy_cache)
         self.master_btn.clicked.connect(self.open_master)
         apply.clicked.connect(self.accept); cancel.clicked.connect(self.reject)
+        self._set_folder_help_panel_visible(False)
         QTimer.singleShot(0, self._apply_title_bar_theme)
         QTimer.singleShot(0, self._sync_video_transition_dependent_ui)
         QTimer.singleShot(0, self._refresh_video_proxy_cache_usage)
@@ -1204,6 +1751,41 @@ class SettingsDialog(QDialog):
         else:
             self.shortcut_panel.hide()
         self.shortcut_panel.update()
+
+    def _set_folder_help_panel_visible(self, expanded):
+        want_visible = bool(expanded)
+        self.folder_help_btn.blockSignals(True)
+        self.folder_help_btn.setChecked(want_visible)
+        self.folder_help_btn.blockSignals(False)
+        if want_visible:
+            self._place_folder_help_panel()
+            self.folder_help_panel.show()
+            self.folder_help_panel.raise_()
+            self.folder_help_panel.activateWindow()
+        else:
+            self.folder_help_panel.hide()
+        self.folder_help_panel.update()
+
+    def _place_folder_help_panel(self):
+        self.folder_help_panel.adjustSize()
+        hint = self.folder_help_panel.sizeHint()
+        popup_w = max(360, max(360, hint.width()))
+        popup_h = hint.height()
+
+        anchor_global = self.folder_help_btn.mapToGlobal(QPoint(0, self.folder_help_btn.height() + 6))
+        x = anchor_global.x()
+        y = anchor_global.y()
+
+        screen = QGuiApplication.screenAt(anchor_global) or self.screen() or QGuiApplication.primaryScreen()
+        if screen:
+            ag = screen.availableGeometry()
+            max_x = ag.right() - popup_w - 8
+            min_x = ag.left() + 8
+            x = max(min_x, min(x, max_x))
+            available_below = max(120, ag.bottom() - y - 8)
+            popup_h = min(popup_h, available_below)
+
+        self.folder_help_panel.setGeometry(x, y, popup_w, popup_h)
 
     def _sync_dialog_height(self):
         # Release any previous fixed-height lock so collapse/expand can recalculate.
@@ -1439,16 +2021,22 @@ class SettingsDialog(QDialog):
         self._refresh_focus_binding_label()
         if self.shortcut_toggle.isChecked():
             self._place_shortcut_panel()
+        if self.folder_help_btn.isChecked() and self.folder_help_panel.isVisible():
+            self._place_folder_help_panel()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
         if self.shortcut_toggle.isChecked() and self.shortcut_panel.isVisible():
             self._place_shortcut_panel()
+        if self.folder_help_btn.isChecked() and self.folder_help_panel.isVisible():
+            self._place_folder_help_panel()
 
     def moveEvent(self, event):
         super().moveEvent(event)
         if self.shortcut_toggle.isChecked() and self.shortcut_panel.isVisible():
             self._place_shortcut_panel()
+        if self.folder_help_btn.isChecked() and self.folder_help_panel.isVisible():
+            self._place_folder_help_panel()
 
     def closeEvent(self, event):
         if hasattr(self, "_focus_capture_timer") and self._focus_capture_timer.isActive():
@@ -1456,11 +2044,17 @@ class SettingsDialog(QDialog):
             self._focus_capture_deadline = 0.0
         if hasattr(self, "shortcut_panel") and self.shortcut_panel.isVisible():
             self.shortcut_panel.hide()
+        if hasattr(self, "folder_help_panel") and self.folder_help_panel.isVisible():
+            self.folder_help_panel.hide()
         super().closeEvent(event)
 
     def select_folder(self):
         path = QFileDialog.getExistingDirectory(self, "폴더 선택")
-        if path: self.folder_path = path; self.folder_label.setText(path)
+        if path:
+            self.folder_path = path
+            self.folder_label.setText(path)
+            self.folder_label.setToolTip(path)
+            self._set_folder_help_panel_visible(False)
 
     def select_exec(self):
         path, _ = QFileDialog.getOpenFileName(self, "파일 선택", "", "실행 파일 (*.exe *.lnk);;모든 파일 (*)")
@@ -1579,6 +2173,7 @@ class DesktopWidget(QMainWindow):
     _desktop_shell_items_cache = {}
     _desktop_shell_items_cache_list = []
     _desktop_icon_edit_info = {}
+    _desktop_icon_render_signature = ()
     LAYER_BACK = 0
     LAYER_NORMAL = 1
     LAYER_TOPMOST = 2
@@ -1788,8 +2383,23 @@ class DesktopWidget(QMainWindow):
             self.video_widget.setStyleSheet("QGraphicsView { background: transparent; border: none; }")
             self.video_widget.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
             self.video_widget.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.FullViewportUpdate)
+            try:
+                self.video_widget.setOptimizationFlag(
+                    QGraphicsView.OptimizationFlag.DontSavePainterState,
+                    True,
+                )
+                self.video_widget.setOptimizationFlag(
+                    QGraphicsView.OptimizationFlag.DontAdjustForAntialiasing,
+                    True,
+                )
+            except Exception:
+                pass
             self.video_scene = QGraphicsScene(self.video_widget)
             self.video_scene.setBackgroundBrush(QBrush(Qt.BrushStyle.NoBrush))
+            try:
+                self.video_scene.setItemIndexMethod(QGraphicsScene.ItemIndexMethod.NoIndex)
+            except Exception:
+                pass
             self.video_widget.setScene(self.video_scene)
             self.video_item = QGraphicsVideoItem()
             self.video_scene.addItem(self.video_item)
@@ -1815,6 +2425,7 @@ class DesktopWidget(QMainWindow):
         self.video_widget.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
         self.video_widget.setAcceptDrops(True)
         self.stack.addWidget(self.video_widget)
+        self._sync_video_viewport_update_mode()
 
         self.setMouseTracking(True)
         self.container.setMouseTracking(True)
@@ -1964,8 +2575,10 @@ class DesktopWidget(QMainWindow):
         self._desktop_icon_bootstrap_timer.setInterval(120)
         self._desktop_icon_bootstrap_timer.timeout.connect(self._run_desktop_icon_overlay_bootstrap)
         self._desktop_icon_bootstrap_retries = 0
+        self._desktop_icon_last_edit_rect_local = QRect()
         self.folder_watcher = QFileSystemWatcher(self)
         self.folder_watcher.directoryChanged.connect(self._on_folder_changed_signal)
+        self.folder_watcher.fileChanged.connect(self._on_folder_changed_signal)
         self.folder_refresh_timer = QTimer(self)
         self.folder_refresh_timer.setSingleShot(True)
         self.folder_refresh_timer.setInterval(250)
@@ -1984,10 +2597,11 @@ class DesktopWidget(QMainWindow):
 
         self._initial_media_pending = False
         self._initial_media_prepared = False
+        self._defer_initial_prepare_on_show = False
         self.load_settings()
         if self.folder_path:
             self.update_playlist()
-            self._initial_media_pending = True
+            self._initial_media_pending = bool(self.playlist)
 
     def setWindowOpacity(self, level):
         try:
@@ -2004,12 +2618,46 @@ class DesktopWidget(QMainWindow):
             return False
         return True
 
+    @classmethod
+    def _media_path_suffix(cls, path):
+        raw = str(path or "").strip()
+        if not raw:
+            return ""
+        target = str(raw or "")
+        ext = str(os.path.splitext(target)[1] or "").lower()
+        return str(ext or "")
+
     @staticmethod
-    def _is_video_path(path):
-        p = str(path or "").lower()
-        return p.endswith((".mp4", ".avi", ".mov"))
+    def _video_extensions():
+        return (".mp4", ".avi", ".mov", ".m4v", ".webm", ".mkv", ".m3u8")
+
+    @staticmethod
+    def _image_extensions():
+        return (".png", ".jpg", ".jpeg", ".gif", ".ico", ".jfif", ".webp")
+
+    @classmethod
+    def _is_video_path(cls, path):
+        suffix = cls._media_path_suffix(path)
+        return bool(suffix in cls._video_extensions())
+
+    @classmethod
+    def _is_gif_path(cls, path):
+        return cls._media_path_suffix(path) == ".gif"
+
+    @classmethod
+    def _is_image_path(cls, path):
+        return cls._media_path_suffix(path) in cls._image_extensions()
+
+    @classmethod
+    def _to_media_qurl(cls, path):
+        raw = str(path or "").strip()
+        if not raw:
+            return QUrl()
+        return QUrl.fromLocalFile(raw)
 
     def _is_current_media_video(self):
+        if int(self.stack.currentIndex()) == 2:
+            return True
         return self._is_video_path(getattr(self, "current_media_path", ""))
 
     def _refresh_icon_overlay_for_current_media(self):
@@ -2032,6 +2680,30 @@ class DesktopWidget(QMainWindow):
         if self._should_clone_desktop_icons():
             return False
         return self._desktop_icon_overlay_base_condition()
+
+    def _desktop_icon_edit_rect_local(self, force=False):
+        top_left = self._global_top_left()
+        wx = int(top_left.x())
+        wy = int(top_left.y())
+        ww = int(self.width())
+        wh = int(self.height())
+        if ww <= 0 or wh <= 0:
+            return QRect()
+        widget_screen_rect = QRect(wx, wy, ww, wh)
+        try:
+            self.__class__._desktop_icon_rects_screen(force=bool(force))
+        except Exception:
+            pass
+        info = self.__class__._desktop_icon_edit_info_screen()
+        if not isinstance(info, dict):
+            return QRect()
+        edit_rect = info.get("rect")
+        if not isinstance(edit_rect, QRect):
+            return QRect()
+        hit = edit_rect.intersected(widget_screen_rect)
+        if int(hit.width()) <= 0 or int(hit.height()) <= 0:
+            return QRect()
+        return hit.translated(-wx, -wy)
 
     def _sync_desktop_icon_mask_timer(self):
         if not hasattr(self, "_desktop_icon_mask_timer"):
@@ -2115,12 +2787,72 @@ class DesktopWidget(QMainWindow):
         punch_mode = self._should_punch_desktop_icons()
         if (not clone_mode and not punch_mode) or not self.isVisible():
             self._set_clone_overlay_items([])
+            self._desktop_icon_last_edit_rect_local = QRect()
             self._sync_desktop_icon_mask_timer()
             return
         if clone_mode:
             self._refresh_desktop_icon_clone_overlay(force=False)
+            edit_local_rect = self._desktop_icon_edit_rect_local(force=False)
+            if (int(edit_local_rect.width()) <= 0 or int(edit_local_rect.height()) <= 0) and self.isVisible():
+                edit_local_rect = self._desktop_icon_edit_rect_local(force=True)
+            if not (isinstance(edit_local_rect, QRect) and int(edit_local_rect.width()) > 0 and int(edit_local_rect.height()) > 0):
+                edit_local_rect = QRect()
+            prev_edit_rect = getattr(self, "_desktop_icon_last_edit_rect_local", QRect())
+            if not isinstance(prev_edit_rect, QRect):
+                prev_edit_rect = QRect()
+            if prev_edit_rect != edit_local_rect:
+                self._desktop_icon_last_edit_rect_local = QRect(edit_local_rect)
+                self.apply_mask_and_style()
             return
+        self._desktop_icon_last_edit_rect_local = QRect()
         self.apply_mask_and_style()
+
+    @classmethod
+    def _clear_desktop_icon_render_caches(cls):
+        try:
+            cls._desktop_icon_alpha_cache.clear()
+        except Exception:
+            cls._desktop_icon_alpha_cache = {}
+        try:
+            cls._desktop_icon_pixmap_cache.clear()
+        except Exception:
+            cls._desktop_icon_pixmap_cache = {}
+        try:
+            cls._desktop_icon_image_cache.clear()
+        except Exception:
+            cls._desktop_icon_image_cache = {}
+
+    @classmethod
+    def _desktop_icon_render_signature_of_rects(cls, rects):
+        sig = []
+        for entry in list(rects or []):
+            if not isinstance(entry, dict):
+                continue
+            try:
+                image_index = int(entry.get("image_index", -1))
+            except Exception:
+                image_index = -1
+            icon_rect = entry.get("icon")
+            if isinstance(icon_rect, QRect):
+                rx = int(icon_rect.x())
+                ry = int(icon_rect.y())
+                rw = int(icon_rect.width())
+                rh = int(icon_rect.height())
+            else:
+                rx = ry = rw = rh = 0
+            shell_path = str(entry.get("shell_path", "") or "")
+            path_mtime_ns = 0
+            if shell_path:
+                norm_path = str(os.path.normpath(shell_path))
+                low = norm_path.lower()
+                # Track file-icon resource changes without being noisy on folder content changes.
+                if low.endswith((".lnk", ".url", ".exe", ".ico")):
+                    try:
+                        path_mtime_ns = int(os.stat(norm_path).st_mtime_ns)
+                    except Exception:
+                        path_mtime_ns = 0
+            sig.append((int(image_index), int(rx), int(ry), int(rw), int(rh), int(path_mtime_ns)))
+        return tuple(sig)
 
     @classmethod
     def _resolve_desktop_listview_hwnd(cls, refresh=False):
@@ -2662,8 +3394,14 @@ class DesktopWidget(QMainWindow):
             cls._desktop_icon_cache_ts = now
             cls._desktop_icon_cache_rects = []
             cls._desktop_icon_edit_info = {}
+            cls._desktop_icon_render_signature = ()
             return []
         rects = cls._query_desktop_icon_rects_screen(int(listview_hwnd))
+        new_sig = cls._desktop_icon_render_signature_of_rects(rects)
+        prev_sig = tuple(getattr(cls, "_desktop_icon_render_signature", ()) or ())
+        if prev_sig and prev_sig != new_sig:
+            cls._clear_desktop_icon_render_caches()
+        cls._desktop_icon_render_signature = tuple(new_sig)
         cls._desktop_icon_cache_hwnd = int(listview_hwnd)
         cls._desktop_icon_cache_ts = now
         cls._desktop_icon_cache_rects = list(rects)
@@ -2809,13 +3547,14 @@ class DesktopWidget(QMainWindow):
             return cached
         out = {}
         ordered = []
-        if win32com is None:
+        win32com_client = _get_win32com_client()
+        if win32com_client is None:
             cls._desktop_shell_items_cache = {}
             cls._desktop_shell_items_cache_list = []
             cls._desktop_shell_items_cache_ts = now
             return {}
         try:
-            shell = win32com.Dispatch("Shell.Application")
+            shell = win32com_client.Dispatch("Shell.Application")
             ns = shell.Namespace(0)
             if ns is not None:
                 items = ns.Items()
@@ -2970,6 +3709,7 @@ class DesktopWidget(QMainWindow):
         hicon = 0
         hbm_color = 0
         hbm_mask = 0
+        win32ui_mod = _get_win32ui()
         try:
             comctl32 = ctypes.windll.comctl32
             comctl32.ImageList_GetIcon.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_uint]
@@ -2981,8 +3721,8 @@ class DesktopWidget(QMainWindow):
                     hbm_mask = cls._as_win_handle(icon_info[3])
                     hbm_color = cls._as_win_handle(icon_info[4])
 
-            if hbm_color and win32ui is not None:
-                bmp = win32ui.CreateBitmapFromHandle(int(hbm_color))
+            if hbm_color and win32ui_mod is not None:
+                bmp = win32ui_mod.CreateBitmapFromHandle(int(hbm_color))
                 info = bmp.GetInfo()
                 bits = bmp.GetBitmapBits(True)
                 bw = int(info.get("bmWidth", 0))
@@ -3064,13 +3804,14 @@ class DesktopWidget(QMainWindow):
             return QImage()
         hbm_color = 0
         hbm_mask = 0
+        win32ui_mod = _get_win32ui()
         try:
             icon_info = win32gui.GetIconInfo(int(hicon))
             if isinstance(icon_info, tuple) and len(icon_info) >= 5:
                 hbm_mask = cls._as_win_handle(icon_info[3])
                 hbm_color = cls._as_win_handle(icon_info[4])
-            if hbm_color and win32ui is not None:
-                bmp = win32ui.CreateBitmapFromHandle(int(hbm_color))
+            if hbm_color and win32ui_mod is not None:
+                bmp = win32ui_mod.CreateBitmapFromHandle(int(hbm_color))
                 info = bmp.GetInfo()
                 bits = bmp.GetBitmapBits(True)
                 bw = int(info.get("bmWidth", 0))
@@ -3147,6 +3888,7 @@ class DesktopWidget(QMainWindow):
         image = QImage()
         hbitmap = 0
         item_ptr = ctypes.c_void_p()
+        win32ui_mod = _get_win32ui()
         try:
             shell32 = ctypes.windll.shell32
             ole32 = ctypes.windll.ole32
@@ -3208,8 +3950,8 @@ class DesktopWidget(QMainWindow):
                     hr_img = int(get_image(item_ptr, SIZE(int(size), int(size)), int(flags_fallback), ctypes.byref(hbmp)))
                 if hr_img == 0 and hbmp.value:
                     hbitmap = cls._as_win_handle(hbmp.value)
-                    if hbitmap and win32ui is not None:
-                        bmp = win32ui.CreateBitmapFromHandle(int(hbitmap))
+                    if hbitmap and win32ui_mod is not None:
+                        bmp = win32ui_mod.CreateBitmapFromHandle(int(hbitmap))
                         info = bmp.GetInfo()
                         bits = bmp.GetBitmapBits(True)
                         bw = int(info.get("bmWidth", 0))
@@ -3453,6 +4195,7 @@ class DesktopWidget(QMainWindow):
         hicon = 0
         hbm_color = 0
         hbm_mask = 0
+        win32ui_mod = _get_win32ui()
         try:
             class SHFILEINFOW(ctypes.Structure):
                 _fields_ = [
@@ -3523,8 +4266,8 @@ class DesktopWidget(QMainWindow):
                     hbm_mask = _as_handle(icon_info[3])
                     hbm_color = _as_handle(icon_info[4])
 
-            if hbm_color and win32ui is not None:
-                bmp = win32ui.CreateBitmapFromHandle(int(hbm_color))
+            if hbm_color and win32ui_mod is not None:
+                bmp = win32ui_mod.CreateBitmapFromHandle(int(hbm_color))
                 info = bmp.GetInfo()
                 bits = bmp.GetBitmapBits(True)
                 bw = int(info.get("bmWidth", 0))
@@ -3735,7 +4478,6 @@ class DesktopWidget(QMainWindow):
             Qt.AlignmentFlag.AlignHCenter
             | Qt.AlignmentFlag.AlignTop
             | Qt.TextFlag.TextWordWrap
-            | Qt.TextFlag.TextWrapAnywhere
             | Qt.TextFlag.TextDontClip
         )
         draw_rect = QRect(int(pad_x - 4), int(pad_y), int(w + 8), int(h + 2))
@@ -3771,7 +4513,10 @@ class DesktopWidget(QMainWindow):
             return []
         widget_screen_rect = QRect(wx, wy, ww, wh)
         rects_screen = self.__class__._desktop_icon_rects_screen(force=bool(force))
-        edit_info_screen = self.__class__._desktop_icon_edit_info_screen()
+        edit_local_rect = self._desktop_icon_edit_rect_local(force=bool(force))
+        edit_screen_rect = QRect()
+        if isinstance(edit_local_rect, QRect) and int(edit_local_rect.width()) > 0 and int(edit_local_rect.height()) > 0:
+            edit_screen_rect = QRect(edit_local_rect).translated(int(wx), int(wy))
         local_items = []
         for entry in rects_screen:
             if not isinstance(entry, dict):
@@ -3779,6 +4524,17 @@ class DesktopWidget(QMainWindow):
             icon_rect = entry.get("icon")
             label_rect = entry.get("label")
             select_rect = entry.get("select")
+            editing_this_item = False
+            if isinstance(edit_screen_rect, QRect) and int(edit_screen_rect.width()) > 0 and int(edit_screen_rect.height()) > 0:
+                probe = QRect()
+                if isinstance(icon_rect, QRect):
+                    probe = QRect(icon_rect)
+                if isinstance(label_rect, QRect):
+                    probe = QRect(label_rect) if probe.isNull() else probe.united(QRect(label_rect))
+                if isinstance(select_rect, QRect):
+                    probe = QRect(select_rect) if probe.isNull() else probe.united(QRect(select_rect))
+                if not probe.isNull() and probe.intersects(edit_screen_rect):
+                    editing_this_item = True
             caption = str(entry.get("text", "") or "")
             shell_path = str(entry.get("shell_path", "") or "")
             shell_is_folder = bool(entry.get("shell_is_folder", False))
@@ -3808,8 +4564,10 @@ class DesktopWidget(QMainWindow):
                 select_hit = select_rect.intersected(widget_screen_rect)
                 if int(select_hit.width()) > 0 and int(select_hit.height()) > 0:
                     local_select = select_hit.translated(-wx, -wy)
+            if bool(editing_this_item):
+                local_select = QRect()
             if int(local_select.width()) <= 0 or int(local_select.height()) <= 0:
-                if bool(selected) or bool(focused):
+                if (bool(selected) or bool(focused)) and not bool(editing_this_item):
                     merged = QRect()
                     if int(local_icon_visible.width()) > 0 and int(local_icon_visible.height()) > 0:
                         merged = QRect(local_icon_visible)
@@ -3845,28 +4603,18 @@ class DesktopWidget(QMainWindow):
                         Qt.AspectRatioMode.KeepAspectRatio,
                         Qt.TransformationMode.SmoothTransformation,
                     )
+            display_text = "" if bool(editing_this_item) else str(caption or "")
             local_items.append(
                 {
                     "icon_rect": local_icon,
                     "icon_pixmap": icon_pixmap,
                     "label_rect": local_label,
-                    "text": caption,
+                    "text": display_text,
                     "select_rect": local_select,
-                    "selected": bool(selected),
-                    "focused": bool(focused),
+                    "selected": bool(selected) and not bool(editing_this_item),
+                    "focused": bool(focused) and not bool(editing_this_item),
                 }
             )
-        if isinstance(edit_info_screen, dict):
-            edit_rect = edit_info_screen.get("rect")
-            if isinstance(edit_rect, QRect):
-                edit_hit = edit_rect.intersected(widget_screen_rect)
-                if int(edit_hit.width()) > 0 and int(edit_hit.height()) > 0:
-                    local_items.append(
-                        {
-                            "edit_rect": edit_hit.translated(-wx, -wy),
-                            "edit_text": str(edit_info_screen.get("text", "") or ""),
-                        }
-                    )
         return local_items
 
     def _desktop_icon_hole_rects_local(self, force=False):
@@ -4078,6 +4826,10 @@ class DesktopWidget(QMainWindow):
                 return os.path.normpath(path)
         return ""
 
+    @staticmethod
+    def _supported_media_extensions():
+        return tuple(sorted(set(DesktopWidget._image_extensions() + DesktopWidget._video_extensions())))
+
     def _apply_drop_target(self, path):
         if not path:
             return False
@@ -4115,10 +4867,11 @@ class DesktopWidget(QMainWindow):
             return ""
         if not raw.lower().endswith(".lnk"):
             return raw
-        if win32com is None:
+        win32com_client = _get_win32com_client()
+        if win32com_client is None:
             return raw
         try:
-            shell = win32com.Dispatch("WScript.Shell")
+            shell = win32com_client.Dispatch("WScript.Shell")
             shortcut = shell.CreateShortCut(raw)
             target = str(getattr(shortcut, "Targetpath", "") or "").strip()
             if target:
@@ -5121,9 +5874,15 @@ class DesktopWidget(QMainWindow):
             self._perf_gif_timer_was_active = False
 
             if self.stack.currentIndex() == 2:
-                if self.media_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
-                    self.media_player.pause()
-                    self._perf_paused_video = True
+                for player in self._video_players():
+                    try:
+                        if player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+                            player.pause()
+                            self._perf_paused_video = True
+                    except Exception:
+                        continue
+                self._cancel_video_crossfade()
+                self._cancel_video_dual_pending(clear_source=True)
             elif self.stack.currentIndex() == 1 and self.movie is not None:
                 if self.movie.state() == QMovie.MovieState.Running:
                     self.movie.setPaused(True)
@@ -5537,7 +6296,7 @@ class DesktopWidget(QMainWindow):
         self._schedule_next_media()
 
     def load_settings(self):
-        self.folder_path = self.settings.value("folder_path", "")
+        self.folder_path = str(self.settings.value("folder_path", "") or "")
         self.exec_path = self.settings.value("exec_path", "")
         self._exec_manual_focus_enabled = _as_bool(
             self.settings.value("exec_manual_focus_enabled", False),
@@ -5839,13 +6598,18 @@ class DesktopWidget(QMainWindow):
             str(path),
         ]
         try:
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=3.0,
-                check=False,
-            )
+            run_kwargs = {
+                "capture_output": True,
+                "text": True,
+                "timeout": 3.0,
+                "check": False,
+            }
+            if os.name == "nt":
+                flags = 0
+                flags |= int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                if flags:
+                    run_kwargs["creationflags"] = int(flags)
+            proc = subprocess.run(cmd, **run_kwargs)
             if int(proc.returncode) == 0:
                 out = str(proc.stdout or "").strip()
                 h = int(out) if out.isdigit() else 0
@@ -5959,7 +6723,11 @@ class DesktopWidget(QMainWindow):
                 "check": False,
             }
             if os.name == "nt":
-                run_kwargs["creationflags"] = int(getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0))
+                flags = 0
+                flags |= int(getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0))
+                flags |= int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                if flags:
+                    run_kwargs["creationflags"] = int(flags)
             proc = subprocess.run(cmd, **run_kwargs)
             ok = int(proc.returncode) == 0
         except Exception:
@@ -6365,7 +7133,7 @@ class DesktopWidget(QMainWindow):
         self.stack.setCurrentIndex(2)
         self._update_video_aspect_mode()
         self._sync_video_loop_policy_for_path(path)
-        self.media_player.setSource(QUrl.fromLocalFile(playback_path))
+        self.media_player.setSource(self._to_media_qurl(playback_path))
         self._apply_mute_state()
         self.media_player.play()
         self._refresh_icon_overlay_for_current_media()
@@ -6392,7 +7160,7 @@ class DesktopWidget(QMainWindow):
             pass
         try:
             preload_path = self._resolve_video_playback_path(str(next_video_path), allow_build=False)
-            preload_player.setSource(QUrl.fromLocalFile(str(preload_path)))
+            preload_player.setSource(self._to_media_qurl(str(preload_path)))
             preload_player.play()
         except Exception:
             return False
@@ -6551,6 +7319,33 @@ class DesktopWidget(QMainWindow):
                     pass
         self._set_video_active_slot(int(getattr(self, "_video_active_slot", 0)))
 
+    def _sync_video_viewport_update_mode(self):
+        if not bool(getattr(self, "_video_graphics_mode", False)):
+            return
+        view = getattr(self, "video_widget", None)
+        if not isinstance(view, QGraphicsView):
+            return
+        target_mode = QGraphicsView.ViewportUpdateMode.FullViewportUpdate
+        try:
+            manager = getattr(self, "manager", None)
+            widgets = getattr(manager, "widgets", {}) if manager is not None else {}
+            visible_count = 0
+            if isinstance(widgets, dict):
+                for widget in widgets.values():
+                    if isinstance(widget, DesktopWidget) and widget.isVisible():
+                        visible_count += 1
+                        if visible_count >= 2:
+                            break
+            if visible_count >= 2:
+                target_mode = QGraphicsView.ViewportUpdateMode.SmartViewportUpdate
+        except Exception:
+            target_mode = QGraphicsView.ViewportUpdateMode.FullViewportUpdate
+        try:
+            if view.viewportUpdateMode() != target_mode:
+                view.setViewportUpdateMode(target_mode)
+        except Exception:
+            pass
+
     def _resize_video_surface(self):
         if not bool(getattr(self, "_video_graphics_mode", False)):
             return
@@ -6646,6 +7441,34 @@ class DesktopWidget(QMainWindow):
             return 0
         # Cheap estimate only: avoid frame-by-frame seeking that can stall startup.
         return int(max(0, min(600000, int(frame_count) * int(frame_delay))))
+
+    @staticmethod
+    def _gif_cache_limit_bytes():
+        raw = str(os.environ.get("MYCANVAS_GIF_CACHEALL_MAX_MB", "24") or "").strip()
+        try:
+            mb = float(raw)
+        except Exception:
+            mb = 24.0
+        if mb <= 0:
+            return 0
+        return int(max(0.0, float(mb)) * 1024.0 * 1024.0)
+
+    def _configure_gif_movie_cache(self, movie_obj, source_path):
+        if movie_obj is None:
+            return
+        cache_mode = QMovie.CacheMode.CacheNone
+        limit_bytes = int(self._gif_cache_limit_bytes())
+        if limit_bytes > 0:
+            try:
+                file_size = int(os.path.getsize(str(source_path or "")))
+            except Exception:
+                file_size = -1
+            if 0 <= int(file_size) <= int(limit_bytes):
+                cache_mode = QMovie.CacheMode.CacheAll
+        try:
+            movie_obj.setCacheMode(cache_mode)
+        except Exception:
+            pass
 
     def _is_single_media_mode_active(self):
         if len(self.playlist) != 1:
@@ -6911,6 +7734,7 @@ class DesktopWidget(QMainWindow):
             except Exception:
                 pass
             return False
+        self._configure_gif_movie_cache(movie, path)
         self._gif_swap_pending_movie = movie
         self._gif_swap_pending_path = str(path)
         self._gif_swap_pending_duration_ms = 0
@@ -6941,6 +7765,7 @@ class DesktopWidget(QMainWindow):
             except Exception:
                 pass
             return False
+        self._configure_gif_movie_cache(movie, path)
         self.movie = movie
         self.stack.setCurrentIndex(1)
         self.img_label.setUpdatesEnabled(False)
@@ -7063,9 +7888,6 @@ class DesktopWidget(QMainWindow):
             return
 
         self._initial_media_pending = False
-        if not self.folder_path:
-            self._initial_media_prepared = True
-            return
         if not self.playlist:
             self.update_playlist()
         if not self.playlist:
@@ -7183,23 +8005,41 @@ class DesktopWidget(QMainWindow):
                 if isinstance(icon_region, QRegion) and not icon_region.isEmpty():
                     mask_region = mask_region.subtracted(icon_region)
 
+        # In clone mode, keep only the active rename editor area native.
+        edit_local_rect = self._desktop_icon_edit_rect_local(force=False)
+        if (int(edit_local_rect.width()) <= 0 or int(edit_local_rect.height()) <= 0) and self.isVisible():
+            edit_local_rect = self._desktop_icon_edit_rect_local(force=True)
+        if isinstance(edit_local_rect, QRect) and int(edit_local_rect.width()) > 0 and int(edit_local_rect.height()) > 0:
+            if mask_region is None:
+                mask_region = QRegion(self.rect())
+            edit_hole = QRegion(edit_local_rect.adjusted(-2, -1, 2, 1))
+            if not edit_hole.isEmpty():
+                mask_region = mask_region.subtracted(edit_hole)
+
         if mask_region is not None:
             self.setMask(mask_region)
         else:
             self.clearMask()
 
     def update_playlist(self):
-        if not os.path.exists(self.folder_path):
+        folder = str(getattr(self, "folder_path", "") or "").strip()
+        if not folder or not os.path.isdir(folder):
             # Prevent stale media list when folder path is invalid/missing.
             self.playlist = []
             return
-        ext = ('.png', '.jpg', '.jpeg', '.gif', '.mp4', '.avi', '.mov', '.ico', '.jfif', '.webp')
+        media_ext = self._supported_media_extensions()
         try:
-            files = os.listdir(self.folder_path)
+            files = os.listdir(folder)
         except OSError:
             self.playlist = []
             return
-        candidates = sorted([os.path.join(self.folder_path, f) for f in files if f.lower().endswith(ext)])
+        entries = []
+        for name in sorted(files):
+            path = os.path.join(folder, str(name))
+            low = str(name).lower()
+            if low.endswith(media_ext):
+                entries.append(path)
+        candidates = list(entries)
         if not candidates:
             self.playlist = []
             return
@@ -7215,6 +8055,9 @@ class DesktopWidget(QMainWindow):
         self.playlist = candidates
 
     def _set_watched_folder(self, folder_path):
+        old_files = self.folder_watcher.files()
+        if old_files:
+            self.folder_watcher.removePaths(old_files)
         old_dirs = self.folder_watcher.directories()
         if old_dirs:
             self.folder_watcher.removePaths(old_dirs)
@@ -7296,7 +8139,8 @@ class DesktopWidget(QMainWindow):
             if self._normalize_exec_path(old_exec) != self._normalize_exec_path(self.exec_path):
                 self._clear_bound_exec_window()
                 self._clear_manual_focus_binding(persist=False, clear_bound=False)
-            self.folder_path = dialog.folder_path
+            self.folder_path = str(dialog.folder_path or "").strip()
+            source_changed = (old_folder != self.folder_path)
             self._set_watched_folder(self.folder_path)
             self.interval_ms = dialog.sec_input.value() * 1000
             self.bg_color_mode = dialog.bg_combo.currentIndex()
@@ -7317,7 +8161,7 @@ class DesktopWidget(QMainWindow):
             self.apply_mask_and_style()
             self._sync_current_media_cycle_policy()
             
-            if old_folder != self.folder_path:
+            if source_changed:
                 self.update_playlist(); self.current_idx = -1; self.next_media()
             else:
                 self._apply_media_scale_mode()
@@ -7432,11 +8276,11 @@ class DesktopWidget(QMainWindow):
         while attempts > 0 and self.playlist:
             # 2. advance index
             next_idx = (self.current_idx + 1) % len(self.playlist)
-            path = self.playlist[next_idx]
+            source_path = str(self.playlist[next_idx] or "")
 
-            if bool(prefer_preload) and self._try_start_dual_video_preload(path):
+            if bool(prefer_preload) and self._try_start_dual_video_preload(source_path):
                 self.current_idx = int(next_idx)
-                self.current_media_path = path
+                self.current_media_path = source_path
                 self._refresh_icon_overlay_for_current_media()
                 if self._performance_paused:
                     self.set_performance_paused(True, reason="guard_active", force=True)
@@ -7450,48 +8294,32 @@ class DesktopWidget(QMainWindow):
             self.current_static_pixmap = None
             self.current_media_path = None
             self.current_idx = int(next_idx)
-            self.current_media_path = path
+            runtime_path = str(source_path)
+            runtime_is_video = self._is_video_path(runtime_path)
+            self.current_media_path = runtime_path
 
             # 3. branch by extension
-            if self._is_video_path(path):
+            if runtime_is_video:
                 self._set_video_active_slot(int(getattr(self, "_video_active_slot", 0)))
-                self._play_video_path_on_active_player(path)
+                self._play_video_path_on_active_player(runtime_path)
                 return
 
-            if path.lower().endswith('.gif'):
-                self.stack.setCurrentIndex(1)
-                self.movie = QMovie(path)
-                if not self.movie.isValid():
-                    self.movie.deleteLater()
-                    self.movie = None
-                    self._record_media_failure(path, "invalid_gif")
-                    if path in self.quarantined_media:
+            if self._is_gif_path(runtime_path):
+                if not self._start_gif_direct(runtime_path):
+                    self._record_media_failure(source_path, "invalid_gif")
+                    if source_path in self.quarantined_media:
                         self.playlist.pop(self.current_idx)
                         self.current_idx -= 1
                     attempts -= 1
                     continue
-
-                try:
-                    self.movie.setScaledSize(self.size())
-                except Exception:
-                    pass
-                self.img_label.setMovie(self.movie)
-                self.movie.start()
-                try:
-                    self.movie.jumpToFrame(0)
-                except Exception:
-                    pass
-                self._start_active_gif_loop_watch()
                 self._refresh_icon_overlay_for_current_media()
-                if self._performance_paused:
-                    self.set_performance_paused(True, reason="guard_active", force=True)
                 return
 
             self.stack.setCurrentIndex(1)
-            pix = QPixmap(path)
+            pix = QPixmap(runtime_path)
             if pix.isNull():
-                self._record_media_failure(path, "invalid_image")
-                if path in self.quarantined_media:
+                self._record_media_failure(source_path, "invalid_image")
+                if source_path in self.quarantined_media:
                     self.playlist.pop(self.current_idx)
                     self.current_idx -= 1
                 attempts -= 1
@@ -7912,8 +8740,13 @@ class DesktopWidget(QMainWindow):
 
     def showEvent(self, e):
         if not bool(getattr(self, "_initial_media_prepared", False)):
-            self.prepare_media_before_show()
+            if bool(getattr(self, "_defer_initial_prepare_on_show", False)):
+                self._defer_initial_prepare_on_show = False
+                QTimer.singleShot(0, self.prepare_media_before_show)
+            else:
+                self.prepare_media_before_show()
         super().showEvent(e)
+        self._sync_video_viewport_update_mode()
         # Hidden pre-warm can still use a stale child size on some starts.
         # Re-apply once visible so static image size matches final widget geometry.
         self._apply_media_scale_mode()
@@ -7982,6 +8815,9 @@ class DesktopWidget(QMainWindow):
             old_dirs = self.folder_watcher.directories()
             if old_dirs:
                 self.folder_watcher.removePaths(old_dirs)
+            old_files = self.folder_watcher.files()
+            if old_files:
+                self.folder_watcher.removePaths(old_files)
         app = QApplication.instance()
         if app:
             app.removeEventFilter(self)
@@ -7996,24 +8832,153 @@ class DesktopWidget(QMainWindow):
 
 
 class MasterController(QMainWindow):
+    @staticmethod
+    def _frozen_executable_path():
+        if not bool(getattr(sys, "frozen", False)):
+            return ""
+        try:
+            exe_path = str(getattr(sys, "executable", "") or "").strip()
+            if not exe_path:
+                return ""
+            exe_path = os.path.abspath(exe_path)
+        except Exception:
+            return ""
+        if not os.path.isfile(exe_path):
+            return ""
+        return exe_path
+
+    @staticmethod
+    def _windows_startup_folder_path():
+        try:
+            appdata = str(os.environ.get("APPDATA", "") or "").strip()
+        except Exception:
+            appdata = ""
+        if not appdata:
+            return ""
+        return os.path.join(appdata, "Microsoft", "Windows", "Start Menu", "Programs", "Startup")
+
+    @staticmethod
+    def _startup_shortcut_icon_path(exe_path):
+        exe = str(exe_path or "").strip()
+        if not exe:
+            return ""
+        exe_dir = os.path.dirname(exe)
+        exe_name = os.path.splitext(os.path.basename(exe))[0]
+        icon_names = ["icon.ico"]
+        if exe_name:
+            icon_names.append(f"{exe_name}.ico")
+        icon_names.extend(["MyCanvas.ico"])
+        seen = set()
+        for name in icon_names:
+            candidate = os.path.join(exe_dir, name)
+            norm = os.path.normcase(os.path.normpath(candidate))
+            if norm in seen:
+                continue
+            seen.add(norm)
+            if os.path.isfile(candidate):
+                return candidate
+        return exe
+
+    def _ensure_windows_startup_shortcut(self):
+        exe_path = self._frozen_executable_path()
+        win32com_client = _get_win32com_client()
+        if not exe_path or win32com_client is None:
+            return
+        startup_dir = self._windows_startup_folder_path()
+        if not startup_dir:
+            return
+        try:
+            os.makedirs(startup_dir, exist_ok=True)
+        except Exception:
+            return
+        exe_name = os.path.splitext(os.path.basename(exe_path))[0] or "MyCanvas"
+        shortcut_path = os.path.join(startup_dir, f"{exe_name}.lnk")
+        icon_path = self._startup_shortcut_icon_path(exe_path)
+        try:
+            shell = win32com_client.Dispatch("WScript.Shell")
+            shortcut = shell.CreateShortCut(shortcut_path)
+            shortcut.Targetpath = exe_path
+            shortcut.WorkingDirectory = os.path.dirname(exe_path)
+            shortcut.Arguments = ""
+            shortcut.IconLocation = f"{icon_path},0"
+            shortcut.Description = f"{exe_name} auto start"
+            shortcut.Save()
+        except Exception:
+            pass
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("위젯 컨트롤러")
 
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        icon_candidates = [
-            "icon.ico",
-            "MyWidgetBox.ico",
-            os.path.join(script_dir, "icon.ico"),
-            os.path.join(script_dir, "MyWidgetBox.ico"),
-        ]
-        icon_path = next((p for p in icon_candidates if os.path.exists(p)), "")
+        runtime_dirs = []
+        try:
+            meipass = str(getattr(sys, "_MEIPASS", "") or "").strip()
+            if meipass:
+                runtime_dirs.append(meipass)
+        except Exception:
+            pass
+        try:
+            exe_path = str(getattr(sys, "executable", "") or "").strip()
+            if exe_path:
+                runtime_dirs.append(os.path.dirname(os.path.abspath(exe_path)))
+        except Exception:
+            pass
+        try:
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            if script_dir:
+                runtime_dirs.append(script_dir)
+        except Exception:
+            pass
+        try:
+            cwd = os.getcwd()
+            if cwd:
+                runtime_dirs.append(cwd)
+        except Exception:
+            pass
+        ordered_dirs = []
+        seen_dirs = set()
+        for d in runtime_dirs:
+            key = os.path.normcase(os.path.normpath(str(d)))
+            if key in seen_dirs:
+                continue
+            seen_dirs.add(key)
+            ordered_dirs.append(str(d))
+        icon_names = []
+        try:
+            exe_name = os.path.splitext(os.path.basename(str(getattr(sys, "executable", "") or "").strip()))[0]
+            if exe_name:
+                icon_names.append(f"{exe_name}.ico")
+        except Exception:
+            pass
+        icon_names.extend(["MyCanvas.ico", "icon.ico"])
+        icon_candidates = []
+        seen_paths = set()
+        for folder in ordered_dirs:
+            for name in icon_names:
+                candidate = os.path.join(folder, name)
+                key = os.path.normcase(os.path.normpath(candidate))
+                if key in seen_paths:
+                    continue
+                seen_paths.add(key)
+                icon_candidates.append(candidate)
+        icon_path = next((p for p in icon_candidates if os.path.isfile(p)), "")
         if icon_path:
             self.app_icon = QIcon(icon_path)
         else:
-            pixmap = QPixmap(16, 16)
-            pixmap.fill(Qt.GlobalColor.green)
-            self.app_icon = QIcon(pixmap)
+            exe_icon = QIcon()
+            try:
+                exe_path = str(getattr(sys, "executable", "") or "").strip()
+                if exe_path and os.path.isfile(exe_path):
+                    exe_icon = QFileIconProvider().icon(QFileInfo(exe_path))
+            except Exception:
+                exe_icon = QIcon()
+            if not exe_icon.isNull():
+                self.app_icon = exe_icon
+            else:
+                pixmap = QPixmap(16, 16)
+                pixmap.fill(Qt.GlobalColor.green)
+                self.app_icon = QIcon(pixmap)
+        self._ensure_windows_startup_shortcut()
 
         self.setWindowIcon(QIcon())
         self.setFixedSize(476, 680)
@@ -8487,13 +9452,17 @@ class MasterController(QMainWindow):
         self.exit_btn = QPushButton("프로그램 종료 (Exit)")
         self.exit_btn.setObjectName("dangerBtn")
         self.exit_btn.clicked.connect(self.quit_app)
+        self.image_tool_btn = QPushButton("이미지 업스케일")
+        self.image_tool_btn.setObjectName("secondaryBtn")
         self.run_all_btn = QPushButton("세트 적용")
         self.run_all_btn.setObjectName("secondaryBtn")
         btn_box.addWidget(self.exit_btn)
+        btn_box.addWidget(self.image_tool_btn)
         btn_box.addWidget(self.run_all_btn)
         layout.addLayout(btn_box)
 
         self.run_all_btn.clicked.connect(self.run_all)
+        self.image_tool_btn.clicked.connect(self.open_image_upscale_tool)
         self.list_widget.itemClicked.connect(self.highlight_widget)
         self.list_widget.itemDoubleClicked.connect(self.rename_profile)
         self.list_widget.itemEntered.connect(self._on_profile_item_entered)
@@ -8504,6 +9473,7 @@ class MasterController(QMainWindow):
         self._set_defs = {}
         self._current_set_id = ""
         self._applied_set_id = ""
+        self._image_tool_dialog = None
         self._load_set_state()
         self._migrate_profile_run_flags()
         self._refresh_set_ui()
@@ -8923,18 +9893,23 @@ class MasterController(QMainWindow):
         folder_path = str(settings.value("folder_path", "") or "").strip()
         if not folder_path or not os.path.isdir(folder_path):
             return "other"
-        ext = (".png", ".jpg", ".jpeg", ".gif", ".mp4", ".avi", ".mov", ".ico", ".jfif", ".webp")
+        media_ext = DesktopWidget._supported_media_extensions()
         try:
             files = os.listdir(folder_path)
         except OSError:
             return "other"
-        candidates = sorted([name for name in files if str(name).lower().endswith(ext)])
+        candidates = []
+        for name in sorted(files):
+            low = str(name).lower()
+            path = os.path.join(folder_path, str(name))
+            if low.endswith(media_ext):
+                candidates.append(path)
         if not candidates:
             return "other"
-        first_name = str(candidates[0]).lower()
-        if first_name.endswith((".mp4", ".avi", ".mov")):
+        first_name = str(candidates[0]).strip().lower()
+        if DesktopWidget._is_video_path(first_name):
             return "video"
-        if first_name.endswith(".gif"):
+        if DesktopWidget._is_gif_path(first_name):
             return "gif"
         return "other"
 
@@ -8995,7 +9970,7 @@ class MasterController(QMainWindow):
             return
 
         pid, name, kind = self._startup_queue.pop(0)
-        self._start_widget_instance(pid, name)
+        self._start_widget_instance(pid, name, startup_kind=kind)
         self.update_active_status()
 
         if not self._startup_queue:
@@ -9005,17 +9980,34 @@ class MasterController(QMainWindow):
             return
         self._startup_queue_timer.start(self._startup_delay_for_kind(kind))
 
-    def _start_widget_instance(self, pid, name):
+    def _sync_all_widget_video_viewports(self):
+        for widget in list(self.widgets.values()):
+            if not isinstance(widget, DesktopWidget):
+                continue
+            try:
+                widget._sync_video_viewport_update_mode()
+            except Exception:
+                pass
+
+    def _start_widget_instance(self, pid, name, startup_kind=""):
         spid = str(pid)
         if spid in self.widgets:
             return False
         widget = DesktopWidget(spid, name, self)
-        try:
-            widget.prepare_media_before_show()
-        except Exception:
-            pass
+        kind_key = str(startup_kind or "").strip().lower()
+        defer_prepare = bool(
+            getattr(self, "_startup_queue_active", False)
+            and kind_key in ("video", "gif")
+        )
+        widget._defer_initial_prepare_on_show = bool(defer_prepare)
+        if not defer_prepare:
+            try:
+                widget.prepare_media_before_show()
+            except Exception:
+                pass
         self.widgets[spid] = widget
         widget.show()
+        self._sync_all_widget_video_viewports()
         try:
             widget = self.widgets[spid]
             QTimer.singleShot(
@@ -9048,6 +10040,8 @@ class MasterController(QMainWindow):
             widget.deleteLater()
             self.widgets.pop(pid, None)
             changed = True
+        if changed:
+            self._sync_all_widget_video_viewports()
         return changed
 
     def is_temp_group_member(self, pid):
@@ -9549,6 +10543,22 @@ class MasterController(QMainWindow):
         dialog.exec()
         self._refresh_set_ui()
         self.load_profiles()
+
+    def open_image_upscale_tool(self):
+        dialog = getattr(self, "_image_tool_dialog", None)
+        if dialog is None:
+            dialog = ImageUpscaleDialog(self)
+            dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+            dialog.destroyed.connect(lambda *_: setattr(self, "_image_tool_dialog", None))
+            self._image_tool_dialog = dialog
+        try:
+            if dialog.isMinimized():
+                dialog.showNormal()
+        except Exception:
+            pass
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
     def _toggle_gpu_cfg_panel(self, expanded=None):
         if expanded is None:
@@ -10154,12 +11164,17 @@ class MasterController(QMainWindow):
                     w.set_performance_paused(True, reason=f"gpu {self._gpu_last_usage:.1f}%", force=True)
 
 
-                old_folder = w.folder_path
-                w.folder_path = new_folder
-                w._set_watched_folder(new_folder)
+                old_folder = str(w.folder_path or "")
+                source_changed = (old_folder != str(new_folder or ""))
+                if new_folder:
+                    w.folder_path = new_folder
+                    w._set_watched_folder(new_folder)
+                else:
+                    w.folder_path = str(new_folder or "")
+                    w._set_watched_folder(w.folder_path)
                 w.interval_ms = new_interval
 
-                if old_folder != new_folder:
+                if source_changed:
 
                     w.update_playlist()
                     w.current_idx = -1
@@ -10168,8 +11183,8 @@ class MasterController(QMainWindow):
                     if hasattr(w, "_apply_media_scale_mode"):
                         w._apply_media_scale_mode()
 
-                    if w.timer.isActive():
-                        w.timer.setInterval(new_interval)
+                if w.timer.isActive():
+                    w.timer.setInterval(new_interval)
                     
 
 
@@ -10449,6 +11464,7 @@ class MasterController(QMainWindow):
             widget.close()
             widget.deleteLater()
             del self.widgets[spid]
+            self._sync_all_widget_video_viewports()
         self._sync_temp_group_badges()
         self.update_active_status()
         self.load_profiles()
@@ -10597,6 +11613,10 @@ if __name__ == "__main__":
 
     sys.excepthook = lambda cls, exception, traceback: sys.__excepthook__(cls, exception, traceback)
 
+    try:
+        QApplication.setAttribute(Qt.ApplicationAttribute.AA_CompressHighFrequencyEvents, True)
+    except Exception:
+        pass
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
     master = MasterController()
@@ -10610,6 +11630,7 @@ if __name__ == "__main__":
         import traceback
         traceback.print_exc()
         input("엔터를 누르면 종료합니다...") # 에러 확인을 위해 잠시 멈춤
+
 
 
 
