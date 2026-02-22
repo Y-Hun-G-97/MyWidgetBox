@@ -1,8 +1,12 @@
 # -*- mode: python ; coding: utf-8 -*-
-from PyInstaller.utils.hooks import collect_submodules
 
-hiddenimports = ['pythoncom', 'pywintypes', 'PyQt6.QtMultimediaWidgets']
-hiddenimports += collect_submodules('win32com')
+hiddenimports = [
+    'pythoncom',
+    'pywintypes',
+    'win32com',
+    'win32com.client',
+    'PyQt6.QtMultimediaWidgets',
+]
 
 binaries = [
     ('C:\\\\ffmpeg\\\\bin\\\\ffmpeg.exe', '.'),
@@ -30,14 +34,13 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
+    exclude_binaries=True,
     name='MyCanvas',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,
@@ -47,4 +50,15 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon=['MyCanvas.ico'],
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    name='MyCanvas',
 )

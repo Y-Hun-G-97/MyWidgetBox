@@ -2282,6 +2282,14 @@ class DesktopWidget(QMainWindow):
         self.profile_id = profile_id
         self.manager = manager
         self.settings = QSettings("MyHomeApp", f"Profile_{profile_id}")
+        try:
+            settings_sync_ms = int(os.environ.get("MYCANVAS_SETTINGS_SYNC_MS", "700") or "700")
+        except Exception:
+            settings_sync_ms = 700
+        self._settings_sync_delay_ms = max(120, min(3000, int(settings_sync_ms)))
+        self._settings_sync_timer = QTimer(self)
+        self._settings_sync_timer.setSingleShot(True)
+        self._settings_sync_timer.timeout.connect(self._flush_settings_sync)
         self.setAttribute(Qt.WidgetAttribute.WA_NativeWindow) 
 
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool)
@@ -8215,7 +8223,28 @@ class DesktopWidget(QMainWindow):
             else:
                 self.selection_overlay.hide()
 
-    def save_all_settings(self):
+    def _schedule_settings_sync(self, delay_ms=None):
+        if not hasattr(self, "_settings_sync_timer"):
+            return
+        try:
+            delay = int(self._settings_sync_delay_ms if delay_ms is None else delay_ms)
+        except Exception:
+            delay = int(getattr(self, "_settings_sync_delay_ms", 700))
+        delay = max(0, delay)
+        if delay <= 0:
+            self._flush_settings_sync()
+            return
+        self._settings_sync_timer.start(delay)
+
+    def _flush_settings_sync(self):
+        if hasattr(self, "_settings_sync_timer") and self._settings_sync_timer.isActive():
+            self._settings_sync_timer.stop()
+        try:
+            self.settings.sync()
+        except Exception:
+            pass
+
+    def save_all_settings(self, sync=None):
         self.settings.setValue("folder_path", self.folder_path)
         self.settings.setValue("exec_path", self.exec_path)
         self.settings.setValue("exec_manual_focus_enabled", bool(getattr(self, "_exec_manual_focus_enabled", False)))
@@ -8247,7 +8276,10 @@ class DesktopWidget(QMainWindow):
         self._save_position_metadata()
         self._save_quarantined_media()
         
-        self.settings.sync()
+        if sync is True:
+            self._flush_settings_sync()
+        elif sync is None:
+            self._schedule_settings_sync()
 
     def preview_opacity(self, val_pct):
         self.setWindowOpacity(val_pct / 100.0)
@@ -8826,8 +8858,11 @@ class DesktopWidget(QMainWindow):
         if hasattr(self, "_desktop_icon_bootstrap_timer") and self._desktop_icon_bootstrap_timer.isActive():
             self._desktop_icon_bootstrap_timer.stop()
         self._set_clone_overlay_items([])
+        if hasattr(self, "_settings_sync_timer") and self._settings_sync_timer.isActive():
+            self._settings_sync_timer.stop()
              
-        self.save_all_settings()
+        skip_sync = bool(getattr(self.manager, "_bulk_set_switch_active", False))
+        self.save_all_settings(sync=(not skip_sync))
         super().closeEvent(event)
 
 
@@ -8879,21 +8914,187 @@ class MasterController(QMainWindow):
                 return candidate
         return exe
 
-    def _ensure_windows_startup_shortcut(self):
+    @staticmethod
+    def _startup_shortcut_pref_key():
+        return "startup_shortcut_enabled_v1"
+
+    def _startup_shortcut_path(self, exe_path=""):
+        resolved_exe = str(exe_path or "").strip()
+        if not resolved_exe:
+            resolved_exe = self._frozen_executable_path()
+        if not resolved_exe:
+            return ""
+        startup_dir = self._windows_startup_folder_path()
+        if not startup_dir:
+            return ""
+        exe_name = os.path.splitext(os.path.basename(resolved_exe))[0] or "MyCanvas"
+        return os.path.join(startup_dir, f"{exe_name}.lnk")
+
+    def _startup_shortcut_enabled(self):
+        raw = self.master_settings.value(self._startup_shortcut_pref_key(), None)
+        if raw is None:
+            return _as_bool(os.environ.get("MYCANVAS_ENSURE_STARTUP_SHORTCUT", "0"), False)
+        return _as_bool(raw, False)
+
+    @staticmethod
+    def _fast_startup_enabled():
+        return _as_bool(os.environ.get("MYCANVAS_FAST_STARTUP", "1"), True)
+
+    @staticmethod
+    def _minimal_validation_enabled():
+        return _as_bool(os.environ.get("MYCANVAS_MIN_VALIDATION", "1"), True)
+
+    @staticmethod
+    def _fast_set_switch_enabled():
+        return _as_bool(os.environ.get("MYCANVAS_FAST_SET_SWITCH", "1"), True)
+
+    @classmethod
+    def _resolve_app_icon(cls):
+        # Fast path: only check the most likely locations.
+        quick_candidates = []
+        try:
+            exe_path = str(getattr(sys, "executable", "") or "").strip()
+            if exe_path:
+                exe_dir = os.path.dirname(os.path.abspath(exe_path))
+                quick_candidates.append(os.path.join(exe_dir, "MyCanvas.ico"))
+                quick_candidates.append(os.path.join(exe_dir, "icon.ico"))
+        except Exception:
+            pass
+        try:
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            if script_dir:
+                quick_candidates.append(os.path.join(script_dir, "MyCanvas.ico"))
+                quick_candidates.append(os.path.join(script_dir, "icon.ico"))
+        except Exception:
+            pass
+
+        seen = set()
+        for candidate in quick_candidates:
+            key = os.path.normcase(os.path.normpath(str(candidate)))
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                if os.path.isfile(candidate):
+                    icon = QIcon(candidate)
+                    if not icon.isNull():
+                        return icon
+            except Exception:
+                continue
+
+        # Slow fallback path only when fast-start mode is disabled.
+        if not bool(cls._fast_startup_enabled()):
+            runtime_dirs = []
+            try:
+                meipass = str(getattr(sys, "_MEIPASS", "") or "").strip()
+                if meipass:
+                    runtime_dirs.append(meipass)
+            except Exception:
+                pass
+            try:
+                exe_path = str(getattr(sys, "executable", "") or "").strip()
+                if exe_path:
+                    runtime_dirs.append(os.path.dirname(os.path.abspath(exe_path)))
+            except Exception:
+                pass
+            try:
+                script_dir = os.path.dirname(os.path.abspath(__file__))
+                if script_dir:
+                    runtime_dirs.append(script_dir)
+            except Exception:
+                pass
+            try:
+                cwd = os.getcwd()
+                if cwd:
+                    runtime_dirs.append(cwd)
+            except Exception:
+                pass
+            ordered_dirs = []
+            seen_dirs = set()
+            for d in runtime_dirs:
+                key = os.path.normcase(os.path.normpath(str(d)))
+                if key in seen_dirs:
+                    continue
+                seen_dirs.add(key)
+                ordered_dirs.append(str(d))
+            icon_names = []
+            try:
+                exe_name = os.path.splitext(
+                    os.path.basename(str(getattr(sys, "executable", "") or "").strip())
+                )[0]
+                if exe_name:
+                    icon_names.append(f"{exe_name}.ico")
+            except Exception:
+                pass
+            icon_names.extend(["MyCanvas.ico", "icon.ico"])
+            seen_paths = set()
+            for folder in ordered_dirs:
+                for name in icon_names:
+                    candidate = os.path.join(folder, name)
+                    key = os.path.normcase(os.path.normpath(candidate))
+                    if key in seen_paths:
+                        continue
+                    seen_paths.add(key)
+                    try:
+                        if os.path.isfile(candidate):
+                            icon = QIcon(candidate)
+                            if not icon.isNull():
+                                return icon
+                    except Exception:
+                        continue
+
+            try:
+                exe_path = str(getattr(sys, "executable", "") or "").strip()
+                if exe_path and os.path.isfile(exe_path):
+                    exe_icon = QFileIconProvider().icon(QFileInfo(exe_path))
+                    if not exe_icon.isNull():
+                        return exe_icon
+            except Exception:
+                pass
+
+        fallback = QIcon("MyCanvas.ico")
+        if not fallback.isNull():
+            return fallback
+        pixmap = QPixmap(16, 16)
+        pixmap.fill(Qt.GlobalColor.green)
+        return QIcon(pixmap)
+
+    def _ensure_windows_startup_shortcut(self, force=False):
+        if (not bool(force)) and (not self._startup_shortcut_enabled()):
+            return
         exe_path = self._frozen_executable_path()
         win32com_client = _get_win32com_client()
         if not exe_path or win32com_client is None:
             return
-        startup_dir = self._windows_startup_folder_path()
-        if not startup_dir:
+        shortcut_path = self._startup_shortcut_path(exe_path)
+        if not shortcut_path:
             return
+        startup_dir = os.path.dirname(shortcut_path)
         try:
             os.makedirs(startup_dir, exist_ok=True)
         except Exception:
             return
         exe_name = os.path.splitext(os.path.basename(exe_path))[0] or "MyCanvas"
-        shortcut_path = os.path.join(startup_dir, f"{exe_name}.lnk")
         icon_path = self._startup_shortcut_icon_path(exe_path)
+        marker = ""
+        try:
+            norm_exe = os.path.normcase(os.path.normpath(str(exe_path)))
+            marker = f"{norm_exe}|{int(os.path.getmtime(exe_path))}"
+        except Exception:
+            marker = str(exe_path)
+        marker_key = "startup_shortcut_marker_v1"
+        marker_settings = None
+        try:
+            marker_settings = QSettings("MyHomeApp", "MasterV3")
+            old_marker = str(marker_settings.value(marker_key, "") or "")
+            if old_marker == marker:
+                try:
+                    if os.path.isfile(shortcut_path):
+                        return
+                except Exception:
+                    return
+        except Exception:
+            marker_settings = None
         try:
             shell = win32com_client.Dispatch("WScript.Shell")
             shortcut = shell.CreateShortCut(shortcut_path)
@@ -8903,93 +9104,59 @@ class MasterController(QMainWindow):
             shortcut.IconLocation = f"{icon_path},0"
             shortcut.Description = f"{exe_name} auto start"
             shortcut.Save()
+            if marker_settings is not None:
+                try:
+                    marker_settings.setValue(marker_key, marker)
+                    marker_settings.sync()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _remove_windows_startup_shortcut(self):
+        shortcut_path = self._startup_shortcut_path(self._frozen_executable_path())
+        if shortcut_path:
+            try:
+                if os.path.isfile(shortcut_path):
+                    os.remove(shortcut_path)
+            except Exception:
+                pass
+        try:
+            self.master_settings.remove("startup_shortcut_marker_v1")
+            self.master_settings.sync()
         except Exception:
             pass
 
     def __init__(self):
         super().__init__()
         self.setWindowTitle("위젯 컨트롤러")
-
-        runtime_dirs = []
-        try:
-            meipass = str(getattr(sys, "_MEIPASS", "") or "").strip()
-            if meipass:
-                runtime_dirs.append(meipass)
-        except Exception:
-            pass
-        try:
-            exe_path = str(getattr(sys, "executable", "") or "").strip()
-            if exe_path:
-                runtime_dirs.append(os.path.dirname(os.path.abspath(exe_path)))
-        except Exception:
-            pass
-        try:
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            if script_dir:
-                runtime_dirs.append(script_dir)
-        except Exception:
-            pass
-        try:
-            cwd = os.getcwd()
-            if cwd:
-                runtime_dirs.append(cwd)
-        except Exception:
-            pass
-        ordered_dirs = []
-        seen_dirs = set()
-        for d in runtime_dirs:
-            key = os.path.normcase(os.path.normpath(str(d)))
-            if key in seen_dirs:
-                continue
-            seen_dirs.add(key)
-            ordered_dirs.append(str(d))
-        icon_names = []
-        try:
-            exe_name = os.path.splitext(os.path.basename(str(getattr(sys, "executable", "") or "").strip()))[0]
-            if exe_name:
-                icon_names.append(f"{exe_name}.ico")
-        except Exception:
-            pass
-        icon_names.extend(["MyCanvas.ico", "icon.ico"])
-        icon_candidates = []
-        seen_paths = set()
-        for folder in ordered_dirs:
-            for name in icon_names:
-                candidate = os.path.join(folder, name)
-                key = os.path.normcase(os.path.normpath(candidate))
-                if key in seen_paths:
-                    continue
-                seen_paths.add(key)
-                icon_candidates.append(candidate)
-        icon_path = next((p for p in icon_candidates if os.path.isfile(p)), "")
-        if icon_path:
-            self.app_icon = QIcon(icon_path)
-        else:
-            exe_icon = QIcon()
-            try:
-                exe_path = str(getattr(sys, "executable", "") or "").strip()
-                if exe_path and os.path.isfile(exe_path):
-                    exe_icon = QFileIconProvider().icon(QFileInfo(exe_path))
-            except Exception:
-                exe_icon = QIcon()
-            if not exe_icon.isNull():
-                self.app_icon = exe_icon
-            else:
-                pixmap = QPixmap(16, 16)
-                pixmap.fill(Qt.GlobalColor.green)
-                self.app_icon = QIcon(pixmap)
-        self._ensure_windows_startup_shortcut()
+        self._fast_startup_mode = bool(self._fast_startup_enabled())
+        self.app_icon = self._resolve_app_icon()
 
         self.setWindowIcon(QIcon())
         self.setFixedSize(476, 680)
         self.setObjectName("masterWindow")
         self.master_settings = QSettings("MyHomeApp", "MasterV3")
+        try:
+            master_sync_ms = int(os.environ.get("MYCANVAS_MASTER_SYNC_MS", "650") or "650")
+        except Exception:
+            master_sync_ms = 650
+        self._master_settings_sync_delay_ms = max(120, min(3000, int(master_sync_ms)))
+        self._master_settings_sync_timer = QTimer(self)
+        self._master_settings_sync_timer.setSingleShot(True)
+        self._master_settings_sync_timer.timeout.connect(self._flush_master_settings_sync)
         self.widgets = {}
         self._temp_group_ids = set()
         self._exec_window_claims = {}
         self.profile_rows = {}
+        self._profile_row_items = {}
+        self._add_widget_row_item = None
+        self._add_widget_row_widget = None
+        self._profiles_loaded_set_id = ""
         self._startup_queue = []
         self._startup_queue_active = False
+        self._startup_queue_mode = "default"
+        self._bulk_set_switch_active = False
         self._startup_queue_timer = QTimer(self)
         self._startup_queue_timer.setSingleShot(True)
         self._startup_queue_timer.timeout.connect(self._run_next_startup_item)
@@ -9037,6 +9204,15 @@ class MasterController(QMainWindow):
                 color: #edf3ff;
                 font-size: 12px;
                 font-weight: 700;
+            }
+            QLabel#gpuCfgHint {
+                color: #b8c9e6;
+                font-size: 10px;
+            }
+            QCheckBox#startupToggle {
+                color: #e4ecfb;
+                spacing: 6px;
+                min-height: 22px;
             }
             QToolButton#gpuCfgBtn {
                 min-width: 50px;
@@ -9373,6 +9549,15 @@ class MasterController(QMainWindow):
         self.gpu_resume_slider.setRange(0, 99)
         self.gpu_resume_slider.setSingleStep(1)
         gpu_cfg_panel_layout.addWidget(self.gpu_resume_slider)
+
+        self.startup_shortcut_cb = QCheckBox("시작프로그램 등록")
+        self.startup_shortcut_cb.setObjectName("startupToggle")
+        gpu_cfg_panel_layout.addWidget(self.startup_shortcut_cb)
+
+        self.startup_shortcut_hint_lbl = QLabel("")
+        self.startup_shortcut_hint_lbl.setObjectName("gpuCfgHint")
+        self.startup_shortcut_hint_lbl.setWordWrap(True)
+        gpu_cfg_panel_layout.addWidget(self.startup_shortcut_hint_lbl)
         self.gpu_cfg_panel.installEventFilter(self)
 
         content_row = QHBoxLayout()
@@ -9477,9 +9662,9 @@ class MasterController(QMainWindow):
         self._load_set_state()
         self._migrate_profile_run_flags()
         self._refresh_set_ui()
-
-        self.load_profiles()
-        QTimer.singleShot(100, self.restore_last_session)
+        if not bool(getattr(self, "_fast_startup_mode", False)):
+            self.load_profiles()
+        QTimer.singleShot(0, self.restore_last_session)
         app = QApplication.instance()
         if app:
             app.focusChanged.connect(self.handle_focus_change)
@@ -9508,11 +9693,15 @@ class MasterController(QMainWindow):
         self._sync_gpu_threshold_inputs()
         self.gpu_pause_slider.valueChanged.connect(self._on_gpu_threshold_inputs_changed)
         self.gpu_resume_slider.valueChanged.connect(self._on_gpu_threshold_inputs_changed)
+        self.startup_shortcut_cb.toggled.connect(self._on_startup_shortcut_toggled)
+        self._sync_startup_shortcut_toggle()
         self._gpu_guard_timer = QTimer(self)
         self._gpu_guard_timer.setInterval(1000)
         self._gpu_guard_timer.timeout.connect(self._poll_gpu_guard)
         self._gpu_guard_timer.start()
         QTimer.singleShot(0, self._apply_title_bar_theme)
+        if self.startup_shortcut_cb.isChecked():
+            QTimer.singleShot(1800, lambda: self._ensure_windows_startup_shortcut(force=True))
         
     @staticmethod
     def _as_list(value):
@@ -9746,6 +9935,37 @@ class MasterController(QMainWindow):
     def _load_set_state(self):
         profile_ids = self._all_profile_ids()
         raw_set_ids = self._normalize_ids(self._as_list(self.master_settings.value("set_ids", [])))
+        if bool(getattr(self, "_fast_startup_mode", False)) and _as_bool(
+            os.environ.get("MYCANVAS_MIN_VALIDATION", "1"),
+            True,
+        ):
+            if not raw_set_ids:
+                raw_set_ids = ["1"]
+            profile_set = set(profile_ids)
+            set_defs = {}
+            for sid in raw_set_ids:
+                name_raw = self.master_settings.value(self._set_key(sid, "name"), f"세트{sid}")
+                name = str(name_raw).strip() or f"세트{sid}"
+                raw_profiles = self._normalize_ids(
+                    self._as_list(self.master_settings.value(self._set_key(sid, "profiles"), []))
+                )
+                if profile_set:
+                    raw_profiles = [pid for pid in raw_profiles if pid in profile_set]
+                set_defs[sid] = {"name": name, "profiles": raw_profiles}
+            if not set_defs:
+                set_defs = {"1": {"name": "세트1", "profiles": list(profile_ids)}}
+                raw_set_ids = ["1"]
+            current_sid = str(self.master_settings.value("current_set_id", raw_set_ids[0]))
+            if current_sid not in set_defs:
+                current_sid = raw_set_ids[0]
+            applied_sid = str(self.master_settings.value("applied_set_id", current_sid))
+            if applied_sid not in set_defs:
+                applied_sid = current_sid
+            self._set_order = list(raw_set_ids)
+            self._set_defs = set_defs
+            self._current_set_id = current_sid
+            self._applied_set_id = applied_sid
+            return
         changed = False
 
         if not raw_set_ids:
@@ -9822,6 +10042,14 @@ class MasterController(QMainWindow):
             self.master_settings.sync()
 
     def _migrate_profile_run_flags(self):
+        if bool(getattr(self, "_fast_startup_mode", False)) and _as_bool(
+            os.environ.get("MYCANVAS_MIN_VALIDATION", "1"),
+            True,
+        ):
+            return
+        marker_key = "run_flag_migrated_v1"
+        if _as_bool(self.master_settings.value(marker_key, False), False):
+            return
         profile_ids = self._all_profile_ids()
         legacy_raw = self.master_settings.value("active_profiles", None)
         has_legacy = legacy_raw is not None
@@ -9831,7 +10059,8 @@ class MasterController(QMainWindow):
             if settings.value("run_enabled", None) is None:
                 should_run = (pid in legacy_active) if has_legacy else True
                 settings.setValue("run_enabled", bool(should_run))
-                settings.sync()
+        self.master_settings.setValue(marker_key, True)
+        self.master_settings.sync()
 
     def _current_set_profiles(self):
         sid = self.selected_set_id()
@@ -9888,6 +10117,8 @@ class MasterController(QMainWindow):
         return len(orphan_ids)
 
     def _profile_startup_media_kind(self, pid):
+        if _as_bool(os.environ.get("MYCANVAS_FAST_STARTUP", "1"), True):
+            return "other"
         spid = str(pid)
         settings = QSettings("MyHomeApp", f"Profile_{spid}")
         folder_path = str(settings.value("folder_path", "") or "").strip()
@@ -9914,25 +10145,32 @@ class MasterController(QMainWindow):
         return "other"
 
     @staticmethod
-    def _startup_delay_for_kind(kind):
+    def _startup_delay_for_kind(kind, mode="default"):
         key = str(kind or "").strip().lower()
+        fast = _as_bool(os.environ.get("MYCANVAS_FAST_STARTUP", "1"), True)
+        queue_mode = str(mode or "").strip().lower()
+        if queue_mode == "set_switch" and _as_bool(os.environ.get("MYCANVAS_FAST_SET_SWITCH", "1"), True):
+            if key == "video":
+                return 150 if fast else 240
+            if key == "gif":
+                return 90 if fast else 160
+            return 10 if fast else 30
         if key == "video":
-            return 450
+            return 200 if fast else 300
         if key == "gif":
-            return 320
-        return 80
+            return 130 if fast else 210
+        return 20 if fast else 50
 
     def _cancel_startup_queue(self):
         if hasattr(self, "_startup_queue_timer") and self._startup_queue_timer.isActive():
             self._startup_queue_timer.stop()
         self._startup_queue = []
         self._startup_queue_active = False
+        self._startup_queue_mode = "default"
 
-    def _build_set_startup_queue(self, set_id):
-        sid = str(set_id)
-        data = self._set_defs.get(sid, {})
+    def _build_profile_startup_queue(self, profile_ids):
         ordered = []
-        for order_idx, pid in enumerate(data.get("profiles", [])):
+        for order_idx, pid in enumerate(profile_ids):
             spid = str(pid)
             if not self._profile_run_enabled(spid):
                 continue
@@ -9948,14 +10186,21 @@ class MasterController(QMainWindow):
         ordered.sort(key=lambda x: (x[0], x[1]))
         return [(pid, name, kind) for _prio, _idx, pid, name, kind in ordered]
 
-    def _begin_startup_queue(self, entries):
+    def _build_set_startup_queue(self, set_id):
+        sid = str(set_id)
+        data = self._set_defs.get(sid, {})
+        return self._build_profile_startup_queue(data.get("profiles", []))
+
+    def _begin_startup_queue(self, entries, mode="default"):
         self._cancel_startup_queue()
+        self._startup_queue_mode = str(mode or "default").strip().lower() or "default"
         self._startup_queue = list(entries)
         self._startup_queue_active = bool(self._startup_queue)
         if not self._startup_queue_active:
             self.update_active_status()
             self.load_profiles()
             self._refresh_apply_button_state()
+            self._startup_queue_mode = "default"
             return
         self._run_next_startup_item()
 
@@ -9967,18 +10212,21 @@ class MasterController(QMainWindow):
             self.update_active_status()
             self.load_profiles()
             self._refresh_apply_button_state()
+            self._startup_queue_mode = "default"
             return
 
         pid, name, kind = self._startup_queue.pop(0)
         self._start_widget_instance(pid, name, startup_kind=kind)
-        self.update_active_status()
+        self.update_active_status(sync=False)
 
         if not self._startup_queue:
             self._startup_queue_active = False
+            self.update_active_status(sync=True)
             self.load_profiles()
             self._refresh_apply_button_state()
+            self._startup_queue_mode = "default"
             return
-        self._startup_queue_timer.start(self._startup_delay_for_kind(kind))
+        self._startup_queue_timer.start(self._startup_delay_for_kind(kind, self._startup_queue_mode))
 
     def _sync_all_widget_video_viewports(self):
         for widget in list(self.widgets.values()):
@@ -10028,21 +10276,31 @@ class MasterController(QMainWindow):
             )
         return True
 
-    def _stop_all_widgets_bulk(self):
-        self._cancel_startup_queue()
-        self.clear_temp_group(silent=True)
+    def _stop_widgets_bulk(self, target_ids):
+        target = {str(pid) for pid in target_ids}
+        if not target:
+            return False
         changed = False
-        for pid in list(self.widgets.keys()):
-            widget = self.widgets.get(pid)
-            if widget is None:
-                continue
-            widget.close()
-            widget.deleteLater()
-            self.widgets.pop(pid, None)
-            changed = True
+        self._bulk_set_switch_active = True
+        try:
+            for pid in list(target):
+                widget = self.widgets.get(pid)
+                if widget is None:
+                    continue
+                widget.close()
+                widget.deleteLater()
+                self.widgets.pop(pid, None)
+                changed = True
+        finally:
+            self._bulk_set_switch_active = False
         if changed:
             self._sync_all_widget_video_viewports()
         return changed
+
+    def _stop_all_widgets_bulk(self):
+        self._cancel_startup_queue()
+        self.clear_temp_group(silent=True)
+        return self._stop_widgets_bulk(list(self.widgets.keys()))
 
     def is_temp_group_member(self, pid):
         spid = str(pid)
@@ -10306,16 +10564,34 @@ class MasterController(QMainWindow):
             return
 
         self._cancel_startup_queue()
-        self._set_current_set_id(sid, persist=True)
+        previous_applied_sid = str(getattr(self, "_applied_set_id", "") or "")
+        self._set_current_set_id(sid, persist=False)
         self.clear_all_highlights()
         self.clear_temp_group(silent=True)
-        self._stop_all_widgets_bulk()
-        startup_entries = self._build_set_startup_queue(sid)
+        target_profiles = [
+            str(pid) for pid in self._set_defs.get(sid, {}).get("profiles", []) if self._profile_run_enabled(pid)
+        ]
+        current_running = {str(pid) for pid in self.widgets.keys()}
+        startup_entries = []
+
+        use_fast_switch = bool(self._fast_set_switch_enabled()) and sid != previous_applied_sid
+        if use_fast_switch:
+            target_set = set(target_profiles)
+            keep_ids = current_running.intersection(target_set)
+            stop_ids = current_running.difference(target_set)
+            self._stop_widgets_bulk(stop_ids)
+            start_ids = [pid for pid in target_profiles if pid not in keep_ids]
+            startup_entries = self._build_profile_startup_queue(start_ids)
+        else:
+            self._stop_all_widgets_bulk()
+            startup_entries = self._build_set_startup_queue(sid)
 
         self._applied_set_id = sid
+        self.master_settings.setValue("current_set_id", sid)
         self.master_settings.setValue("applied_set_id", sid)
-        self.master_settings.sync()
-        self._begin_startup_queue(startup_entries)
+        if not (bool(getattr(self, "_fast_startup_mode", False)) and bool(self._minimal_validation_enabled())):
+            self.master_settings.sync()
+        self._begin_startup_queue(startup_entries, mode="set_switch")
 
     def create_empty_set(self, name):
         clean_name = str(name).strip()
@@ -10626,6 +10902,48 @@ class MasterController(QMainWindow):
         self.raise_()
         self.activateWindow()
 
+    def _sync_startup_shortcut_toggle(self):
+        if not hasattr(self, "startup_shortcut_cb"):
+            return
+        available = bool(getattr(sys, "frozen", False))
+        enabled_pref = bool(self._startup_shortcut_enabled()) if available else False
+        prev = self.startup_shortcut_cb.blockSignals(True)
+        self.startup_shortcut_cb.setEnabled(available)
+        self.startup_shortcut_cb.setChecked(enabled_pref)
+        self.startup_shortcut_cb.blockSignals(prev)
+        if not hasattr(self, "startup_shortcut_hint_lbl"):
+            return
+        if not available:
+            self.startup_shortcut_hint_lbl.setText("개발 실행에서는 비활성화됩니다. exe에서만 동작합니다.")
+            return
+        shortcut_path = self._startup_shortcut_path(self._frozen_executable_path())
+        registered = False
+        if shortcut_path:
+            try:
+                registered = os.path.isfile(shortcut_path)
+            except Exception:
+                registered = False
+        self.startup_shortcut_hint_lbl.setText(
+            "현재 등록됨" if registered else "현재 미등록"
+        )
+
+    def _set_startup_shortcut_enabled(self, enabled, persist=True):
+        enable_flag = bool(enabled)
+        if persist:
+            self.master_settings.setValue(self._startup_shortcut_pref_key(), enable_flag)
+            self.master_settings.sync()
+        if enable_flag:
+            self._ensure_windows_startup_shortcut(force=True)
+        else:
+            self._remove_windows_startup_shortcut()
+        self._sync_startup_shortcut_toggle()
+
+    def _on_startup_shortcut_toggled(self, checked):
+        if not bool(getattr(sys, "frozen", False)):
+            self._sync_startup_shortcut_toggle()
+            return
+        self._set_startup_shortcut_enabled(bool(checked), persist=True)
+
     def _apply_gpu_guard_thresholds(self, high_pct, low_pct, persist=True):
         try:
             high = float(high_pct)
@@ -10905,10 +11223,14 @@ class MasterController(QMainWindow):
 
         self.list_widget.addItem(item)
         self.list_widget.setItemWidget(item, row)
+        self._add_widget_row_item = item
+        self._add_widget_row_widget = row
+        return item, row
 
-    def _add_profile_row(self, pid, name, is_running):
+    def _add_profile_row(self, pid, name, is_running, insert_index=None):
+        spid = str(pid)
         item = QListWidgetItem(self.list_widget)
-        item.setData(Qt.ItemDataRole.UserRole, str(pid))
+        item.setData(Qt.ItemDataRole.UserRole, spid)
 
         row = ProfileRowWidget()
         row.setObjectName("profileRow")
@@ -10953,10 +11275,15 @@ class MasterController(QMainWindow):
         btn_run.setEnabled(not is_running)
         btn_stop.setEnabled(is_running)
 
-        btn_run.clicked.connect(lambda _, p=str(pid), n=name: self.run_widget(p, n))
-        btn_stop.clicked.connect(lambda _, p=str(pid): self.stop_widget(p))
-        btn_set.clicked.connect(lambda _, p=str(pid): self.open_widget_settings(p))
-        btn_del.clicked.connect(lambda _, p=str(pid): self.delete_profile(p))
+        btn_run.clicked.connect(
+            lambda _, p=spid: self.run_widget(
+                p,
+                str(QSettings("MyHomeApp", f"Profile_{p}").value("name", "New 세팅")),
+            )
+        )
+        btn_stop.clicked.connect(lambda _, p=spid: self.stop_widget(p))
+        btn_set.clicked.connect(lambda _, p=spid: self.open_widget_settings(p))
+        btn_del.clicked.connect(lambda _, p=spid: self.delete_profile(p))
 
         action_wrap = QWidget()
         action_wrap_layout = QHBoxLayout(action_wrap)
@@ -10966,38 +11293,156 @@ class MasterController(QMainWindow):
             action_wrap_layout.addWidget(btn)
         action_wrap.setFixedWidth(4 * 28 + 3 * action_wrap_layout.spacing())
 
-        margin_width = row_layout.contentsMargins().left() + row_layout.contentsMargins().right()
-        status_width = 10 + row_layout.spacing()
-        action_width = action_wrap.width() + row_layout.spacing()
-        viewport_w = self.list_widget.viewport().width()
-        if viewport_w <= 0:
-            viewport_w = max(260, self.width() - 48)
-        name_max_width = max(84, viewport_w - margin_width - status_width - action_width - 12)
-        elided_name = QFontMetrics(lbl.font()).elidedText(
-            str(name), Qt.TextElideMode.ElideRight, name_max_width
-        )
-        lbl.setText(elided_name)
-
         row_layout.addWidget(status_dot, 0, Qt.AlignmentFlag.AlignVCenter)
         row_layout.addWidget(lbl, 1, Qt.AlignmentFlag.AlignVCenter)
         row_layout.addWidget(action_wrap, 0, Qt.AlignmentFlag.AlignVCenter)
         row.set_action_buttons(btns)
+        row._name_label = lbl
+        row._status_dot = status_dot
+        row._btn_run = btn_run
+        row._btn_stop = btn_stop
+        row._action_wrap = action_wrap
+        row._pid = spid
+        row._full_name = str(name)
 
         item.setSizeHint(QSize(1, 46))
-        self.list_widget.addItem(item)
+        if insert_index in (None, ""):
+            self.list_widget.addItem(item)
+        else:
+            try:
+                safe_index = max(0, min(int(insert_index), self.list_widget.count()))
+            except Exception:
+                safe_index = self.list_widget.count()
+            self.list_widget.insertItem(safe_index, item)
         self.list_widget.setItemWidget(item, row)
-        self.profile_rows[str(pid)] = row
+        self.profile_rows[spid] = row
+        self._profile_row_items[spid] = item
+        self._refresh_profile_row(spid, str(name), bool(is_running))
+        return row
 
-    def load_profiles(self):
+    def _profile_list_order(self):
+        ordered = []
+        for idx in range(self.list_widget.count()):
+            item = self.list_widget.item(idx)
+            if item is None:
+                continue
+            raw_pid = item.data(Qt.ItemDataRole.UserRole)
+            if raw_pid in (None, ""):
+                continue
+            ordered.append(str(raw_pid))
+        return ordered
+
+    def _elide_profile_row_name(self, row, name):
+        label = getattr(row, "_name_label", None)
+        if label is None:
+            return str(name)
+        layout = row.layout() if isinstance(row, QWidget) else None
+        if layout is None:
+            return str(name)
+        action_wrap = getattr(row, "_action_wrap", None)
+        margin_width = int(layout.contentsMargins().left()) + int(layout.contentsMargins().right())
+        status_width = 10 + int(layout.spacing())
+        action_width = (int(action_wrap.width()) if isinstance(action_wrap, QWidget) else 0) + int(layout.spacing())
+        viewport_w = int(self.list_widget.viewport().width())
+        if viewport_w <= 0:
+            viewport_w = max(260, int(self.width()) - 48)
+        name_max_width = max(84, int(viewport_w) - int(margin_width) - int(status_width) - int(action_width) - 12)
+        return QFontMetrics(label.font()).elidedText(
+            str(name), Qt.TextElideMode.ElideRight, int(name_max_width)
+        )
+
+    def _refresh_profile_row(self, pid, name, is_running):
+        spid = str(pid)
+        row = self.profile_rows.get(spid)
+        if not isinstance(row, ProfileRowWidget):
+            return False
+        label = getattr(row, "_name_label", None)
+        status_dot = getattr(row, "_status_dot", None)
+        btn_run = getattr(row, "_btn_run", None)
+        btn_stop = getattr(row, "_btn_stop", None)
+        if not isinstance(label, QLabel) or not isinstance(status_dot, QLabel):
+            return False
+        if not isinstance(btn_run, QPushButton) or not isinstance(btn_stop, QPushButton):
+            return False
+
+        full_name = str(name)
+        row._full_name = full_name
+        label.setToolTip(full_name)
+        label.setText(self._elide_profile_row_name(row, full_name))
+
+        running_prop = "true" if bool(is_running) else "false"
+        row_changed = False
+        if str(row.property("running") or "") != running_prop:
+            row.setProperty("running", running_prop)
+            row_changed = True
+        if str(status_dot.property("running") or "") != running_prop:
+            status_dot.setProperty("running", running_prop)
+            dot_style = status_dot.style()
+            if dot_style:
+                dot_style.unpolish(status_dot)
+                dot_style.polish(status_dot)
+            status_dot.update()
+        btn_run.setEnabled(not bool(is_running))
+        btn_stop.setEnabled(bool(is_running))
+        if row_changed:
+            row._refresh_style()
+        return True
+
+    def _can_incremental_profile_refresh(self, profile_ids):
+        desired = [str(pid) for pid in profile_ids]
+        if self._add_widget_row_item is None:
+            return False
+        if self.list_widget.count() != len(desired) + 1:
+            return False
+        top_item = self.list_widget.item(0)
+        if top_item is not self._add_widget_row_item:
+            return False
+        if self._profile_list_order() != desired:
+            return False
+        for pid in desired:
+            row = self.profile_rows.get(pid)
+            item = self._profile_row_items.get(pid)
+            if row is None or item is None:
+                return False
+            if self.list_widget.itemWidget(item) is not row:
+                return False
+        return True
+
+    def _rebuild_profile_rows(self, profile_ids):
         self.list_widget.clear()
         self.profile_rows = {}
+        self._profile_row_items = {}
+        self._add_widget_row_item = None
+        self._add_widget_row_widget = None
         self._add_widget_add_row()
-        p_ids = self._current_set_profiles()
-
-        for pid in p_ids:
+        for pid in profile_ids:
             name = QSettings("MyHomeApp", f"Profile_{pid}").value("name", "New 세팅")
             self._add_profile_row(pid, str(name), pid in self.widgets)
         self._set_hovered_profile_row(None)
+
+    def load_profiles(self, force_rebuild=False):
+        sid = str(self.selected_set_id() or "")
+        profile_ids = [str(pid) for pid in self._current_set_profiles()]
+        can_incremental = (
+            not bool(force_rebuild)
+            and sid == str(getattr(self, "_profiles_loaded_set_id", "") or "")
+            and self._can_incremental_profile_refresh(profile_ids)
+        )
+        if can_incremental:
+            for pid in profile_ids:
+                name = QSettings("MyHomeApp", f"Profile_{pid}").value("name", "New 세팅")
+                if not self._refresh_profile_row(pid, str(name), pid in self.widgets):
+                    can_incremental = False
+                    break
+            if can_incremental:
+                hovered_pid = getattr(self, "_hovered_profile_pid", None)
+                if hovered_pid is not None and str(hovered_pid) not in self.profile_rows:
+                    self._set_hovered_profile_row(None)
+                self._profiles_loaded_set_id = sid
+                return
+
+        self._rebuild_profile_rows(profile_ids)
+        self._profiles_loaded_set_id = sid
 
     def open_widget_settings(self, pid):
         pid = str(pid)
@@ -11543,6 +11988,7 @@ class MasterController(QMainWindow):
             self._cleanup_orphan_profiles()
         except Exception as e:
             print(f"[orphan-cleanup] failed: {e}")
+        self._flush_master_settings_sync()
         app = QApplication.instance()
         if app:
             app.quit()
@@ -11602,11 +12048,35 @@ class MasterController(QMainWindow):
                 QSettings("MyHomeApp", f"Profile_{pid}").setValue("name", new_name)
                 self.load_profiles()
 
-    def update_active_status(self):
+    def _schedule_master_settings_sync(self, delay_ms=None):
+        if not hasattr(self, "_master_settings_sync_timer"):
+            return
+        try:
+            delay = int(self._master_settings_sync_delay_ms if delay_ms is None else delay_ms)
+        except Exception:
+            delay = int(getattr(self, "_master_settings_sync_delay_ms", 650))
+        delay = max(0, delay)
+        if delay <= 0:
+            self._flush_master_settings_sync()
+            return
+        self._master_settings_sync_timer.start(delay)
+
+    def _flush_master_settings_sync(self):
+        if hasattr(self, "_master_settings_sync_timer") and self._master_settings_sync_timer.isActive():
+            self._master_settings_sync_timer.stop()
+        try:
+            self.master_settings.sync()
+        except Exception:
+            pass
+
+    def update_active_status(self, sync=True):
         """현재 켜져 있는 위젯들의 ID 목록을 저장"""
         active_ids = [str(pid) for pid in self.widgets.keys()]
         self.master_settings.setValue("active_profiles", active_ids)
-        self.master_settings.sync()
+        if bool(sync):
+            self._flush_master_settings_sync()
+        else:
+            self._schedule_master_settings_sync()
 
 
 if __name__ == "__main__":

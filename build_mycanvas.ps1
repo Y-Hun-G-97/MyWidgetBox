@@ -21,15 +21,24 @@ Test-FileOrThrow -PathValue ".\MyCanvas.ico" -Label "Icon"
 Test-FileOrThrow -PathValue "C:\ffmpeg\bin\ffmpeg.exe" -Label "ffmpeg"
 Test-FileOrThrow -PathValue "C:\ffmpeg\bin\ffprobe.exe" -Label "ffprobe"
 
-python -m PyInstaller --noconfirm --clean .\MyCanvas.spec
+Get-Process -Name "MyCanvas" -ErrorAction SilentlyContinue | ForEach-Object {
+    try { $_.CloseMainWindow() | Out-Null } catch {}
+}
+Start-Sleep -Milliseconds 450
+Get-Process -Name "MyCanvas" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 
-$exePath = Join-Path $root "dist\MyCanvas.exe"
+python -m PyInstaller --noconfirm --clean .\MyCanvas.spec
+if ($LASTEXITCODE -ne 0) {
+    throw "PyInstaller failed with exit code $LASTEXITCODE"
+}
+
+$exePath = Join-Path $root "dist\MyCanvas\MyCanvas.exe"
 if (-not (Test-Path -LiteralPath $exePath -PathType Leaf)) {
     throw "Build output missing: $exePath"
 }
 
 $iconSourcePath = Join-Path $root "MyCanvas.ico"
-$distIconPath = Join-Path $root "dist\icon.ico"
+$distIconPath = Join-Path $root "dist\MyCanvas\icon.ico"
 Copy-Item -LiteralPath $iconSourcePath -Destination $distIconPath -Force
 Write-Host "[build] copied icon sidecar: $distIconPath"
 
