@@ -15,10 +15,6 @@ from ctypes import wintypes
 import win32api
 import win32gui
 import win32con
-try:
-    import win32pdh
-except Exception:
-    win32pdh = None
 from PyQt6.QtWidgets import *
 from PyQt6.QtCore import *
 from PyQt6.QtGui import *
@@ -29,2130 +25,154 @@ except Exception:
     from PyQt6.QtMultimediaWidgets import QVideoWidget
     QGraphicsVideoItem = None
 
-from image_upscale_tool import (
-    find_ffmpeg_binary,
-    upscale_image_file,
+from mycanvas_core import (
+    GpuUsageSampler,
+    _as_bool,
+    _get_win32com_client,
+    _get_win32ui,
 )
-
-_win32ui_mod = None
-_win32ui_checked = False
-_win32com_client_mod = None
-_win32com_client_checked = False
-
-
-def _get_win32ui():
-    global _win32ui_mod, _win32ui_checked
-    if not bool(_win32ui_checked):
-        try:
-            import win32ui as _loaded_win32ui
-        except Exception:
-            _loaded_win32ui = None
-        _win32ui_mod = _loaded_win32ui
-        _win32ui_checked = True
-    return _win32ui_mod
-
-
-def _get_win32com_client():
-    global _win32com_client_mod, _win32com_client_checked
-    if not bool(_win32com_client_checked):
-        try:
-            import win32com.client as _loaded_win32com_client
-        except Exception:
-            _loaded_win32com_client = None
-        _win32com_client_mod = _loaded_win32com_client
-        _win32com_client_checked = True
-    return _win32com_client_mod
-
-def _as_bool(value, default=False):
-    if isinstance(value, bool):
-        return value
-    if value is None:
-        return default
-    if isinstance(value, (int, float)):
-        return bool(value)
-    if isinstance(value, str):
-        v = value.strip().lower()
-        if v in ("1", "true", "yes", "on"):
-            return True
-        if v in ("0", "false", "no", "off"):
-            return False
-    return default
-
-
-class GpuUsageSampler:
-    """Windows GPU utilization sampler via PDH counters."""
-
-    def __init__(self):
-        self._query = None
-        self._counters = []
-        self._last_refresh = 0.0
-        self._enabled = win32pdh is not None
-        if self._enabled:
-            self._rebuild_query()
-
-    def close(self):
-        if self._query is not None and win32pdh is not None:
-            try:
-                win32pdh.CloseQuery(self._query)
-            except Exception:
-                pass
-        self._query = None
-        self._counters = []
-
-    def _rebuild_query(self):
-        self.close()
-        if not self._enabled or win32pdh is None:
-            return
-        try:
-            query = win32pdh.OpenQuery()
-            _, instances = win32pdh.EnumObjectItems(
-                None, None, "GPU Engine", win32pdh.PERF_DETAIL_WIZARD
-            )
-            counters = []
-            for inst in instances:
-                if not inst or inst == "_Total":
-                    continue
-                try:
-                    path = win32pdh.MakeCounterPath(
-                        (None, "GPU Engine", inst, None, 0, "Utilization Percentage")
-                    )
-                    counters.append(win32pdh.AddCounter(query, path))
-                except Exception:
-                    continue
-            self._query = query
-            self._counters = counters
-            self._last_refresh = time.monotonic()
-            if self._query is not None:
-                try:
-                    win32pdh.CollectQueryData(self._query)
-                except Exception:
-                    pass
-        except Exception:
-            self.close()
-
-    def sample_pct(self):
-        if not self._enabled or win32pdh is None:
-            return None
-        if self._query is None or not self._counters:
-            self._rebuild_query()
-            if self._query is None or not self._counters:
-                return None
-        now = time.monotonic()
-        if now - self._last_refresh > 10.0:
-            self._rebuild_query()
-            if self._query is None or not self._counters:
-                return None
-
-        try:
-            win32pdh.CollectQueryData(self._query)
-        except Exception:
-            self._rebuild_query()
-            return None
-
-        total = 0.0
-        valid_count = 0
-        for counter in self._counters:
-            try:
-                v = win32pdh.GetFormattedCounterValue(counter, win32pdh.PDH_FMT_DOUBLE)[1]
-                if v > 0.0:
-                    total += float(v)
-                valid_count += 1
-            except Exception:
-                continue
-        if valid_count == 0:
-            return None
-        # Normalize to a familiar 0..100 scale.
-        return max(0.0, min(100.0, total))
-
-# Overlay widget for selection highlight
-class OverlayWidget(QWidget):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-
-        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-
-        self.setAttribute(Qt.WidgetAttribute.WA_NativeWindow)
-
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-
-        painter.fillRect(self.rect(), QColor(0, 0, 0, 150))
-
-
-class ResizeHandleOverlay(QWidget):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        # Big corner triangles; offset outward so rounded window mask clips the 90deg tip.
-        self.handle_size = 36
-        self.handle_margin = -12
-
-    def _handle_rects(self):
-        s = self.handle_size
-        m = self.handle_margin
-        w = max(0, self.width() - s - m)
-        h = max(0, self.height() - s - m)
-        return {
-            "tl": QRect(m, m, s, s),
-            "tr": QRect(w, m, s, s),
-            "bl": QRect(m, h, s, s),
-            "br": QRect(w, h, s, s),
-        }
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(255, 255, 255, 110))
-
-        s = int(self.handle_size)
-        o = max(0, -int(self.handle_margin))
-        w = max(0, self.width())
-        h = max(0, self.height())
-
-        # Top-left
-        painter.drawPolygon(
-            QPolygon([
-                QPoint(-o, -o),
-                QPoint(s, -o),
-                QPoint(-o, s),
-            ])
-        )
-        # Top-right
-        painter.drawPolygon(
-            QPolygon([
-                QPoint(w + o, -o),
-                QPoint(w - s, -o),
-                QPoint(w + o, s),
-            ])
-        )
-        # Bottom-left
-        painter.drawPolygon(
-            QPolygon([
-                QPoint(-o, h + o),
-                QPoint(-o, h - s),
-                QPoint(s, h + o),
-            ])
-        )
-        # Bottom-right
-        painter.drawPolygon(
-            QPolygon([
-                QPoint(w + o, h + o),
-                QPoint(w - s, h + o),
-                QPoint(w + o, h - s),
-            ])
-        )
-
-
-class DesktopIconCloneOverlay(QWidget):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self._items = []
-        self._font = self._resolve_icon_title_font()
-        self._flags = int(
-            Qt.AlignmentFlag.AlignHCenter
-            | Qt.AlignmentFlag.AlignTop
-            | Qt.TextFlag.TextWordWrap
-            | Qt.TextFlag.TextDontClip
-        )
-
-    @staticmethod
-    def _resolve_icon_title_font():
-        try:
-            class LOGFONTW(ctypes.Structure):
-                _fields_ = [
-                    ("lfHeight", ctypes.c_long),
-                    ("lfWidth", ctypes.c_long),
-                    ("lfEscapement", ctypes.c_long),
-                    ("lfOrientation", ctypes.c_long),
-                    ("lfWeight", ctypes.c_long),
-                    ("lfItalic", ctypes.c_ubyte),
-                    ("lfUnderline", ctypes.c_ubyte),
-                    ("lfStrikeOut", ctypes.c_ubyte),
-                    ("lfCharSet", ctypes.c_ubyte),
-                    ("lfOutPrecision", ctypes.c_ubyte),
-                    ("lfClipPrecision", ctypes.c_ubyte),
-                    ("lfQuality", ctypes.c_ubyte),
-                    ("lfPitchAndFamily", ctypes.c_ubyte),
-                    ("lfFaceName", ctypes.c_wchar * 32),
-                ]
-
-            spi_geticontitlelogfont = 0x001F
-            lf = LOGFONTW()
-            ok = ctypes.windll.user32.SystemParametersInfoW(
-                int(spi_geticontitlelogfont),
-                int(ctypes.sizeof(LOGFONTW)),
-                ctypes.byref(lf),
-                0,
-            )
-            if ok:
-                face = str(lf.lfFaceName or "").strip() or "Segoe UI"
-                font = QFont(face)
-                h = int(abs(int(lf.lfHeight or 0)))
-                if h > 0:
-                    font.setPixelSize(h)
-                weight = int(lf.lfWeight or 400)
-                if weight >= 600:
-                    font.setBold(True)
-                font.setItalic(bool(lf.lfItalic))
-                return font
-        except Exception:
-            pass
-        return QFont("Segoe UI", 9)
-
-    def set_items(self, items):
-        self._items = list(items or [])
-        self.update()
-
-    def _elided_icon_label_text(self, text, label_rect, selected=False, focused=False):
-        raw = str(text or "")
-        if not raw:
-            return ""
-        # Explorer-like behavior: idle desktop labels are visually constrained and elided.
-        if bool(selected) or bool(focused):
-            return raw
-        if not isinstance(label_rect, QRect):
-            return raw
-        max_width = max(10, int(label_rect.width()))
-        max_height = max(10, int(label_rect.height()))
-        fm = QFontMetrics(self._font)
-        line_h = max(1, int(fm.lineSpacing()))
-        max_lines = max(1, min(2, int(max_height // line_h)))
-        src = raw.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
-        if max_lines <= 1:
-            return str(fm.elidedText(src, Qt.TextElideMode.ElideRight, int(max_width)))
-        if fm.horizontalAdvance(src) <= int(max_width):
-            return src
-
-        lines = []
-        remaining = str(src)
-        for i in range(int(max_lines)):
-            if not remaining:
-                break
-            is_last = (i == int(max_lines - 1))
-            if is_last:
-                lines.append(str(fm.elidedText(remaining, Qt.TextElideMode.ElideRight, int(max_width))))
-                remaining = ""
-                break
-            if fm.horizontalAdvance(remaining) <= int(max_width):
-                lines.append(str(remaining))
-                remaining = ""
-                break
-            lo = 1
-            hi = len(remaining)
-            best = 1
-            while lo <= hi:
-                mid = (lo + hi) // 2
-                chunk = remaining[:mid]
-                if fm.horizontalAdvance(chunk) <= int(max_width):
-                    best = int(mid)
-                    lo = int(mid + 1)
-                else:
-                    hi = int(mid - 1)
-            consume = max(1, int(best))
-            # Prefer wrapping at whitespace so labels like "Google Chrome" break as
-            # "Google" + "Chrome" instead of splitting inside a word.
-            segment = str(remaining[:consume])
-            space_pos = segment.rfind(" ")
-            if space_pos > 0:
-                consume = int(space_pos + 1)
-                part = str(remaining[:space_pos]).rstrip()
-            else:
-                part = segment.rstrip()
-            if not part:
-                part = str(remaining[:max(1, consume)]).rstrip()
-            lines.append(part if part else remaining[:1])
-            remaining = str(remaining[max(1, consume):]).lstrip()
-
-        if not lines:
-            return str(fm.elidedText(src, Qt.TextElideMode.ElideRight, int(max_width)))
-        return "\n".join([ln for ln in lines if ln])
-
-    def paintEvent(self, event):
-        if not self._items:
-            return
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
-        painter.setFont(self._font)
-        for item in self._items:
-            if not isinstance(item, dict):
-                continue
-            edit_rect = item.get("edit_rect")
-            if isinstance(edit_rect, QRect):
-                if int(edit_rect.width()) > 0 and int(edit_rect.height()) > 0:
-                    painter.setPen(QPen(QColor(74, 130, 218, 230), 1))
-                    painter.setBrush(QColor(255, 255, 255, 230))
-                    painter.drawRoundedRect(QRectF(edit_rect), 2.0, 2.0)
-                    txt = str(item.get("edit_text", "") or "")
-                    if txt:
-                        painter.setPen(QColor(18, 18, 18, 255))
-                        painter.drawText(
-                            QRect(
-                                int(edit_rect.x()) + 4,
-                                int(edit_rect.y()) + 1,
-                                max(0, int(edit_rect.width()) - 6),
-                                max(0, int(edit_rect.height()) - 2),
-                            ),
-                            int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
-                            txt,
-                        )
-                continue
-
-            selected = bool(item.get("selected", False))
-            focused = bool(item.get("focused", False))
-            select_rect = item.get("select_rect")
-            if isinstance(select_rect, QRect) and int(select_rect.width()) > 0 and int(select_rect.height()) > 0:
-                if selected:
-                    painter.setPen(QPen(QColor(112, 170, 255, 230), 1))
-                    painter.setBrush(QColor(64, 136, 255, 96))
-                    painter.drawRoundedRect(QRectF(select_rect), 4.0, 4.0)
-                elif focused:
-                    painter.setPen(QPen(QColor(150, 192, 255, 170), 1, Qt.PenStyle.DotLine))
-                    painter.setBrush(Qt.BrushStyle.NoBrush)
-                    painter.drawRoundedRect(QRectF(select_rect), 4.0, 4.0)
-
-            icon_rect = item.get("icon_rect")
-            icon_pm = item.get("icon_pixmap")
-            if (
-                isinstance(icon_rect, QRect)
-                and isinstance(icon_pm, QPixmap)
-                and not icon_pm.isNull()
-                and int(icon_rect.width()) > 0
-                and int(icon_rect.height()) > 0
-            ):
-                target = QRect(icon_rect)
-                if int(target.width()) != int(icon_pm.width()) or int(target.height()) != int(icon_pm.height()):
-                    target = QRect(
-                        int(icon_rect.x() + ((int(icon_rect.width()) - int(icon_pm.width())) // 2)),
-                        int(icon_rect.y() + ((int(icon_rect.height()) - int(icon_pm.height())) // 2)),
-                        int(icon_pm.width()),
-                        int(icon_pm.height()),
-                    )
-                painter.drawPixmap(target, icon_pm)
-
-            label_rect = item.get("label_rect")
-            text = str(item.get("text", "") or "")
-            if isinstance(label_rect, QRect) and int(label_rect.width()) > 0 and int(label_rect.height()) > 0 and text:
-                # Explorer label bounds are tight; expand slightly to avoid glyph clipping.
-                draw_rect = QRect(label_rect).adjusted(-4, 0, 4, 2)
-                display_text = self._elided_icon_label_text(
-                    text,
-                    draw_rect,
-                    selected=bool(selected),
-                    focused=bool(focused),
-                )
-                if not display_text:
-                    continue
-                shadow_rect = QRect(draw_rect).translated(1, 1)
-                painter.setPen(QColor(0, 0, 0, 190))
-                painter.drawText(shadow_rect, self._flags, display_text)
-                painter.setPen(QColor(255, 255, 255, 255))
-                painter.drawText(draw_rect, self._flags, display_text)
-
-
-class DownwardComboBox(QComboBox):
-    def showPopup(self):
-        super().showPopup()
-        popup = self.view().window() if self.view() else None
-        if popup is None:
-            return
-        popup.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        popup.setStyleSheet("QFrame { background-color: #23344d; border: 1px solid #5977a4; }")
-        popup.setContentsMargins(0, 0, 0, 0)
-        popup.setMinimumWidth(max(self.width(), popup.width()))
-        popup.move(self.mapToGlobal(QPoint(0, self.height() + 3)))
-
-
-class ProfileRowWidget(QFrame):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._hovered = False
-        self._selected = False
-        self._action_buttons = []
-        self.setMouseTracking(True)
-
-    def set_action_buttons(self, buttons):
-        self._action_buttons = list(buttons)
-        self._apply_action_visibility()
-
-    def set_hovered(self, hovered):
-        self._hovered = bool(hovered)
-        self.setProperty("hovered", "true" if self._hovered else "false")
-        self._apply_action_visibility()
-        self._refresh_style()
-
-    def set_selected(self, selected):
-        self._selected = bool(selected)
-        self.setProperty("selected", "true" if self._selected else "false")
-        self._apply_action_visibility()
-        self._refresh_style()
-
-    def enterEvent(self, event):
-        self.set_hovered(True)
-        super().enterEvent(event)
-
-    def leaveEvent(self, event):
-        self.set_hovered(False)
-        super().leaveEvent(event)
-
-    def _apply_action_visibility(self):
-        visible = self._hovered or self._selected
-        for btn in self._action_buttons:
-            btn.setVisible(visible)
-
-    def _refresh_style(self):
-        style = self.style()
-        if style:
-            style.unpolish(self)
-            style.polish(self)
-        self.update()
-
-
-class ProfileListWidget(QListWidget):
-    orderChanged = pyqtSignal(list)
-
-    def dropEvent(self, event):
-        super().dropEvent(event)
-        ordered_ids = []
-        for idx in range(self.count()):
-            item = self.item(idx)
-            if item is None:
-                continue
-            raw_pid = item.data(Qt.ItemDataRole.UserRole)
-            if raw_pid in (None, ""):
-                continue
-            ordered_ids.append(str(raw_pid))
-        self.orderChanged.emit(ordered_ids)
-
-
-class SetNameLabel(QLabel):
-    renameRequested = pyqtSignal(str)
-
-    def __init__(self, set_id, text="", parent=None):
-        super().__init__(text, parent)
-        self._set_id = str(set_id)
-
-    def mouseDoubleClickEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.renameRequested.emit(self._set_id)
-            event.accept()
-            return
-        super().mouseDoubleClickEvent(event)
-
-
-class MediaToolWorker(QThread):
-    succeeded = pyqtSignal(dict)
-    failed = pyqtSignal(str)
-
-    def __init__(self, func, kwargs=None, parent=None):
-        super().__init__(parent)
-        self._func = func
-        self._kwargs = dict(kwargs or {})
-
-    def run(self):
-        try:
-            result = self._func(**self._kwargs)
-            if not isinstance(result, dict):
-                result = {}
-            self.succeeded.emit(result)
-        except Exception as exc:
-            self.failed.emit(str(exc))
-
-
-class ImageUpscaleDialog(QDialog):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setObjectName("imageToolDialog")
-        self.setWindowTitle("이미지 업스케일")
-        self.setWindowIcon(QIcon())
-        self.resize(760, 520)
-        self.setMinimumSize(700, 500)
-        self._worker = None
-        self._worker_action = ""
-        self._ffmpeg_path = ""
-        self._title_bar_themed = False
-        self.setStyleSheet("""
-            QDialog#imageToolDialog {
-                background-color: #1d2a3d;
-            }
-            QFrame#toolCard {
-                background-color: #23344d;
-                border: 1px solid #3f567a;
-                border-radius: 12px;
-            }
-            QLabel {
-                color: #e6eefc;
-                font-size: 12px;
-            }
-            QLabel#toolTitle {
-                color: #eef3ff;
-                font-size: 18px;
-                font-weight: 700;
-            }
-            QLabel#toolSubtitle {
-                color: #c2d1ea;
-                font-size: 12px;
-            }
-            QLabel#sectionTitle {
-                color: #a7c1eb;
-                font-size: 13px;
-                font-weight: 700;
-            }
-            QLabel#statusLabel {
-                color: #d8e6ff;
-                font-size: 12px;
-                font-weight: 600;
-            }
-            QLineEdit, QSpinBox, QComboBox {
-                min-height: 32px;
-                color: #edf3ff;
-                background-color: #35507a;
-                border: 1px solid #5977a4;
-                border-radius: 9px;
-                padding: 2px 10px;
-            }
-            QLineEdit:focus, QSpinBox:focus, QComboBox:focus {
-                border: 1px solid #77a3f2;
-            }
-            QPlainTextEdit {
-                color: #e6eefc;
-                background-color: #1a2740;
-                border: 1px solid #4a6288;
-                border-radius: 10px;
-                padding: 8px;
-                font-family: Consolas, 'Courier New', monospace;
-                font-size: 12px;
-            }
-            QPushButton {
-                min-height: 32px;
-                border-radius: 9px;
-                font-size: 12px;
-                font-weight: 600;
-                color: #e8efff;
-                background-color: #35507a;
-                border: 1px solid #5977a4;
-                padding: 0 10px;
-            }
-            QPushButton:hover {
-                background-color: #3f5e8e;
-            }
-            QPushButton#primaryBtn {
-                background-color: #4f79de;
-                border: 1px solid #7e9eeb;
-            }
-            QPushButton#primaryBtn:hover {
-                background-color: #5d86e6;
-            }
-            QCheckBox {
-                color: #e6eefc;
-                spacing: 6px;
-                min-height: 24px;
-            }
-        """)
-
-        root = QVBoxLayout(self)
-        root.setContentsMargins(14, 14, 14, 14)
-        root.setSpacing(10)
-
-        header = QFrame(self)
-        header_layout = QVBoxLayout(header)
-        header_layout.setContentsMargins(10, 6, 10, 6)
-        header_layout.setSpacing(2)
-        title = QLabel("이미지 업스케일")
-        title.setObjectName("toolTitle")
-        subtitle = QLabel("ffmpeg 기반 업스케일 기능만 제공합니다.")
-        subtitle.setObjectName("toolSubtitle")
-        subtitle.setWordWrap(True)
-        header_layout.addWidget(title)
-        header_layout.addWidget(subtitle)
-        root.addWidget(header)
-
-        card = QFrame(self)
-        card.setObjectName("toolCard")
-        card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(12, 12, 12, 12)
-        card_layout.setSpacing(10)
-        root.addWidget(card, 1)
-
-        ffmpeg_row = QHBoxLayout()
-        ffmpeg_row.setContentsMargins(0, 0, 0, 0)
-        ffmpeg_row.setSpacing(8)
-        ffmpeg_row.addWidget(QLabel("ffmpeg:"), 0)
-        self.ffmpeg_path_label = QLabel("검색 중...")
-        self.ffmpeg_path_label.setWordWrap(True)
-        self.ffmpeg_refresh_btn = QPushButton("재검색")
-        self.ffmpeg_refresh_btn.setFixedWidth(86)
-        ffmpeg_row.addWidget(self.ffmpeg_path_label, 1)
-        ffmpeg_row.addWidget(self.ffmpeg_refresh_btn, 0)
-        card_layout.addLayout(ffmpeg_row)
-
-        src_form = QFormLayout()
-        src_form.setContentsMargins(0, 0, 0, 0)
-        src_form.setHorizontalSpacing(10)
-        src_form.setVerticalSpacing(8)
-        self.src_path_edit = QLineEdit()
-        self.src_path_edit.setPlaceholderText("입력 이미지 선택")
-        src_btn = QPushButton("이미지 선택")
-        src_btn.setFixedWidth(100)
-        src_row = QHBoxLayout()
-        src_row.setContentsMargins(0, 0, 0, 0)
-        src_row.setSpacing(6)
-        src_row.addWidget(self.src_path_edit, 1)
-        src_row.addWidget(src_btn, 0)
-        src_widget = QWidget()
-        src_widget.setLayout(src_row)
-        src_form.addRow("입력 이미지:", src_widget)
-        card_layout.addLayout(src_form)
-
-        up_title = QLabel("업스케일 옵션")
-        up_title.setObjectName("sectionTitle")
-        card_layout.addWidget(up_title)
-
-        up_form = QFormLayout()
-        up_form.setContentsMargins(0, 0, 0, 0)
-        up_form.setHorizontalSpacing(10)
-        up_form.setVerticalSpacing(8)
-        self.up_out_edit = QLineEdit()
-        self.up_out_edit.setPlaceholderText("업스케일 결과 이미지 경로")
-        up_out_btn = QPushButton("저장 경로")
-        up_out_btn.setFixedWidth(100)
-        up_out_row = QHBoxLayout()
-        up_out_row.setContentsMargins(0, 0, 0, 0)
-        up_out_row.setSpacing(6)
-        up_out_row.addWidget(self.up_out_edit, 1)
-        up_out_row.addWidget(up_out_btn, 0)
-        up_out_widget = QWidget()
-        up_out_widget.setLayout(up_out_row)
-        up_form.addRow("출력 이미지:", up_out_widget)
-
-        self.up_scale_combo = DownwardComboBox()
-        self.up_scale_combo.addItem("1.5x", 1.5)
-        self.up_scale_combo.addItem("2x (추천)", 2.0)
-        self.up_scale_combo.addItem("4x", 4.0)
-        self.up_scale_combo.setCurrentIndex(1)
-        self.up_scale_combo.setView(QListView())
-        self.up_scale_combo.view().setFrameShape(QFrame.Shape.NoFrame)
-        self.up_scale_combo.setStyle(QStyleFactory.create("Fusion"))
-        up_form.addRow("배율:", self.up_scale_combo)
-
-        self.up_sharpen_cb = QCheckBox("샤픈 강화 (윤곽 선명도)")
-        self.up_sharpen_cb.setChecked(True)
-        up_form.addRow("추가 옵션:", self.up_sharpen_cb)
-
-        self.up_run_btn = QPushButton("업스케일 실행")
-        self.up_run_btn.setObjectName("primaryBtn")
-        up_form.addRow("", self.up_run_btn)
-        card_layout.addLayout(up_form)
-
-        self.status_label = QLabel("대기 중")
-        self.status_label.setObjectName("statusLabel")
-        card_layout.addWidget(self.status_label)
-
-        self.log_edit = QPlainTextEdit()
-        self.log_edit.setReadOnly(True)
-        self.log_edit.setMinimumHeight(150)
-        card_layout.addWidget(self.log_edit, 1)
-
-        bottom = QHBoxLayout()
-        bottom.setContentsMargins(0, 0, 0, 0)
-        bottom.setSpacing(8)
-        self.close_btn = QPushButton("닫기")
-        bottom.addStretch(1)
-        bottom.addWidget(self.close_btn)
-        card_layout.addLayout(bottom)
-
-        src_btn.clicked.connect(self._pick_src_image)
-        up_out_btn.clicked.connect(self._pick_upscale_output)
-        self.ffmpeg_refresh_btn.clicked.connect(self._refresh_ffmpeg_path)
-        self.up_run_btn.clicked.connect(self._run_upscale)
-        self.close_btn.clicked.connect(self.reject)
-
-        if parent is not None and hasattr(parent, "app_icon"):
-            try:
-                self.setWindowIcon(parent.app_icon)
-            except Exception:
-                pass
-        QTimer.singleShot(0, self._refresh_ffmpeg_path)
-        QTimer.singleShot(0, self._apply_title_bar_theme)
-
-    def _append_log(self, text):
-        line = str(text or "").strip()
-        if not line:
-            return
-        self.log_edit.appendPlainText(f"[{time.strftime('%H:%M:%S')}] {line}")
-
-    def _show_message(self, icon, title, text):
-        box = QMessageBox(self)
-        box.setIcon(icon)
-        box.setWindowTitle(str(title or "알림"))
-        msg = str(text or "").strip()
-        if not msg:
-            msg = "상세 메시지가 비어 있습니다."
-        box.setText(msg)
-        box.setStandardButtons(QMessageBox.StandardButton.Ok)
-        box.setDefaultButton(QMessageBox.StandardButton.Ok)
-        box.setStyleSheet(
-            """
-            QMessageBox {
-                background-color: #1d2a3d;
-            }
-            QMessageBox QLabel {
-                color: #eef3ff;
-                min-width: 420px;
-                font-size: 12px;
-            }
-            QMessageBox QPushButton {
-                min-width: 88px;
-                min-height: 30px;
-                border-radius: 8px;
-                font-size: 12px;
-                font-weight: 600;
-                color: #e8efff;
-                background-color: #35507a;
-                border: 1px solid #5977a4;
-                padding: 0 10px;
-            }
-            QMessageBox QPushButton:hover {
-                background-color: #3f5e8e;
-            }
-            """
-        )
-        try:
-            parent = self.parent()
-            if parent is not None and hasattr(parent, "_apply_window_title_bar_theme"):
-                parent._apply_window_title_bar_theme(box)
-            else:
-                MasterController._apply_window_title_bar_theme(box)
-        except Exception:
-            pass
-        box.exec()
-
-    def _set_busy(self, busy, status_text=""):
-        state = bool(busy)
-        controls = [
-            self.src_path_edit,
-            self.up_out_edit,
-            self.up_scale_combo,
-            self.up_sharpen_cb,
-            self.ffmpeg_refresh_btn,
-            self.up_run_btn,
-            self.close_btn,
-        ]
-        for w in controls:
-            w.setEnabled(not state)
-        if status_text:
-            self.status_label.setText(str(status_text))
-
-    def _refresh_ffmpeg_path(self):
-        self._ffmpeg_path = str(find_ffmpeg_binary() or "")
-        if self._ffmpeg_path:
-            self.ffmpeg_path_label.setText(self._ffmpeg_path)
-            self._append_log(f"ffmpeg 확인: {self._ffmpeg_path}")
-        else:
-            self.ffmpeg_path_label.setText("미발견")
-            self._append_log("ffmpeg를 찾지 못했습니다.")
-
-    def _pick_src_image(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "입력 이미지 선택",
-            "",
-            "이미지 파일 (*.png *.jpg *.jpeg *.bmp *.webp *.tif *.tiff);;모든 파일 (*)",
-        )
-        if not path:
-            return
-        self.src_path_edit.setText(path)
-        root, ext = os.path.splitext(path)
-        ext = ext if ext else ".png"
-        self.up_out_edit.setText(f"{root}_upscaled{ext}")
-
-    def _pick_upscale_output(self):
-        src = str(self.src_path_edit.text() or "").strip()
-        base_dir = os.path.dirname(src) if src else ""
-        default_name = "upscaled.png"
-        if src:
-            src_root, src_ext = os.path.splitext(os.path.basename(src))
-            default_name = f"{src_root}_upscaled{src_ext if src_ext else '.png'}"
-        path, _ = QFileDialog.getSaveFileName(
-            self,
-            "업스케일 출력 경로",
-            os.path.join(base_dir, default_name),
-            "PNG (*.png);;JPEG (*.jpg *.jpeg);;WEBP (*.webp);;BMP (*.bmp);;모든 파일 (*)",
-        )
-        if path:
-            self.up_out_edit.setText(path)
-
-    def _start_worker(self, action_name, func, kwargs, require_ffmpeg=False):
-        if self._worker is not None and self._worker.isRunning():
-            self._show_message(QMessageBox.Icon.Warning, "작업 중", "이미 작업이 진행 중입니다.")
-            return
-        payload = dict(kwargs or {})
-        if bool(require_ffmpeg):
-            if not self._ffmpeg_path:
-                self._refresh_ffmpeg_path()
-            if not self._ffmpeg_path:
-                self._show_message(
-                    QMessageBox.Icon.Critical,
-                    "ffmpeg 미발견",
-                    "ffmpeg를 찾지 못했습니다.\nffmpeg.exe를 MyCanvas.exe 폴더 또는 PATH에 배치하세요.",
-                )
-                return
-            payload["ffmpeg_path"] = self._ffmpeg_path
-        self._worker_action = str(action_name)
-        self._worker = MediaToolWorker(func, payload, self)
-        self._worker.succeeded.connect(self._on_worker_success)
-        self._worker.failed.connect(self._on_worker_failed)
-        self._worker.finished.connect(self._on_worker_finished)
-        self._set_busy(True, f"{self._worker_action} 실행 중...")
-        self._append_log(f"{self._worker_action} 시작")
-        self._worker.start()
-
-    def _run_upscale(self):
-        src = str(self.src_path_edit.text() or "").strip()
-        out = str(self.up_out_edit.text() or "").strip()
-        if not src:
-            self._show_message(QMessageBox.Icon.Warning, "입력 필요", "입력 이미지를 선택하세요.")
-            return
-        if not out:
-            self._show_message(QMessageBox.Icon.Warning, "출력 필요", "업스케일 출력 경로를 지정하세요.")
-            return
-        self._start_worker(
-            "이미지 업스케일",
-            upscale_image_file,
-            {
-                "input_path": src,
-                "output_path": out,
-                "scale": float(self.up_scale_combo.currentData() or 2.0),
-                "sharpen": bool(self.up_sharpen_cb.isChecked()),
-            },
-            require_ffmpeg=True,
-        )
-
-    def _on_worker_success(self, result):
-        out = ""
-        if isinstance(result, dict):
-            out = str(result.get("output_path", "") or "").strip()
-        if out:
-            self._append_log(f"{self._worker_action} 완료: {out}")
-        else:
-            self._append_log(f"{self._worker_action} 완료")
-        self.status_label.setText(f"{self._worker_action} 완료")
-        self._show_message(QMessageBox.Icon.Information, "완료", f"{self._worker_action}이 완료되었습니다.")
-
-    def _on_worker_failed(self, message):
-        raw = str(message or "").strip()
-        if not raw:
-            raw = "알 수 없는 오류"
-        self._append_log(f"{self._worker_action} 실패: {raw}")
-        self.status_label.setText(f"{self._worker_action} 실패")
-        self._show_message(QMessageBox.Icon.Critical, "실패", raw)
-
-    def _on_worker_finished(self):
-        self._set_busy(False)
-        if self._worker is not None:
-            self._worker.deleteLater()
-        self._worker = None
-        if self.status_label.text().strip().endswith("실행 중..."):
-            self.status_label.setText("대기 중")
-
-    def _apply_title_bar_theme(self):
-        if self._title_bar_themed:
-            return
-        self._title_bar_themed = True
-        parent = self.parent()
-        if parent is not None and hasattr(parent, "_apply_window_title_bar_theme"):
-            try:
-                parent._apply_window_title_bar_theme(self)
-                return
-            except Exception:
-                pass
-        try:
-            MasterController._apply_window_title_bar_theme(self)
-        except Exception:
-            pass
-
-    def closeEvent(self, event):
-        if self._worker is not None and self._worker.isRunning():
-            self._show_message(QMessageBox.Icon.Warning, "작업 중", "현재 작업이 끝난 뒤 창을 닫아주세요.")
-            event.ignore()
-            return
-        super().closeEvent(event)
-class SetManagerDialog(QDialog):
-    def __init__(self, master, parent=None):
-        super().__init__(parent if parent is not None else master)
-        self.master = master
-        self._title_bar_themed = False
-        self.setObjectName("setManagerDialog")
-        self.setWindowTitle("세트 관리")
-        self.setWindowIcon(QIcon())
-        self.setFixedSize(360, 198)
-        self.setStyleSheet("""
-            QDialog#setManagerDialog { background-color: #1f2f46; }
-            QFrame#setCard {
-                background-color: #23344d;
-                border: 1px solid #3f567a;
-                border-radius: 12px;
-            }
-            QLabel#setTitle {
-                color: #eef3ff;
-                font-size: 15px;
-                font-weight: 700;
-            }
-            QLabel {
-                color: #d7e4fb;
-                font-size: 12px;
-            }
-            QPushButton {
-                min-height: 30px;
-                border-radius: 8px;
-                font-size: 12px;
-                font-weight: 600;
-                padding: 0 10px;
-                color: #e6efff;
-                background-color: #2a3f60;
-                border: 1px solid #4a6591;
-            }
-            QPushButton:hover { background-color: #35527d; }
-            QPushButton#copyBtn {
-                background-color: #2b5664;
-                border: 1px solid #41798b;
-            }
-            QPushButton#copyBtn:hover { background-color: #346676; }
-            QPushButton#deleteBtn {
-                background-color: #6e4048;
-                border: 1px solid #955761;
-                color: #ffe4e9;
-            }
-            QPushButton#deleteBtn:hover { background-color: #7b4a54; }
-        """)
-
-        root = QVBoxLayout(self)
-        root.setContentsMargins(12, 12, 12, 12)
-        root.setSpacing(8)
-
-        card = QFrame()
-        card.setObjectName("setCard")
-        card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(12, 10, 12, 12)
-        card_layout.setSpacing(8)
-
-        title = QLabel("세트 관리")
-        title.setObjectName("setTitle")
-        card_layout.addWidget(title)
-
-        self.info_label = QLabel("")
-        card_layout.addWidget(self.info_label)
-
-        row1 = QHBoxLayout()
-        row1.setSpacing(6)
-        self.copy_btn = QPushButton("다른 세트 복사")
-        self.copy_btn.setObjectName("copyBtn")
-        self.delete_btn = QPushButton("현재 세트 삭제")
-        self.delete_btn.setObjectName("deleteBtn")
-        row1.addWidget(self.copy_btn)
-        row1.addWidget(self.delete_btn)
-        card_layout.addLayout(row1)
-
-        row2 = QHBoxLayout()
-        row2.setSpacing(6)
-        close_btn = QPushButton("닫기")
-        row2.addStretch()
-        row2.addWidget(close_btn)
-        card_layout.addLayout(row2)
-
-        root.addWidget(card)
-
-        self.copy_btn.clicked.connect(self._copy_set)
-        self.delete_btn.clicked.connect(self._delete_set)
-        close_btn.clicked.connect(self.accept)
-
-        self._refresh_info()
-
-    def showEvent(self, event):
-        if not self._title_bar_themed:
-            self._title_bar_themed = True
-            try:
-                self.master._apply_window_title_bar_theme(self)
-            except Exception:
-                pass
-        super().showEvent(event)
-
-    def _refresh_info(self):
-        sid = self.master.selected_set_id()
-        data = self.master._set_defs.get(sid, {})
-        name = str(data.get("name", f"세트{sid}" if sid else "세트"))
-        count = len(data.get("profiles", []))
-        self.info_label.setText(f"현재 세트: {name}  |  위젯 {count}개")
-        self.delete_btn.setEnabled(len(self.master._set_order) > 1)
-
-    def _copy_set(self):
-        items = self.master.get_set_items()
-        if not items:
-            return
-        target_sid = self.master.selected_set_id()
-        choices = [(str(sid), str(name)) for sid, name, _ in items if str(sid) != str(target_sid)]
-        labels = [f"{name} ({sid})" for sid, name in choices]
-        if not labels:
-            QMessageBox.information(self, "세트 복사", "복사할 다른 세트가 없습니다.")
-            return
-        sid_by_label = {labels[i]: choices[i][0] for i in range(len(choices))}
-        source_label, ok = self.master._prompt_choice_dialog(
-            "세트 복사", "현재 세트로 가져올 원본 세트:", labels
-        )
-        if not ok or not source_label:
-            return
-        source_sid = sid_by_label.get(source_label, "")
-        if self.master.copy_profiles_from_set(source_sid, target_sid):
-            self.master.load_profiles()
-            self._refresh_info()
-            self.accept()
-
-    def _delete_set(self):
-        sid = self.master.selected_set_id()
-        if not sid:
-            return
-        if self.master.delete_set(sid):
-            self._refresh_info()
-            self.accept()
-
-
-class SettingsDialog(QDialog):
-    def __init__(self, parent=None, settings_data=None):
-        super().__init__(parent)
-        self.setObjectName("settingsDialog")
-        self.setWindowTitle("위젯 상세 설정")
-        self.setWindowIcon(QIcon())
-        self._title_bar_themed = False
-        self.resize(760, 680)
-        self.setFixedWidth(760)
-        self.setStyleSheet("""
-            QDialog#settingsDialog {
-                background-color: #1d2a3d;
-            }
-            QFrame#settingsHeader {
-                background-color: transparent;
-                border: none;
-                border-radius: 0px;
-            }
-            QLabel#settingsTitle {
-                color: #eef3ff;
-                font-size: 18px;
-                font-weight: 700;
-            }
-            QLabel#settingsSubtitle {
-                color: #c2d1ea;
-                font-size: 12px;
-            }
-            QLabel#settingsSectionTitle {
-                color: #a7c1eb;
-                font-size: 13px;
-                font-weight: 700;
-                letter-spacing: 0.4px;
-            }
-            QFrame#settingsSectionLine {
-                background-color: #3f567a;
-                border: none;
-                min-height: 1px;
-                max-height: 1px;
-            }
-            QFrame#settingsCard {
-                background-color: #23344d;
-                border: 1px solid #3f567a;
-                border-radius: 12px;
-            }
-            QFrame#settingsRightPanel {
-                background-color: transparent;
-                border: none;
-            }
-            QLabel {
-                color: #e6eefc;
-                font-size: 12px;
-            }
-            QLabel#pathLabel {
-                color: #d0dcf1;
-                padding: 2px 0 6px 0;
-            }
-            QSpinBox, QComboBox {
-                min-height: 34px;
-                color: #edf3ff;
-                background-color: #35507a;
-                border: 1px solid #5977a4;
-                border-radius: 9px;
-                padding: 2px 10px;
-            }
-            QSpinBox:focus, QComboBox:focus {
-                border: 1px solid #77a3f2;
-            }
-            QComboBox {
-                padding-right: 18px;
-            }
-            QComboBox::drop-down {
-                subcontrol-origin: padding;
-                subcontrol-position: top right;
-                width: 18px;
-                border: none;
-                background: transparent;
-            }
-            QComboBox QAbstractItemView {
-                background-color: #23344d;
-                color: #eef4ff;
-                border: none;
-                selection-background-color: #3f5e8e;
-                selection-color: #ffffff;
-                outline: 0;
-                font-size: 13px;
-            }
-            QComboBox QAbstractItemView::item {
-                min-height: 30px;
-                padding: 5px 8px;
-            }
-            QSlider::groove:horizontal {
-                height: 6px;
-                background: #435a7d;
-                border-radius: 3px;
-            }
-            QSlider::handle:horizontal {
-                width: 14px;
-                margin: -5px 0;
-                border-radius: 7px;
-                background: #8eb8ff;
-            }
-            QPushButton {
-                min-height: 34px;
-                border-radius: 9px;
-                font-size: 12px;
-                font-weight: 600;
-                color: #e8efff;
-                background-color: #35507a;
-                border: 1px solid #5977a4;
-                padding: 0 12px;
-            }
-            QPushButton:hover {
-                background-color: #3f5e8e;
-            }
-            QPushButton:pressed {
-                background-color: #324f79;
-            }
-            QPushButton#primaryBtn {
-                background-color: #4f79de;
-                border: 1px solid #7e9eeb;
-            }
-            QPushButton#primaryBtn:hover {
-                background-color: #5d86e6;
-            }
-            QPushButton#masterBtn {
-                background-color: #35507a;
-                border: 1px solid #5977a4;
-                min-height: 30px;
-            }
-            QPushButton#masterBtn:hover {
-                background-color: #3f5e8e;
-            }
-            QCheckBox {
-                color: #e6eefc;
-                spacing: 7px;
-                min-height: 28px;
-            }
-            QToolButton#shortcutToggle {
-                color: #e8efff;
-                background-color: #35507a;
-                border: 1px solid #5977a4;
-                border-radius: 9px;
-                padding: 6px 12px;
-                text-align: left;
-                font-weight: 600;
-            }
-            QToolButton#shortcutToggle:hover {
-                background-color: #3f5e8e;
-            }
-            QToolButton#folderHelpBtn {
-                color: #e8efff;
-                background: transparent;
-                border: none;
-                padding: 0px;
-                font-weight: 700;
-            }
-            QToolButton#folderHelpBtn:hover {
-                background: transparent;
-            }
-            QToolButton#folderHelpBtn:checked {
-                background: transparent;
-            }
-            QFrame#shortcutPanel {
-                background-color: #233854;
-                border: 1px solid #5879a9;
-                border-radius: 10px;
-            }
-            QFrame#folderHelpPanel {
-                background-color: #20324b;
-                border: 1px solid #4f6e97;
-                border-radius: 10px;
-            }
-            QLabel#shortcutText {
-                color: #c6d6f3;
-                font-size: 13px;
-                line-height: 1.4;
-            }
-        """)
-
-        root = QVBoxLayout(self)
-        root.setSizeConstraint(QLayout.SizeConstraint.SetMinAndMaxSize)
-        root.setContentsMargins(14, 14, 14, 14)
-        root.setSpacing(10)
-
-        header = QFrame()
-        header.setObjectName("settingsHeader")
-        header_layout = QVBoxLayout(header)
-        header_layout.setContentsMargins(12, 10, 12, 10)
-        header_layout.setSpacing(3)
-        title_label = QLabel("위젯 상세 설정")
-        title_label.setObjectName("settingsTitle")
-        subtitle_label = QLabel("현재 위젯의 재생/표시/상호작용 설정을 변경합니다")
-        subtitle_label.setObjectName("settingsSubtitle")
-        header_layout.addWidget(title_label)
-        header_layout.addWidget(subtitle_label)
-        root.addWidget(header)
-
-        card = QFrame()
-        card.setObjectName("settingsCard")
-        root.addWidget(card, 1)
-        card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(12, 12, 12, 12)
-        card_layout.setSpacing(10)
-
-        content_row = QHBoxLayout()
-        content_row.setContentsMargins(0, 0, 0, 0)
-        content_row.setSpacing(24)
-        card_layout.addLayout(content_row, 1)
-
-        left_panel = QWidget(card)
-        left_form = QFormLayout(left_panel)
-        left_form.setContentsMargins(0, 0, 0, 0)
-        left_form.setHorizontalSpacing(12)
-        left_form.setVerticalSpacing(8)
-        left_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
-
-        right_panel = QFrame(card)
-        right_panel.setObjectName("settingsRightPanel")
-        right_form = QFormLayout(right_panel)
-        right_form.setContentsMargins(0, 0, 0, 0)
-        right_form.setHorizontalSpacing(12)
-        right_form.setVerticalSpacing(8)
-        right_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
-        self._left_form = left_form
-        self._right_form = right_form
-
-        content_row.addWidget(left_panel, 5)
-        content_row.addWidget(right_panel, 5)
-
-        s = settings_data if settings_data else {}
-        
-        self.folder_path = s.get('folder_path', "")
-        self.exec_path = s.get('exec_path', "")
-
-        self.folder_label = QLabel(self.folder_path if self.folder_path else "미지정")
-        self.folder_label.setObjectName("pathLabel")
-        self.folder_label.setWordWrap(True)
-        self.folder_label.setToolTip(self.folder_path if self.folder_path else "")
-        self.folder_hint_label = None
-        self.folder_btn = QPushButton("폴더 선택")
-        self.folder_help_btn = QToolButton()
-        self.folder_help_btn.setObjectName("folderHelpBtn")
-        self.folder_help_btn.setText("")
-        self.folder_help_btn.setToolTip("미디어 폴더 모드 설명")
-        self.folder_help_btn.setCheckable(True)
-        self.folder_help_btn.setAutoRaise(True)
-        help_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_MessageBoxQuestion)
-        if help_icon.isNull():
-            help_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarContextHelpButton)
-        if help_icon.isNull():
-            self.folder_help_btn.setText("?")
-            self.folder_help_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
-            fallback_font = QFont(self.folder_help_btn.font())
-            fallback_font.setBold(True)
-            fallback_font.setPointSize(max(14, int(fallback_font.pointSize()) + 2))
-            self.folder_help_btn.setFont(fallback_font)
-            self.folder_help_btn.setFixedSize(32, 32)
-        else:
-            self.folder_help_btn.setIcon(help_icon)
-            self.folder_help_btn.setIconSize(QSize(28, 28))
-            self.folder_help_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
-            self.folder_help_btn.setFixedSize(36, 36)
-        self._folder_btn_row_widget = QWidget()
-        folder_btn_row = QHBoxLayout(self._folder_btn_row_widget)
-        folder_btn_row.setContentsMargins(0, 0, 0, 0)
-        folder_btn_row.setSpacing(6)
-        folder_btn_row.addWidget(self.folder_btn, 1)
-        folder_btn_row.addWidget(self.folder_help_btn, 0)
-
-        self.folder_help_panel = QFrame(self)
-        self.folder_help_panel.setObjectName("folderHelpPanel")
-        self.folder_help_panel.setWindowFlags(
-            Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint
-        )
-        self.folder_help_panel.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self.folder_help_panel.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        folder_help_layout = QVBoxLayout(self.folder_help_panel)
-        folder_help_layout.setContentsMargins(10, 8, 10, 10)
-        folder_help_layout.setSpacing(6)
-        folder_help_text = (
-            "미디어 폴더 모드 안내\n"
-            "- 폴더 내부 이미지/영상 파일을 이름 순서대로 재생합니다."
-        )
-        self.folder_help_text = QLabel(
-            folder_help_text
-        )
-        self.folder_help_text.setObjectName("shortcutText")
-        self.folder_help_text.setWordWrap(True)
-        folder_help_layout.addWidget(self.folder_help_text)
-        self.folder_help_panel.hide()
-        self.exec_label = QLabel(os.path.basename(self.exec_path) if self.exec_path else "미지정")
-        self.exec_label.setObjectName("pathLabel")
-        self.exec_label.setWordWrap(True)
-        self.exec_btn = QPushButton("실행파일 선택")
-        self._focus_binding_host = s.get("focus_binding_host", None)
-        self._focus_capture_deadline = 0.0
-        self._focus_capture_timer = QTimer(self)
-        self._focus_capture_timer.setInterval(140)
-        self._focus_capture_timer.timeout.connect(self._on_focus_capture_tick)
-        self._focus_binding_supported = bool(
-            self._focus_binding_host
-            and hasattr(self._focus_binding_host, "_capture_bindable_foreground_hwnd")
-            and hasattr(self._focus_binding_host, "_set_manual_focus_binding_from_hwnd")
-            and hasattr(self._focus_binding_host, "_clear_manual_focus_binding")
-            and hasattr(self._focus_binding_host, "get_exec_manual_focus_summary")
-        )
-        focus_summary = str(s.get("focus_binding_summary", "") or "").strip()
-        if not focus_summary and self._focus_binding_supported:
-            try:
-                focus_summary = str(self._focus_binding_host.get_exec_manual_focus_summary() or "").strip()
-            except Exception:
-                focus_summary = ""
-        if not focus_summary:
-            focus_summary = "자동 (실행파일 기준)"
-        self.focus_binding_label = QLabel(focus_summary)
-        self.focus_binding_label.setObjectName("pathLabel")
-        self.focus_binding_label.setWordWrap(True)
-        self.focus_bind_btn = QPushButton("포커싱 대상 지정")
-        self.focus_bind_clear_btn = QPushButton("바인딩 초기화")
-        self.focus_bind_btn.setMinimumHeight(30)
-        self.focus_bind_clear_btn.setMinimumHeight(30)
-        self.focus_bind_btn.setEnabled(self._focus_binding_supported)
-        self.focus_bind_clear_btn.setEnabled(self._focus_binding_supported)
-        if not self._focus_binding_supported:
-            self.focus_bind_btn.setToolTip("실행 중인 위젯에서만 사용 가능합니다.")
-            self.focus_bind_clear_btn.setToolTip("실행 중인 위젯에서만 사용 가능합니다.")
-        self._focus_bind_row_widget = QWidget()
-        focus_bind_row = QHBoxLayout(self._focus_bind_row_widget)
-        focus_bind_row.setContentsMargins(0, 0, 0, 0)
-        focus_bind_row.setSpacing(6)
-        focus_bind_row.addWidget(self.focus_bind_btn)
-        focus_bind_row.addWidget(self.focus_bind_clear_btn)
-        focus_bind_row.addStretch(1)
-        
-        self.width_input = QSpinBox(); self.width_input.setRange(50, 5000)
-        self.width_input.setValue(s.get('w', 200))
-        self.height_input = QSpinBox(); self.height_input.setRange(50, 5000)
-        self.height_input.setValue(s.get('h', 200))
-        self.sec_input = QSpinBox(); self.sec_input.setRange(1, 3600)
-        self.sec_input.setValue(s.get('interval', 5))
-
-
-        self.opacity_slider = QSlider(Qt.Orientation.Horizontal)
-        self.opacity_slider.setRange(10, 100)
-        curr_op = s.get('opacity_pct', 100)
-        self.opacity_slider.setValue(curr_op)
-        self.opacity_slider.setFixedHeight(26)
-    
-        self.opacity_spinbox = QSpinBox()
-        self.opacity_spinbox.setRange(10, 100)
-        self.opacity_spinbox.setValue(curr_op)
-        self.opacity_spinbox.setSuffix("%")
-        self.opacity_slider.setToolTip("100% = 완전 표시, 10% = 거의 투명")
-        self.opacity_spinbox.setToolTip("100% = 완전 표시, 10% = 거의 투명")
-        for _sb in (self.width_input, self.height_input, self.sec_input, self.opacity_spinbox):
-            _sb.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
-            _sb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.opacity_slider.valueChanged.connect(self.opacity_spinbox.setValue)
-        self.opacity_spinbox.valueChanged.connect(self.opacity_slider.setValue)
-        
-        if parent and hasattr(parent, 'preview_opacity'):
-            self.opacity_slider.valueChanged.connect(parent.preview_opacity)
-
-
-        self.bg_combo = DownwardComboBox(); self.bg_combo.addItems(["투명", "검정", "흰색"])
-        self.bg_combo.setCurrentIndex(s.get('bg_color_mode', 1))
-        self.bg_combo.setView(QListView())
-        self.bg_combo.view().setFrameShape(QFrame.Shape.NoFrame)
-        self.bg_combo.setStyle(QStyleFactory.create("Fusion"))
-        self.bg_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.bg_combo.setMinimumHeight(36)
-
-        self.corner_combo = DownwardComboBox()
-        self.corner_combo.addItems(["곡선", "직각", "원형 (최대)"])
-        self.corner_combo.setCurrentIndex(
-            DesktopWidget.coerce_corner_mode(s.get('corner_mode', DesktopWidget.CORNER_ROUNDED))
-        )
-        self.corner_combo.setView(QListView())
-        self.corner_combo.view().setFrameShape(QFrame.Shape.NoFrame)
-        self.corner_combo.setStyle(QStyleFactory.create("Fusion"))
-        self.corner_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.corner_combo.setMinimumHeight(36)
-
-        self.media_mode_combo = DownwardComboBox()
-        self.media_mode_combo.addItems(["원본 유지 (전체 보기)", "위젯 채우기 (중앙 크롭)"])
-        self.media_mode_combo.setCurrentIndex(max(0, min(int(s.get('media_fit_mode', 0)), 1)))
-        self.media_mode_combo.setView(QListView())
-        self.media_mode_combo.view().setFrameShape(QFrame.Shape.NoFrame)
-        self.media_mode_combo.setStyle(QStyleFactory.create("Fusion"))
-        self.media_mode_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.media_mode_combo.setMinimumHeight(36)
-
-        self.video_transition_combo = DownwardComboBox()
-        self.video_transition_combo.addItems([
-            "싱글 (가벼움, 전환 깜빡임 가능)",
-            "듀얼 (매끄러움, 메모리 사용 증가)",
-        ])
-        vt_mode = DesktopWidget.coerce_video_transition_mode(
-            s.get('video_transition_mode', DesktopWidget.VIDEO_TRANSITION_SINGLE)
-        )
-        self.video_transition_combo.setCurrentIndex(int(vt_mode))
-        self.video_transition_combo.setView(QListView())
-        self.video_transition_combo.view().setFrameShape(QFrame.Shape.NoFrame)
-        self.video_transition_combo.setStyle(QStyleFactory.create("Fusion"))
-        self.video_transition_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.video_transition_combo.setMinimumHeight(36)
-        self.video_transition_hint = QLabel(
-            "싱글: 가볍지만 영상 전환 시 깜빡일 수 있습니다.\n"
-            "듀얼: 영상→영상 전환이 매끄럽지만 메모리 사용량이 증가합니다."
-        )
-        self.video_transition_hint.setObjectName("pathLabel")
-        self.video_transition_hint.setWordWrap(True)
-        self.video_decode_combo = DownwardComboBox()
-        self.video_decode_combo.addItems([
-            "원본 해상도 (품질 우선)",
-            "자동 (위젯 크기 기준)",
-            "1080p 이하",
-            "720p 이하",
-        ])
-        decode_mode = DesktopWidget.coerce_video_decode_mode(
-            s.get('video_decode_mode', DesktopWidget.VIDEO_DECODE_ORIGINAL)
-        )
-        self.video_decode_combo.setCurrentIndex(int(decode_mode))
-        self.video_decode_combo.setView(QListView())
-        self.video_decode_combo.view().setFrameShape(QFrame.Shape.NoFrame)
-        self.video_decode_combo.setStyle(QStyleFactory.create("Fusion"))
-        self.video_decode_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.video_decode_combo.setMinimumHeight(36)
-        self.video_decode_hint = QLabel(
-            "재생 시 원본 대신 저해상도 프록시를 자동 생성/사용해 GPU/메모리 사용량을 줄입니다."
-        )
-        self.video_decode_hint.setObjectName("pathLabel")
-        self.video_decode_hint.setWordWrap(True)
-        self.video_cache_usage_label = QLabel("캐시 사용량: 계산 중...")
-        self.video_cache_usage_label.setObjectName("pathLabel")
-        self.video_cache_usage_label.setWordWrap(True)
-        self.video_cache_usage_label.setToolTip("영상 프록시 캐시 폴더")
-        self.video_cache_clear_btn = QPushButton("영상 캐시 정리")
-        self.video_cache_clear_btn.setMinimumHeight(30)
-        self.video_cache_action_row_widget = QWidget()
-        video_cache_action_row = QHBoxLayout(self.video_cache_action_row_widget)
-        video_cache_action_row.setContentsMargins(0, 0, 0, 0)
-        video_cache_action_row.setSpacing(6)
-        video_cache_action_row.addWidget(self.video_cache_clear_btn)
-        video_cache_action_row.addStretch(1)
-        self.video_dual_fade_ms_spin = QSpinBox()
-        self.video_dual_fade_ms_spin.setRange(0, 300)
-        self.video_dual_fade_ms_spin.setSingleStep(10)
-        self.video_dual_fade_ms_spin.setSuffix(" ms")
-        self.video_dual_fade_ms_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
-        self.video_dual_fade_ms_spin.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.video_dual_fade_ms_spin.setValue(
-            DesktopWidget.coerce_video_dual_fade_ms(
-                s.get('video_dual_fade_ms', DesktopWidget.VIDEO_DUAL_FADE_DEFAULT_MS)
-            )
-        )
-        self.video_dual_fade_hint = QLabel(
-            "듀얼 전환 시 짧은 페이드 길이입니다. 값이 클수록 더 부드럽게 보일 수 있습니다."
-        )
-        self.video_dual_fade_hint.setObjectName("pathLabel")
-        self.video_dual_fade_hint.setWordWrap(True)
-
-        self.layer_combo = DownwardComboBox()
-        self.layer_combo.addItems([
-            "0: 화면 뒤 (아이콘 위)",
-            "1: 일반",
-            "2: 화면 앞 (최상단)"
-        ])
-        layer_idx = DesktopWidget.coerce_layer_mode(
-            s.get('layer_mode', DesktopWidget.LAYER_NORMAL),
-            s.get('layer_schema_version', DesktopWidget.LAYER_SCHEMA_VERSION),
-        )
-        self.layer_combo.setCurrentIndex(layer_idx)
-        self.layer_combo.setView(QListView())
-        self.layer_combo.view().setFrameShape(QFrame.Shape.NoFrame)
-        self.layer_combo.setStyle(QStyleFactory.create("Fusion"))
-        self.layer_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.layer_combo.setMinimumHeight(36)
-
-        self.lock_cb = QCheckBox("클릭 잠금 (마우스 통과)")
-        self.lock_cb.setChecked(_as_bool(s.get('is_locked', False), False))
-        
-        self.mute_checkbox = QCheckBox("음소거")
-        self.mute_checkbox.setChecked(_as_bool(s.get('is_muted', True), True))
-        self.gpu_guard_checkbox = QCheckBox("GPU 고부하 시 영상/GIF 자동 일시정지")
-        self.gpu_guard_checkbox.setChecked(_as_bool(s.get('gpu_guard_enabled', False), False))
-        self.mute_hint_label = QLabel(
-            "위젯 위 단축키:\n"
-            "- 스크롤: 파일 변경\n"
-            "- Ctrl+스크롤: 불투명도 조절\n"
-            "- Shift+코너 드래그: 크기 조절\n"
-            "- Alt+클릭: 마우스 잠금 토글\n"
-            "- G: 임시 그룹 토글\n"
-            "- Ctrl+G: 임시 그룹 전체 해제\n"
-            "- H: 성능 보호 토글\n"
-            "- R: 모서리 모드 전환\n"
-            "- M: 음소거 토글\n"
-            "- O: 설정 상세\n"
-            "- P: 위젯 종료\n"
-            "- C: 위젯 컨트롤러"
-        )
-        self.mute_hint_label.setObjectName("shortcutText")
-        self.mute_hint_label.setWordWrap(True)
-        self.shortcut_panel = QFrame(self)
-        self.shortcut_panel.setWindowFlags(
-            Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint
-        )
-        self.shortcut_panel.setObjectName("shortcutPanel")
-        self.shortcut_panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.shortcut_panel.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self.shortcut_panel.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        shortcut_layout = QVBoxLayout(self.shortcut_panel)
-        shortcut_layout.setContentsMargins(10, 8, 10, 8)
-        shortcut_layout.setSpacing(0)
-        shortcut_layout.addWidget(self.mute_hint_label)
-
-        self.shortcut_toggle = QToolButton()
-        self.shortcut_toggle.setObjectName("shortcutToggle")
-        self.shortcut_toggle.setCheckable(True)
-        self.shortcut_toggle.setChecked(False)
-        self.shortcut_toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        self.shortcut_toggle.toggled.connect(self._set_shortcut_panel_visible)
-        self._set_shortcut_panel_visible(False)
-
-        self.master_btn = QPushButton("위젯 컨트롤러 열기")
-        self.master_btn.setObjectName("masterBtn")
-
-        def _add_section_header(form_layout, title_text):
-            row_widget = QWidget()
-            row_layout = QHBoxLayout(row_widget)
-            row_layout.setContentsMargins(0, 8, 0, 2)
-            row_layout.setSpacing(8)
-            title = QLabel(str(title_text))
-            title.setObjectName("settingsSectionTitle")
-            line = QFrame()
-            line.setObjectName("settingsSectionLine")
-            line.setFrameShape(QFrame.Shape.HLine)
-            line.setFrameShadow(QFrame.Shadow.Plain)
-            row_layout.addWidget(title, 0)
-            row_layout.addWidget(line, 1)
-            form_layout.addRow(row_widget)
-
-        _add_section_header(left_form, "실행 / 연동")
-        left_form.addRow("미디어 폴더:", self._folder_btn_row_widget)
-        left_form.addRow("", self.folder_label)
-        if self.folder_hint_label is not None:
-            left_form.addRow("", self.folder_hint_label)
-        left_form.addRow("실행 파일:", self.exec_btn)
-        left_form.addRow("", self.exec_label)
-        left_form.addRow("포커싱 대상:", self.focus_binding_label)
-        left_form.addRow("", self._focus_bind_row_widget)
-
-        _add_section_header(left_form, "위젯")
-        left_form.addRow("너비:", self.width_input)
-        left_form.addRow("높이:", self.height_input)
-        left_form.addRow("불투명도(%):", self.opacity_spinbox)
-        left_form.addRow("", self.opacity_slider)
-        left_form.addRow("레이어:", self.layer_combo)
-        left_form.addRow("클릭 잠금:", self.lock_cb)
-
-        _add_section_header(left_form, "외형")
-        left_form.addRow("배경색:", self.bg_combo)
-        left_form.addRow("모서리:", self.corner_combo)
-
-        _add_section_header(right_form, "재생 / 전환")
-        right_form.addRow("전환 간격(초):", self.sec_input)
-        right_form.addRow("미디어 맞춤:", self.media_mode_combo)
-        right_form.addRow("영상 전환:", self.video_transition_combo)
-        right_form.addRow("", self.video_transition_hint)
-        right_form.addRow("듀얼 페이드:", self.video_dual_fade_ms_spin)
-        right_form.addRow("", self.video_dual_fade_hint)
-
-        _add_section_header(right_form, "영상 품질 / 캐시")
-        right_form.addRow("영상 디코드:", self.video_decode_combo)
-        right_form.addRow("", self.video_decode_hint)
-        right_form.addRow("영상 캐시:", self.video_cache_usage_label)
-        right_form.addRow("", self.video_cache_action_row_widget)
-
-        _add_section_header(right_form, "오디오 / 성능")
-        right_form.addRow("음소거:", self.mute_checkbox)
-        right_form.addRow("성능 보호:", self.gpu_guard_checkbox)
-        self._video_dual_fade_label = right_form.labelForField(self.video_dual_fade_ms_spin)
-        self._video_dual_fade_hint_label = right_form.labelForField(self.video_dual_fade_hint)
-        
-        btns = QHBoxLayout(); apply = QPushButton("저장"); cancel = QPushButton("취소")
-        btns.setSpacing(12)
-        btns.setContentsMargins(0, 0, 0, 0)
-        apply.setObjectName("primaryBtn")
-        apply.setFixedSize(86, 30)
-        cancel.setFixedSize(86, 30)
-        self.master_btn.setFixedSize(146, 30)
-
-        action_row = QHBoxLayout()
-        action_row.setContentsMargins(0, 0, 0, 0)
-        action_row.setSpacing(10)
-        action_row.addWidget(self.shortcut_toggle, 0, Qt.AlignmentFlag.AlignLeft)
-        action_row.addWidget(self.master_btn, 0, Qt.AlignmentFlag.AlignLeft)
-        action_row.addStretch()
-        btns.addWidget(cancel)
-        btns.addWidget(apply)
-        action_row.addLayout(btns)
-        card_layout.addLayout(action_row)
-        
-        self.folder_btn.clicked.connect(self.select_folder)
-        self.folder_help_btn.toggled.connect(self._set_folder_help_panel_visible)
-        self.exec_btn.clicked.connect(self.select_exec)
-        self.focus_bind_btn.clicked.connect(self._start_focus_capture)
-        self.focus_bind_clear_btn.clicked.connect(self._clear_focus_binding)
-        self.video_transition_combo.currentIndexChanged.connect(self._sync_video_transition_dependent_ui)
-        self.video_cache_clear_btn.clicked.connect(self._clear_video_proxy_cache)
-        self.master_btn.clicked.connect(self.open_master)
-        apply.clicked.connect(self.accept); cancel.clicked.connect(self.reject)
-        self._set_folder_help_panel_visible(False)
-        QTimer.singleShot(0, self._apply_title_bar_theme)
-        QTimer.singleShot(0, self._sync_video_transition_dependent_ui)
-        QTimer.singleShot(0, self._refresh_video_proxy_cache_usage)
-        QTimer.singleShot(0, self._sync_dialog_height)
-
-    def _set_shortcut_panel_visible(self, expanded):
-        expanded = bool(expanded)
-        self.shortcut_toggle.setArrowType(Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow)
-        self.shortcut_toggle.setText("단축키 안내")
-        if expanded:
-            self._place_shortcut_panel()
-            self.shortcut_panel.show()
-            self.shortcut_panel.raise_()
-            self.shortcut_panel.activateWindow()
-        else:
-            self.shortcut_panel.hide()
-        self.shortcut_panel.update()
-
-    def _set_folder_help_panel_visible(self, expanded):
-        want_visible = bool(expanded)
-        self.folder_help_btn.blockSignals(True)
-        self.folder_help_btn.setChecked(want_visible)
-        self.folder_help_btn.blockSignals(False)
-        if want_visible:
-            self._place_folder_help_panel()
-            self.folder_help_panel.show()
-            self.folder_help_panel.raise_()
-            self.folder_help_panel.activateWindow()
-        else:
-            self.folder_help_panel.hide()
-        self.folder_help_panel.update()
-
-    def _place_folder_help_panel(self):
-        self.folder_help_panel.adjustSize()
-        hint = self.folder_help_panel.sizeHint()
-        popup_w = max(360, max(360, hint.width()))
-        popup_h = hint.height()
-
-        anchor_global = self.folder_help_btn.mapToGlobal(QPoint(0, self.folder_help_btn.height() + 6))
-        x = anchor_global.x()
-        y = anchor_global.y()
-
-        screen = QGuiApplication.screenAt(anchor_global) or self.screen() or QGuiApplication.primaryScreen()
-        if screen:
-            ag = screen.availableGeometry()
-            max_x = ag.right() - popup_w - 8
-            min_x = ag.left() + 8
-            x = max(min_x, min(x, max_x))
-            available_below = max(120, ag.bottom() - y - 8)
-            popup_h = min(popup_h, available_below)
-
-        self.folder_help_panel.setGeometry(x, y, popup_w, popup_h)
-
-    def _sync_dialog_height(self):
-        # Release any previous fixed-height lock so collapse/expand can recalculate.
-        self.setMinimumHeight(0)
-        self.setMaximumHeight(16777215)
-        if self.layout():
-            self.layout().invalidate()
-            self.layout().activate()
-        try:
-            self.adjustSize()
-        except Exception:
-            pass
-        target_height = max(
-            420,
-            int(self.minimumSizeHint().height()),
-            int(self.sizeHint().height()),
-        )
-        if self.height() != target_height:
-            self.resize(self.width(), target_height)
-        self.updateGeometry()
-        self.update()
-
-    def _set_form_row_visible(self, form_layout, field_widget, visible):
-        if form_layout is None or field_widget is None:
-            return
-        want_visible = bool(visible)
-        # Qt6 provides row-level visibility; use it first to avoid stale row spacing.
-        try:
-            if hasattr(form_layout, "setRowVisible"):
-                form_layout.setRowVisible(field_widget, want_visible)
-                return
-        except Exception:
-            pass
-        label = None
-        try:
-            label = form_layout.labelForField(field_widget)
-        except Exception:
-            label = None
-        if isinstance(label, QWidget):
-            label.setVisible(want_visible)
-        if isinstance(field_widget, QWidget):
-            field_widget.setVisible(want_visible)
-
-    def _sync_video_transition_dependent_ui(self):
-        is_dual = (
-            int(self.video_transition_combo.currentIndex())
-            == int(DesktopWidget.VIDEO_TRANSITION_DUAL)
-        )
-        form_layout = getattr(self, "_right_form", None)
-        self._set_form_row_visible(form_layout, self.video_dual_fade_ms_spin, bool(is_dual))
-        self._set_form_row_visible(form_layout, self.video_dual_fade_hint, bool(is_dual))
-        # Defer resize until combo popup settles to reduce repaint artifacts.
-        QTimer.singleShot(0, self._sync_dialog_height)
-
-    @staticmethod
-    def _format_size_bytes(num_bytes):
-        try:
-            size = float(max(0, int(num_bytes)))
-        except Exception:
-            size = 0.0
-        units = ["B", "KB", "MB", "GB", "TB"]
-        idx = 0
-        while size >= 1024.0 and idx < (len(units) - 1):
-            size /= 1024.0
-            idx += 1
-        if idx == 0:
-            return f"{int(size)} {units[idx]}"
-        return f"{size:.1f} {units[idx]}"
-
-    def _video_proxy_cache_dir(self):
-        try:
-            return str(DesktopWidget._resolve_video_proxy_dir() or "")
-        except Exception:
-            base = str(os.environ.get("LOCALAPPDATA", "") or "").strip()
-            if not base:
-                base = os.path.expanduser("~")
-            return os.path.join(base, "MyHomeApp", "video_proxy_cache")
-
-    def _video_proxy_cache_usage(self):
-        cache_dir = self._video_proxy_cache_dir()
-        total = 0
-        count = 0
-        if os.path.isdir(cache_dir):
-            for root, _dirs, files in os.walk(cache_dir):
-                for name in files:
-                    fp = os.path.join(root, name)
-                    try:
-                        total += int(os.path.getsize(fp))
-                        count += 1
-                    except Exception:
-                        pass
-        return cache_dir, int(total), int(count)
-
-    @staticmethod
-    def _themed_message_box_style():
-        return """
-            QMessageBox {
-                background-color: #23344d;
-            }
-            QMessageBox QLabel {
-                color: #e6eefc;
-                font-size: 12px;
-            }
-            QMessageBox QPushButton {
-                min-height: 30px;
-                border-radius: 8px;
-                padding: 0 12px;
-                color: #e8efff;
-                background-color: #35507a;
-                border: 1px solid #5977a4;
-                font-weight: 600;
-            }
-            QMessageBox QPushButton:hover {
-                background-color: #3f5e8e;
-            }
-        """
-
-    def _show_themed_message_box(self, icon, title, text, buttons, default_button=QMessageBox.StandardButton.NoButton):
-        box = QMessageBox(self)
-        box.setIcon(icon)
-        box.setWindowTitle(str(title))
-        box.setText(str(text))
-        box.setStandardButtons(buttons)
-        if default_button != QMessageBox.StandardButton.NoButton:
-            box.setDefaultButton(default_button)
-        box.setStyleSheet(self._themed_message_box_style())
-        try:
-            self._apply_title_bar_theme_for_window(box)
-        except Exception:
-            pass
-        return box.exec()
-
-    def _refresh_video_proxy_cache_usage(self):
-        cache_dir, total, count = self._video_proxy_cache_usage()
-        self.video_cache_usage_label.setText(
-            f"{self._format_size_bytes(total)} ({int(count)}개 파일)"
-        )
-        self.video_cache_usage_label.setToolTip(cache_dir)
-        self.video_cache_clear_btn.setEnabled(int(count) > 0)
-
-    def _clear_video_proxy_cache(self):
-        cache_dir, total, count = self._video_proxy_cache_usage()
-        if int(count) <= 0:
-            self._refresh_video_proxy_cache_usage()
-            return
-        confirm = self._show_themed_message_box(
-            QMessageBox.Icon.Question,
-            "영상 캐시 정리",
-            f"영상 캐시 {self._format_size_bytes(total)} ({int(count)}개 파일)를 삭제할까요?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if int(confirm) != int(QMessageBox.StandardButton.Yes):
-            return
-        removed = 0
-        failed = 0
-        if os.path.isdir(cache_dir):
-            for root, dirs, files in os.walk(cache_dir, topdown=False):
-                for name in files:
-                    fp = os.path.join(root, name)
-                    try:
-                        os.remove(fp)
-                        removed += 1
-                    except Exception:
-                        failed += 1
-                for name in dirs:
-                    dp = os.path.join(root, name)
-                    try:
-                        os.rmdir(dp)
-                    except Exception:
-                        pass
-        self._refresh_video_proxy_cache_usage()
-        if failed > 0:
-            self._show_themed_message_box(
-                QMessageBox.Icon.Warning,
-                "영상 캐시 정리",
-                f"{int(removed)}개 파일 삭제됨, {int(failed)}개 파일은 삭제하지 못했습니다.\n"
-                "재생 중인 파일은 잠시 후 다시 시도해 주세요.",
-                QMessageBox.StandardButton.Ok,
-            )
-        else:
-            self._show_themed_message_box(
-                QMessageBox.Icon.Information,
-                "영상 캐시 정리",
-                f"{int(removed)}개 파일을 삭제했습니다.",
-                QMessageBox.StandardButton.Ok,
-            )
-
-    def _place_shortcut_panel(self):
-        self.shortcut_panel.adjustSize()
-        hint = self.shortcut_panel.sizeHint()
-        popup_w = max(300, max(300, hint.width()))
-        popup_h = hint.height()
-
-        anchor_global = self.shortcut_toggle.mapToGlobal(QPoint(0, self.shortcut_toggle.height() + 6))
-        x = anchor_global.x()
-        y = anchor_global.y()
-
-        screen = QGuiApplication.screenAt(anchor_global) or self.screen() or QGuiApplication.primaryScreen()
-        if screen:
-            ag = screen.availableGeometry()
-            max_x = ag.right() - popup_w - 8
-            min_x = ag.left() + 8
-            x = max(min_x, min(x, max_x))
-
-            # Keep panel below the button; if space is tight, shrink height instead of moving above.
-            available_below = max(120, ag.bottom() - y - 8)
-            popup_h = min(popup_h, available_below)
-
-        self.shortcut_panel.setGeometry(x, y, popup_w, popup_h)
-
-    def _apply_title_bar_theme(self):
-        if self._title_bar_themed:
-            return
-        try:
-            import ctypes
-            hwnd = int(self.winId())
-            value = ctypes.c_int(1)
-            ctypes.windll.dwmapi.DwmSetWindowAttribute(
-                ctypes.c_void_p(hwnd),
-                ctypes.c_uint(20),
-                ctypes.byref(value),
-                ctypes.sizeof(value)
-            )
-            self._title_bar_themed = True
-        except Exception:
-            pass
-
-    def showEvent(self, event):
-        super().showEvent(event)
-        self._apply_title_bar_theme()
-        self._sync_video_transition_dependent_ui()
-        self._refresh_focus_binding_label()
-        if self.shortcut_toggle.isChecked():
-            self._place_shortcut_panel()
-        if self.folder_help_btn.isChecked() and self.folder_help_panel.isVisible():
-            self._place_folder_help_panel()
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        if self.shortcut_toggle.isChecked() and self.shortcut_panel.isVisible():
-            self._place_shortcut_panel()
-        if self.folder_help_btn.isChecked() and self.folder_help_panel.isVisible():
-            self._place_folder_help_panel()
-
-    def moveEvent(self, event):
-        super().moveEvent(event)
-        if self.shortcut_toggle.isChecked() and self.shortcut_panel.isVisible():
-            self._place_shortcut_panel()
-        if self.folder_help_btn.isChecked() and self.folder_help_panel.isVisible():
-            self._place_folder_help_panel()
-
-    def closeEvent(self, event):
-        if hasattr(self, "_focus_capture_timer") and self._focus_capture_timer.isActive():
-            self._focus_capture_timer.stop()
-            self._focus_capture_deadline = 0.0
-        if hasattr(self, "shortcut_panel") and self.shortcut_panel.isVisible():
-            self.shortcut_panel.hide()
-        if hasattr(self, "folder_help_panel") and self.folder_help_panel.isVisible():
-            self.folder_help_panel.hide()
-        super().closeEvent(event)
-
-    def select_folder(self):
-        path = QFileDialog.getExistingDirectory(self, "폴더 선택")
-        if path:
-            self.folder_path = path
-            self.folder_label.setText(path)
-            self.folder_label.setToolTip(path)
-            self._set_folder_help_panel_visible(False)
-
-    def select_exec(self):
-        path, _ = QFileDialog.getOpenFileName(self, "파일 선택", "", "실행 파일 (*.exe *.lnk);;모든 파일 (*)")
-        if path: self.exec_path = path; self.exec_label.setText(os.path.basename(path))
-
-    def _refresh_focus_binding_label(self):
-        text = ""
-        if self._focus_binding_supported:
-            try:
-                text = str(self._focus_binding_host.get_exec_manual_focus_summary() or "").strip()
-            except Exception:
-                text = ""
-        else:
-            text = str(self.focus_binding_label.text() or "").strip()
-        if not text:
-            text = "자동 (실행파일 기준)"
-        self.focus_binding_label.setText(text)
-
-    def _finish_focus_capture(self, success, message):
-        if self._focus_capture_timer.isActive():
-            self._focus_capture_timer.stop()
-        self._focus_capture_deadline = 0.0
-        self.focus_bind_btn.setEnabled(self._focus_binding_supported)
-        self.focus_bind_clear_btn.setEnabled(self._focus_binding_supported)
-        self._refresh_focus_binding_label()
-
-    def _start_focus_capture(self):
-        if not self._focus_binding_supported:
-            return
-        if self._focus_capture_timer.isActive():
-            return
-        self.focus_bind_btn.setEnabled(False)
-        self.focus_bind_clear_btn.setEnabled(False)
-        self.focus_binding_label.setText("대기 중: 12초 안에 대상 창을 한 번 클릭하세요")
-        self._focus_capture_deadline = float(time.monotonic()) + 12.0
-        self._focus_capture_timer.start()
-
-    def _on_focus_capture_tick(self):
-        if not self._focus_binding_supported:
-            if self._focus_capture_timer.isActive():
-                self._focus_capture_timer.stop()
-            self._focus_capture_deadline = 0.0
-            return
-        if float(time.monotonic()) >= float(self._focus_capture_deadline or 0.0):
-            self._finish_focus_capture(False, "시간 내에 대상 창을 찾지 못했습니다.")
-            return
-        try:
-            hwnd = int(self._focus_binding_host._capture_bindable_foreground_hwnd() or 0)
-        except Exception:
-            hwnd = 0
-        if hwnd <= 0:
-            return
-        try:
-            ok = bool(self._focus_binding_host._set_manual_focus_binding_from_hwnd(hwnd, persist=True))
-        except Exception:
-            ok = False
-        if bool(ok):
-            self._finish_focus_capture(True, "포커싱 대상이 저장되었습니다.")
-        else:
-            self._finish_focus_capture(False, "선택한 창을 포커싱 대상으로 저장하지 못했습니다.")
-
-    def _clear_focus_binding(self):
-        if not self._focus_binding_supported:
-            return
-        try:
-            self._focus_binding_host._clear_manual_focus_binding(persist=True, clear_bound=True)
-        except Exception:
-            pass
-
-    @staticmethod
-    def _apply_title_bar_theme_for_window(window):
-        try:
-            import ctypes
-            hwnd = int(window.winId())
-            value = ctypes.c_int(1)
-            ctypes.windll.dwmapi.DwmSetWindowAttribute(
-                ctypes.c_void_p(hwnd),
-                ctypes.c_uint(20),
-                ctypes.byref(value),
-                ctypes.sizeof(value)
-            )
-        except Exception:
-            pass
-        self._refresh_focus_binding_label()
-
-    def open_master(self):
-
-        master = self.parent().manager if hasattr(self.parent(), 'manager') else None
-        
-        if master:
-            anchor_rect = self.frameGeometry()
-            QTimer.singleShot(
-                0,
-                lambda m=master, a=QRect(anchor_rect): m.show_master_window(anchor_rect=a, restart=True),
-            )
-            self.reject()
-
-
+from desktop_icons import (
+    DesktopIconCloneOverlay,
+    build_desktop_caption_path_map,
+    desktop_icon_render_signature_of_rects,
+    fetch_desktop_shell_items,
+    is_recycle_caption,
+    query_desktop_icon_rects_screen,
+    resolve_desktop_listview_hwnd,
+)
+from media_runtime import (
+    VideoProxyService,
+    find_ffprobe_beside_ffmpeg,
+    find_runtime_binary,
+    probe_video_height,
+    runtime_binary_dirs,
+)
+from mycanvas_ui_primitives import (
+    OverlayWidget,
+    ProfileListWidget,
+    ProfileRowWidget,
+    ResizeHandleOverlay,
+    SetNameLabel,
+)
+from image_upscale_dialog import ImageUpscaleDialog
+from set_manager_dialog import SetManagerDialog
+from settings_dialog import (
+    SettingsDialog,
+    bind_settings_dialog_desktop_widget as _bind_settings_dialog_desktop_widget,
+)
+from widget_runtime import (
+    apply_settings_dialog_result as _apply_settings_dialog_result_impl,
+    build_settings_dialog_data as _build_settings_dialog_data_impl,
+    check_video_status as _check_video_status_impl,
+    context_menu_event as _context_menu_event_impl,
+    drag_enter_event as _drag_enter_event_impl,
+    drag_leave_event as _drag_leave_event_impl,
+    drag_move_event as _drag_move_event_impl,
+    drop_event as _drop_event_impl,
+    flush_settings_sync as _flush_settings_sync_impl,
+    handle_move as _handle_move_impl,
+    handle_post_show as _handle_post_show_impl,
+    handle_resize as _handle_resize_impl,
+    mouse_move_event as _mouse_move_event_impl,
+    mouse_press_event as _mouse_press_event_impl,
+    mouse_release_event as _mouse_release_event_impl,
+    next_media as _next_media_impl,
+    on_folder_changed_signal as _on_folder_changed_signal_impl,
+    on_video_error as _on_video_error_impl,
+    on_video_frame_changed as _on_video_frame_changed_impl,
+    on_video_position_changed as _on_video_position_changed_impl,
+    open_master_controller as _open_master_controller_impl,
+    prepare_close as _prepare_close_impl,
+    prepare_first_show as _prepare_first_show_impl,
+    refresh_playlist_from_folder_change as _refresh_playlist_from_folder_change_impl,
+    save_all_settings as _save_all_settings_impl,
+    schedule_settings_sync as _schedule_settings_sync_impl,
+    set_watched_folder as _set_watched_folder_impl,
+    update_playlist as _update_playlist_impl,
+    update_static_pixmap_size as _update_static_pixmap_size_impl,
+    wheel_event as _wheel_event_impl,
+)
+from master_runtime import (
+    apply_gpu_guard_thresholds as _mc_apply_gpu_guard_thresholds_impl,
+    ensure_windows_startup_shortcut as _mc_ensure_windows_startup_shortcut_impl,
+    fast_set_switch_enabled as _mc_fast_set_switch_enabled_impl,
+    fast_startup_enabled as _mc_fast_startup_enabled_impl,
+    flush_master_settings_sync as _mc_flush_master_settings_sync_impl,
+    frozen_executable_path as _mc_frozen_executable_path_impl,
+    minimal_validation_enabled as _mc_minimal_validation_enabled_impl,
+    on_gpu_threshold_inputs_changed as _mc_on_gpu_threshold_inputs_changed_impl,
+    on_startup_shortcut_toggled as _mc_on_startup_shortcut_toggled_impl,
+    remove_windows_startup_shortcut as _mc_remove_windows_startup_shortcut_impl,
+    resolve_app_icon as _mc_resolve_app_icon_impl,
+    schedule_master_settings_sync as _mc_schedule_master_settings_sync_impl,
+    set_startup_shortcut_enabled as _mc_set_startup_shortcut_enabled_impl,
+    startup_shortcut_enabled as _mc_startup_shortcut_enabled_impl,
+    startup_shortcut_icon_path as _mc_startup_shortcut_icon_path_impl,
+    startup_shortcut_path as _mc_startup_shortcut_path_impl,
+    startup_shortcut_pref_key as _mc_startup_shortcut_pref_key_impl,
+    sync_gpu_threshold_inputs as _mc_sync_gpu_threshold_inputs_impl,
+    sync_startup_shortcut_toggle as _mc_sync_startup_shortcut_toggle_impl,
+    update_active_status as _mc_update_active_status_impl,
+    windows_startup_folder_path as _mc_windows_startup_folder_path_impl,
+)
+from master_sets import (
+    all_profile_ids as _mset_all_profile_ids_impl,
+    apply_set as _mset_apply_set_impl,
+    as_list as _mset_as_list_impl,
+    cleanup_orphan_profiles as _mset_cleanup_orphan_profiles_impl,
+    clone_profile_settings as _mset_clone_profile_settings_impl,
+    copy_profiles_from_set as _mset_copy_profiles_from_set_impl,
+    copy_set as _mset_copy_set_impl,
+    create_empty_set as _mset_create_empty_set_impl,
+    current_set_profiles as _mset_current_set_profiles_impl,
+    default_set_name as _mset_default_set_name_impl,
+    delete_set as _mset_delete_set_impl,
+    get_set_items as _mset_get_set_items_impl,
+    load_set_state as _mset_load_set_state_impl,
+    migrate_profile_run_flags as _mset_migrate_profile_run_flags_impl,
+    next_profile_id as _mset_next_profile_id_impl,
+    next_set_id as _mset_next_set_id_impl,
+    normalize_ids as _mset_normalize_ids_impl,
+    on_profile_order_changed as _mset_on_profile_order_changed_impl,
+    profile_run_enabled as _mset_profile_run_enabled_impl,
+    remove_profile_from_sets as _mset_remove_profile_from_sets_impl,
+    rename_set as _mset_rename_set_impl,
+    selected_set_id as _mset_selected_set_id_impl,
+    set_current_profiles as _mset_set_current_profiles_impl,
+    set_current_set_id as _mset_set_current_set_id_impl,
+    set_key as _mset_set_key_impl,
+    set_profile_run_enabled as _mset_set_profile_run_enabled_impl,
+)
+from master_operations import (
+    begin_startup_queue as _mqueue_begin_startup_queue_impl,
+    build_profile_startup_queue as _mqueue_build_profile_startup_queue_impl,
+    build_set_startup_queue as _mqueue_build_set_startup_queue_impl,
+    cancel_startup_queue as _mqueue_cancel_startup_queue_impl,
+    claim_exec_window as _mclaim_claim_exec_window_impl,
+    cleanup_exec_window_claims as _mclaim_cleanup_exec_window_claims_impl,
+    get_exec_window_owner as _mclaim_get_exec_window_owner_impl,
+    is_temp_group_member as _mtg_is_temp_group_member_impl,
+    move_temp_group_by_delta as _mtg_move_temp_group_by_delta_impl,
+    release_exec_window_claim as _mclaim_release_exec_window_claim_impl,
+    resize_temp_group_by_edges as _mtg_resize_temp_group_by_edges_impl,
+    run_next_startup_item as _mqueue_run_next_startup_item_impl,
+    save_temp_group_positions as _mtg_save_temp_group_positions_impl,
+    set_temp_group_corner_mode as _mtg_set_temp_group_corner_mode_impl,
+    set_temp_group_gpu_guard as _mtg_set_temp_group_gpu_guard_impl,
+    set_temp_group_lock as _mtg_set_temp_group_lock_impl,
+    set_temp_group_mute as _mtg_set_temp_group_mute_impl,
+    startup_delay_for_kind as _mqueue_startup_delay_for_kind_impl,
+    start_widget_instance as _mwr_start_widget_instance_impl,
+    stop_all_widgets_bulk as _mwr_stop_all_widgets_bulk_impl,
+    stop_widgets_bulk as _mwr_stop_widgets_bulk_impl,
+    sync_all_widget_video_viewports as _mwr_sync_all_widget_video_viewports_impl,
+    sync_temp_group_badges as _mtg_sync_temp_group_badges_impl,
+    temp_group_move_targets as _mtg_temp_group_move_targets_impl,
+    temp_group_shortcut_targets as _mtg_temp_group_shortcut_targets_impl,
+    toggle_temp_group_member as _mtg_toggle_temp_group_member_impl,
+    adjust_temp_group_opacity as _mtg_adjust_temp_group_opacity_impl,
+    clear_temp_group as _mtg_clear_temp_group_impl,
+)
 
 class DesktopWidget(QMainWindow):
     _desktop_icon_listview_hwnd = 0
@@ -2535,6 +555,7 @@ class DesktopWidget(QMainWindow):
         self._video_proxy_building_keys = set()
         self._video_proxy_build_lock = threading.Lock()
         self._video_proxy_build_worker_running = False
+        self._video_proxy_service = VideoProxyService(self)
         self._video_dual_preload_timer = QTimer(self)
         self._video_dual_preload_timer.setSingleShot(True)
         self._video_dual_preload_timer.setInterval(2600)
@@ -2578,12 +599,20 @@ class DesktopWidget(QMainWindow):
         self._desktop_icon_mask_timer = QTimer(self)
         self._desktop_icon_mask_timer.setInterval(420)
         self._desktop_icon_mask_timer.timeout.connect(self._refresh_desktop_icon_mask)
+        self._desktop_icon_clone_refresh_min_interval_ms = 110
+        self._desktop_icon_clone_last_refresh_mono = 0.0
+        self._desktop_icon_clone_refresh_timer = QTimer(self)
+        self._desktop_icon_clone_refresh_timer.setSingleShot(True)
+        self._desktop_icon_clone_refresh_timer.setInterval(120)
+        self._desktop_icon_clone_refresh_timer.timeout.connect(self._run_deferred_desktop_icon_clone_refresh)
         self._desktop_icon_bootstrap_timer = QTimer(self)
         self._desktop_icon_bootstrap_timer.setSingleShot(True)
         self._desktop_icon_bootstrap_timer.setInterval(120)
         self._desktop_icon_bootstrap_timer.timeout.connect(self._run_desktop_icon_overlay_bootstrap)
         self._desktop_icon_bootstrap_retries = 0
         self._desktop_icon_last_edit_rect_local = QRect()
+        self._container_style_cache_key = None
+        self._placeholder_style_cache_key = None
         self.folder_watcher = QFileSystemWatcher(self)
         self.folder_watcher.directoryChanged.connect(self._on_folder_changed_signal)
         self.folder_watcher.fileChanged.connect(self._on_folder_changed_signal)
@@ -2781,10 +810,33 @@ class DesktopWidget(QMainWindow):
         overlay.show()
         overlay.raise_()
 
+    def _run_deferred_desktop_icon_clone_refresh(self):
+        self._refresh_desktop_icon_clone_overlay(force=False)
+
     def _refresh_desktop_icon_clone_overlay(self, force=False):
         if not self._should_clone_desktop_icons() or not self.isVisible():
+            if hasattr(self, "_desktop_icon_clone_refresh_timer") and self._desktop_icon_clone_refresh_timer.isActive():
+                self._desktop_icon_clone_refresh_timer.stop()
             self._set_clone_overlay_items([])
             return
+        now = float(time.monotonic())
+        if not bool(force):
+            last_refresh = float(getattr(self, "_desktop_icon_clone_last_refresh_mono", 0.0) or 0.0)
+            min_interval_ms = int(getattr(self, "_desktop_icon_clone_refresh_min_interval_ms", 110) or 110)
+            elapsed_ms = (now - last_refresh) * 1000.0
+            if elapsed_ms < float(min_interval_ms):
+                if hasattr(self, "_desktop_icon_clone_refresh_timer"):
+                    wait_ms = max(16, int(round(float(min_interval_ms) - elapsed_ms)))
+                    if (
+                        (not self._desktop_icon_clone_refresh_timer.isActive())
+                        or int(self._desktop_icon_clone_refresh_timer.remainingTime()) > int(wait_ms)
+                    ):
+                        self._desktop_icon_clone_refresh_timer.start(int(wait_ms))
+                return
+        else:
+            if hasattr(self, "_desktop_icon_clone_refresh_timer") and self._desktop_icon_clone_refresh_timer.isActive():
+                self._desktop_icon_clone_refresh_timer.stop()
+        self._desktop_icon_clone_last_refresh_mono = now
         items = self._desktop_icon_clone_items_local(force=bool(force))
         if not items and not force:
             items = self._desktop_icon_clone_items_local(force=True)
@@ -2832,549 +884,26 @@ class DesktopWidget(QMainWindow):
 
     @classmethod
     def _desktop_icon_render_signature_of_rects(cls, rects):
-        sig = []
-        for entry in list(rects or []):
-            if not isinstance(entry, dict):
-                continue
-            try:
-                image_index = int(entry.get("image_index", -1))
-            except Exception:
-                image_index = -1
-            icon_rect = entry.get("icon")
-            if isinstance(icon_rect, QRect):
-                rx = int(icon_rect.x())
-                ry = int(icon_rect.y())
-                rw = int(icon_rect.width())
-                rh = int(icon_rect.height())
-            else:
-                rx = ry = rw = rh = 0
-            shell_path = str(entry.get("shell_path", "") or "")
-            path_mtime_ns = 0
-            if shell_path:
-                norm_path = str(os.path.normpath(shell_path))
-                low = norm_path.lower()
-                # Track file-icon resource changes without being noisy on folder content changes.
-                if low.endswith((".lnk", ".url", ".exe", ".ico")):
-                    try:
-                        path_mtime_ns = int(os.stat(norm_path).st_mtime_ns)
-                    except Exception:
-                        path_mtime_ns = 0
-            sig.append((int(image_index), int(rx), int(ry), int(rw), int(rh), int(path_mtime_ns)))
-        return tuple(sig)
+        return desktop_icon_render_signature_of_rects(rects)
 
     @classmethod
     def _resolve_desktop_listview_hwnd(cls, refresh=False):
-        cached = int(getattr(cls, "_desktop_icon_listview_hwnd", 0) or 0)
-        if not refresh and cached:
-            try:
-                if win32gui.IsWindow(cached) and str(win32gui.GetClassName(cached)) == "SysListView32":
-                    return int(cached)
-            except Exception:
-                pass
-        hwnd = 0
-        defview = 0
-        try:
-            prog = int(win32gui.FindWindow("Progman", None) or 0)
-        except Exception:
-            prog = 0
-        if prog:
-            try:
-                defview = int(win32gui.FindWindowEx(int(prog), 0, "SHELLDLL_DefView", None) or 0)
-            except Exception:
-                defview = 0
-        if not defview:
-            found = {"defview": 0}
-
-            def _enum_top(window_hwnd, lparam):
-                try:
-                    dv = int(win32gui.FindWindowEx(int(window_hwnd), 0, "SHELLDLL_DefView", None) or 0)
-                except Exception:
-                    dv = 0
-                if dv:
-                    lparam["defview"] = int(dv)
-                    return False
-                return True
-
-            try:
-                win32gui.EnumWindows(_enum_top, found)
-            except Exception:
-                pass
-            defview = int(found.get("defview") or 0)
-        if defview:
-            try:
-                hwnd = int(win32gui.FindWindowEx(int(defview), 0, "SysListView32", None) or 0)
-            except Exception:
-                hwnd = 0
-        try:
-            if hwnd and win32gui.IsWindow(hwnd) and str(win32gui.GetClassName(hwnd)) == "SysListView32":
-                cls._desktop_icon_listview_hwnd = int(hwnd)
-                return int(hwnd)
-        except Exception:
-            pass
-        cls._desktop_icon_listview_hwnd = 0
-        return 0
+        resolved = resolve_desktop_listview_hwnd(
+            cached_hwnd=int(getattr(cls, "_desktop_icon_listview_hwnd", 0) or 0),
+            refresh=bool(refresh),
+        )
+        cls._desktop_icon_listview_hwnd = int(resolved or 0)
+        return int(resolved or 0)
 
     @classmethod
     def _query_desktop_icon_rects_screen(cls, listview_hwnd):
-        if not listview_hwnd:
-            return []
-        lvm_first = 0x1000
-        lvm_getitemcount = lvm_first + 4
-        lvm_getitemrect = lvm_first + 14
-        lvm_getitemtextw = lvm_first + 115
-        lvm_getitemw = lvm_first + 75
-        lvm_getitemstate = lvm_first + 44
-        lvm_geteditcontrol = lvm_first + 24
-        lvif_image = 0x00000002
-        lvif_text = 0x00000001
-        lvir_icon = 1
-        lvir_label = 2
-        lvir_selectbounds = 3
-        lvis_selected = 0x0002
-        lvis_focused = 0x0001
-        try:
-            count = int(win32gui.SendMessage(int(listview_hwnd), int(lvm_getitemcount), 0, 0) or 0)
-        except Exception:
-            count = 0
-        if count <= 0:
-            cls._desktop_icon_edit_info = {}
-            return []
-
-        class RECT(ctypes.Structure):
-            _fields_ = [
-                ("left", ctypes.c_long),
-                ("top", ctypes.c_long),
-                ("right", ctypes.c_long),
-                ("bottom", ctypes.c_long),
-            ]
-
-        class LVITEMW(ctypes.Structure):
-            _fields_ = [
-                ("mask", wintypes.UINT),
-                ("iItem", ctypes.c_int),
-                ("iSubItem", ctypes.c_int),
-                ("state", wintypes.UINT),
-                ("stateMask", wintypes.UINT),
-                ("pszText", wintypes.LPWSTR),
-                ("cchTextMax", ctypes.c_int),
-                ("iImage", ctypes.c_int),
-                ("lParam", wintypes.LPARAM),
-                ("iIndent", ctypes.c_int),
-                ("iGroupId", ctypes.c_int),
-                ("cColumns", wintypes.UINT),
-                ("puColumns", ctypes.POINTER(wintypes.UINT)),
-                ("piColFmt", ctypes.POINTER(ctypes.c_int)),
-                ("iGroup", ctypes.c_int),
-            ]
-
-        user32 = ctypes.windll.user32
-        kernel32 = ctypes.windll.kernel32
-        try:
-            user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
-            user32.GetWindowThreadProcessId.restype = wintypes.DWORD
-            kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-            kernel32.OpenProcess.restype = wintypes.HANDLE
-            kernel32.VirtualAllocEx.argtypes = [
-                wintypes.HANDLE,
-                wintypes.LPVOID,
-                ctypes.c_size_t,
-                wintypes.DWORD,
-                wintypes.DWORD,
-            ]
-            kernel32.VirtualAllocEx.restype = wintypes.LPVOID
-            kernel32.ReadProcessMemory.argtypes = [
-                wintypes.HANDLE,
-                wintypes.LPCVOID,
-                wintypes.LPVOID,
-                ctypes.c_size_t,
-                ctypes.POINTER(ctypes.c_size_t),
-            ]
-            kernel32.ReadProcessMemory.restype = wintypes.BOOL
-            kernel32.WriteProcessMemory.argtypes = [
-                wintypes.HANDLE,
-                wintypes.LPVOID,
-                wintypes.LPCVOID,
-                ctypes.c_size_t,
-                ctypes.POINTER(ctypes.c_size_t),
-            ]
-            kernel32.WriteProcessMemory.restype = wintypes.BOOL
-            kernel32.VirtualFreeEx.argtypes = [
-                wintypes.HANDLE,
-                wintypes.LPVOID,
-                ctypes.c_size_t,
-                wintypes.DWORD,
-            ]
-            kernel32.VirtualFreeEx.restype = wintypes.BOOL
-            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-            kernel32.CloseHandle.restype = wintypes.BOOL
-        except Exception:
-            pass
-
-        pid = wintypes.DWORD(0)
-        try:
-            user32.GetWindowThreadProcessId(int(listview_hwnd), ctypes.byref(pid))
-        except Exception:
-            return []
-        if int(pid.value) <= 0:
-            return []
-
-        process_access = int(0x0400 | 0x0010 | 0x0020 | 0x0008)  # QUERY | VM_READ | VM_WRITE | VM_OPERATION
-        mem_commit_reserve = int(0x1000 | 0x2000)
-        mem_release = int(0x8000)
-        page_readwrite = int(0x04)
-        proc = None
-        remote_ptr = None
-        layouts = []
-        rect_size = int(ctypes.sizeof(RECT))
-        lvitem_size = int(ctypes.sizeof(LVITEMW))
-        text_cch = 280
-        text_buf_size = int(text_cch * ctypes.sizeof(ctypes.c_wchar))
-        align = 16
-        rect_off = 0
-        lvitem_off = int(((rect_size + (align - 1)) // align) * align)
-        text_off = int(((lvitem_off + lvitem_size + (align - 1)) // align) * align)
-        alloc_size = max(rect_size, int(text_off + text_buf_size))
-        shell_items = cls._desktop_shell_items_by_name(refresh=False)
-        shell_items_order = cls._desktop_shell_items_in_order(refresh=False)
-        shell_name_seen = {}
-
-        def _normalize_item_name(value):
-            s = str(value or "").strip().lower()
-            if not s:
-                return ""
-            return " ".join(s.split())
-
-        def _names_similar(a, b):
-            na = _normalize_item_name(a)
-            nb = _normalize_item_name(b)
-            if not na or not nb:
-                return False
-            if na == nb:
-                return True
-            sa = os.path.splitext(na)[0]
-            sb = os.path.splitext(nb)[0]
-            return bool(sa and sb and (sa == sb or sa == nb or sb == na))
-
-        def _read_item_rect(item_index, rect_code, remote_rect):
-            probe = RECT()
-            probe.left = int(rect_code)
-            probe.top = 0
-            probe.right = 0
-            probe.bottom = 0
-            try:
-                written = ctypes.c_size_t(0)
-                ok_write = bool(
-                    kernel32.WriteProcessMemory(
-                        proc,
-                        ctypes.c_void_p(int(remote_rect)),
-                        ctypes.byref(probe),
-                        rect_size,
-                        ctypes.byref(written),
-                    )
-                )
-            except Exception:
-                ok_write = False
-            if not ok_write:
-                return None
-            try:
-                ok = int(
-                    win32gui.SendMessage(
-                        int(listview_hwnd),
-                        int(lvm_getitemrect),
-                        int(item_index),
-                        int(remote_rect),
-                    )
-                    or 0
-                )
-            except Exception:
-                ok = 0
-            if not ok:
-                return None
-            out = RECT()
-            bytes_read = ctypes.c_size_t(0)
-            try:
-                copied = bool(
-                    kernel32.ReadProcessMemory(
-                        proc,
-                        ctypes.c_void_p(int(remote_rect)),
-                        ctypes.byref(out),
-                        rect_size,
-                        ctypes.byref(bytes_read),
-                    )
-                )
-            except Exception:
-                copied = False
-            if not copied or int(bytes_read.value) < rect_size:
-                return None
-            return (int(out.left), int(out.top), int(out.right), int(out.bottom))
-
-        def _read_item_image_index(item_index, remote_lvitem):
-            item = LVITEMW()
-            item.mask = int(lvif_image)
-            item.iItem = int(item_index)
-            item.iSubItem = 0
-            item.iImage = -1
-            try:
-                written = ctypes.c_size_t(0)
-                ok_write = bool(
-                    kernel32.WriteProcessMemory(
-                        proc,
-                        ctypes.c_void_p(int(remote_lvitem)),
-                        ctypes.byref(item),
-                        lvitem_size,
-                        ctypes.byref(written),
-                    )
-                )
-            except Exception:
-                ok_write = False
-            if not ok_write:
-                return -1
-            try:
-                ok = int(
-                    win32gui.SendMessage(
-                        int(listview_hwnd),
-                        int(lvm_getitemw),
-                        0,
-                        int(remote_lvitem),
-                    )
-                    or 0
-                )
-            except Exception:
-                ok = 0
-            if not ok:
-                return -1
-            out = LVITEMW()
-            bytes_read = ctypes.c_size_t(0)
-            try:
-                copied = bool(
-                    kernel32.ReadProcessMemory(
-                        proc,
-                        ctypes.c_void_p(int(remote_lvitem)),
-                        ctypes.byref(out),
-                        lvitem_size,
-                        ctypes.byref(bytes_read),
-                    )
-                )
-            except Exception:
-                copied = False
-            if not copied or int(bytes_read.value) < lvitem_size:
-                return -1
-            try:
-                return int(out.iImage)
-            except Exception:
-                return -1
-
-        def _read_item_text(item_index, remote_lvitem, remote_text):
-            item = LVITEMW()
-            item.mask = int(lvif_text)
-            item.iItem = int(item_index)
-            item.iSubItem = 0
-            item.cchTextMax = int(text_cch)
-            item.pszText = ctypes.cast(ctypes.c_void_p(int(remote_text)), wintypes.LPWSTR)
-            try:
-                written = ctypes.c_size_t(0)
-                ok_write = bool(
-                    kernel32.WriteProcessMemory(
-                        proc,
-                        ctypes.c_void_p(int(remote_lvitem)),
-                        ctypes.byref(item),
-                        lvitem_size,
-                        ctypes.byref(written),
-                    )
-                )
-            except Exception:
-                ok_write = False
-            if not ok_write:
-                return ""
-            try:
-                win32gui.SendMessage(
-                    int(listview_hwnd),
-                    int(lvm_getitemtextw),
-                    int(item_index),
-                    int(remote_lvitem),
-                )
-            except Exception:
-                return ""
-            raw = ctypes.create_string_buffer(text_buf_size)
-            bytes_read = ctypes.c_size_t(0)
-            try:
-                copied = bool(
-                    kernel32.ReadProcessMemory(
-                        proc,
-                        ctypes.c_void_p(int(remote_text)),
-                        raw,
-                        text_buf_size,
-                        ctypes.byref(bytes_read),
-                    )
-                )
-            except Exception:
-                copied = False
-            if not copied:
-                return ""
-            try:
-                text = raw.raw.decode("utf-16-le", errors="ignore").split("\x00", 1)[0]
-            except Exception:
-                text = ""
-            return str(text or "").strip()
-
-        def _read_item_state(item_index, mask):
-            try:
-                st = int(
-                    win32gui.SendMessage(
-                        int(listview_hwnd),
-                        int(lvm_getitemstate),
-                        int(item_index),
-                        int(mask),
-                    )
-                    or 0
-                )
-            except Exception:
-                st = 0
-            return int(st)
-
-        def _client_rect_to_screen(rect_tuple):
-            if not rect_tuple:
-                return None
-            left, top, right, bottom = rect_tuple
-            try:
-                sx1, sy1 = win32gui.ClientToScreen(int(listview_hwnd), (int(left), int(top)))
-                sx2, sy2 = win32gui.ClientToScreen(int(listview_hwnd), (int(right), int(bottom)))
-            except Exception:
-                return None
-            x1 = min(int(sx1), int(sx2))
-            y1 = min(int(sy1), int(sy2))
-            x2 = max(int(sx1), int(sx2))
-            y2 = max(int(sy1), int(sy2))
-            w = max(0, int(x2 - x1))
-            h = max(0, int(y2 - y1))
-            if w <= 0 or h <= 0:
-                return None
-            return QRect(int(x1), int(y1), int(w), int(h))
-
-        try:
-            proc = kernel32.OpenProcess(process_access, False, int(pid.value))
-            if not proc:
-                return []
-            remote_ptr = kernel32.VirtualAllocEx(proc, None, alloc_size, mem_commit_reserve, page_readwrite)
-            if not remote_ptr:
-                return []
-            remote_base = int(remote_ptr)
-            remote_rect = int(remote_base + rect_off)
-            remote_lvitem = int(remote_base + lvitem_off)
-            remote_text = int(remote_base + text_off)
-            for idx in range(int(count)):
-                icon_rect = _client_rect_to_screen(_read_item_rect(int(idx), int(lvir_icon), int(remote_rect)))
-                label_rect = _client_rect_to_screen(_read_item_rect(int(idx), int(lvir_label), int(remote_rect)))
-                select_rect = _client_rect_to_screen(_read_item_rect(int(idx), int(lvir_selectbounds), int(remote_rect)))
-                image_index = _read_item_image_index(int(idx), int(remote_lvitem))
-                label_text = _read_item_text(int(idx), int(remote_lvitem), int(remote_text))
-                state_bits = _read_item_state(int(idx), int(lvis_selected | lvis_focused))
-                if icon_rect is None and label_rect is None:
-                    continue
-                key = str(label_text or "").strip().lower()
-                shell_meta = {}
-                seq_meta = {}
-                if int(idx) < len(shell_items_order):
-                    try:
-                        seq_meta = dict(shell_items_order[int(idx)] or {})
-                    except Exception:
-                        seq_meta = {}
-                if seq_meta:
-                    seq_name = str(seq_meta.get("name", "") or "")
-                    if _names_similar(label_text, seq_name):
-                        shell_meta = dict(seq_meta)
-                if key:
-                    pos = int(shell_name_seen.get(key, 0) or 0)
-                    shell_name_seen[key] = int(pos + 1)
-                    candidates = list(shell_items.get(key, []) or [])
-                    if not shell_meta and pos < len(candidates):
-                        shell_meta = dict(candidates[pos] or {})
-                    elif not shell_items:
-                        shell_items = cls._desktop_shell_items_by_name(refresh=True)
-                        shell_items_order = cls._desktop_shell_items_in_order(refresh=True)
-                        candidates = list(shell_items.get(key, []) or [])
-                        if not shell_meta and pos < len(candidates):
-                            shell_meta = dict(candidates[pos] or {})
-                if not shell_meta and seq_meta:
-                    shell_meta = dict(seq_meta)
-                shell_path = str(shell_meta.get("path", "") or "")
-                shell_virtual = bool(shell_meta.get("is_virtual", False))
-                shell_folder = bool(shell_meta.get("is_folder", False))
-                display_text = str(shell_meta.get("name", "") or "").strip()
-                if not display_text:
-                    display_text = str(label_text or "").strip()
-                if select_rect is None:
-                    merged = None
-                    if isinstance(icon_rect, QRect) and isinstance(label_rect, QRect):
-                        merged = QRect(icon_rect).united(QRect(label_rect))
-                    elif isinstance(icon_rect, QRect):
-                        merged = QRect(icon_rect)
-                    elif isinstance(label_rect, QRect):
-                        merged = QRect(label_rect)
-                    if isinstance(merged, QRect) and int(merged.width()) > 0 and int(merged.height()) > 0:
-                        select_rect = merged.adjusted(-4, -2, 4, 2)
-                if shell_path and not shell_virtual:
-                    try:
-                        shell_folder = bool(os.path.isdir(shell_path))
-                    except Exception:
-                        pass
-                layouts.append(
-                    {
-                        "icon": icon_rect,
-                        "label": label_rect,
-                        "text": display_text,
-                        "image_index": int(image_index),
-                        "shell_path": shell_path,
-                        "shell_is_folder": bool(shell_folder),
-                        "shell_is_virtual": bool(shell_virtual),
-                        "selected": bool(int(state_bits) & int(lvis_selected)),
-                        "focused": bool(int(state_bits) & int(lvis_focused)),
-                        "select": select_rect,
-                    }
-                )
-            edit_info = {}
-            try:
-                edit_hwnd = int(
-                    win32gui.SendMessage(
-                        int(listview_hwnd),
-                        int(lvm_geteditcontrol),
-                        0,
-                        0,
-                    )
-                    or 0
-                )
-            except Exception:
-                edit_hwnd = 0
-            if edit_hwnd:
-                try:
-                    if win32gui.IsWindow(edit_hwnd) and win32gui.IsWindowVisible(edit_hwnd):
-                        left, top, right, bottom = win32gui.GetWindowRect(int(edit_hwnd))
-                        txt = str(win32gui.GetWindowText(int(edit_hwnd)) or "")
-                        edit_info = {
-                            "rect": QRect(
-                                int(left),
-                                int(top),
-                                max(0, int(right - left)),
-                                max(0, int(bottom - top)),
-                            ),
-                            "text": txt,
-                            "hwnd": int(edit_hwnd),
-                        }
-                except Exception:
-                    edit_info = {}
-            cls._desktop_icon_edit_info = dict(edit_info)
-        finally:
-            try:
-                if proc and remote_ptr:
-                    kernel32.VirtualFreeEx(proc, ctypes.c_void_p(int(remote_ptr)), 0, mem_release)
-            except Exception:
-                pass
-            try:
-                if proc:
-                    kernel32.CloseHandle(proc)
-            except Exception:
-                pass
-        return layouts
+        layouts, edit_info = query_desktop_icon_rects_screen(
+            int(listview_hwnd),
+            shell_items_by_name_func=lambda refresh=False: cls._desktop_shell_items_by_name(refresh=bool(refresh)),
+            shell_items_in_order_func=lambda refresh=False: cls._desktop_shell_items_in_order(refresh=bool(refresh)),
+        )
+        cls._desktop_icon_edit_info = dict(edit_info or {})
+        return list(layouts or [])
 
     @classmethod
     def _desktop_icon_rects_screen(cls, force=False):
@@ -3430,100 +959,7 @@ class DesktopWidget(QMainWindow):
         cached = dict(getattr(cls, "_desktop_caption_path_cache", {}) or {})
         if not refresh and cached and (now - cache_ts) <= 6.0:
             return cached
-
-        mapping = {}
-        dirs = []
-        try:
-            class GUID(ctypes.Structure):
-                _fields_ = [
-                    ("Data1", wintypes.DWORD),
-                    ("Data2", wintypes.WORD),
-                    ("Data3", wintypes.WORD),
-                    ("Data4", ctypes.c_ubyte * 8),
-                ]
-
-            def _guid(text):
-                s = str(text or "").strip().strip("{}")
-                parts = s.split("-")
-                if len(parts) != 5:
-                    return None
-                d4_hex = parts[3] + parts[4]
-                if len(d4_hex) != 16:
-                    return None
-                d4 = (ctypes.c_ubyte * 8)(*([int(d4_hex[i:i + 2], 16) for i in range(0, 16, 2)]))
-                return GUID(int(parts[0], 16), int(parts[1], 16), int(parts[2], 16), d4)
-
-            shell32 = ctypes.windll.shell32
-            ole32 = ctypes.windll.ole32
-            shell32.SHGetKnownFolderPath.argtypes = [
-                ctypes.POINTER(GUID),
-                wintypes.DWORD,
-                wintypes.HANDLE,
-                ctypes.POINTER(ctypes.c_wchar_p),
-            ]
-            shell32.SHGetKnownFolderPath.restype = ctypes.c_long
-
-            def _known_folder_path(guid_text):
-                g = _guid(guid_text)
-                if g is None:
-                    return ""
-                out_ptr = ctypes.c_wchar_p()
-                hr = int(shell32.SHGetKnownFolderPath(ctypes.byref(g), 0, None, ctypes.byref(out_ptr)))
-                if hr != 0:
-                    return ""
-                try:
-                    return str(out_ptr.value or "")
-                finally:
-                    try:
-                        ole32.CoTaskMemFree(out_ptr)
-                    except Exception:
-                        pass
-
-            desktop_dir = _known_folder_path("B4BFCC3A-DB2C-424C-B029-7FE99A87C641")
-            public_desktop_dir = _known_folder_path("C4AA340D-F20F-4863-AFEF-F87EF2E6BA25")
-            if desktop_dir:
-                dirs.append(desktop_dir)
-            if public_desktop_dir:
-                dirs.append(public_desktop_dir)
-        except Exception:
-            pass
-        try:
-            dirs.append(os.path.join(os.path.expanduser("~"), "Desktop"))
-        except Exception:
-            pass
-        try:
-            pub = str(os.environ.get("PUBLIC", "") or "").strip()
-            if pub:
-                dirs.append(os.path.join(pub, "Desktop"))
-        except Exception:
-            pass
-
-        seen_dirs = set()
-        for base in dirs:
-            d = os.path.normpath(str(base or ""))
-            if not d or d in seen_dirs:
-                continue
-            seen_dirs.add(d)
-            if not os.path.isdir(d):
-                continue
-            try:
-                for entry in os.scandir(d):
-                    try:
-                        name = str(entry.name or "")
-                        path = str(entry.path or "")
-                    except Exception:
-                        continue
-                    if not name or not path:
-                        continue
-                    low_full = name.lower()
-                    stem = os.path.splitext(name)[0].lower()
-                    if low_full and low_full not in mapping:
-                        mapping[low_full] = path
-                    if stem and stem not in mapping:
-                        mapping[stem] = path
-            except Exception:
-                continue
-
+        mapping = build_desktop_caption_path_map()
         cls._desktop_caption_path_cache = dict(mapping)
         cls._desktop_caption_path_cache_ts = now
         return dict(mapping)
@@ -3553,52 +989,7 @@ class DesktopWidget(QMainWindow):
         cached_list = list(getattr(cls, "_desktop_shell_items_cache_list", []) or [])
         if not refresh and cached and cached_list and (now - cache_ts) <= 2.0:
             return cached
-        out = {}
-        ordered = []
-        win32com_client = _get_win32com_client()
-        if win32com_client is None:
-            cls._desktop_shell_items_cache = {}
-            cls._desktop_shell_items_cache_list = []
-            cls._desktop_shell_items_cache_ts = now
-            return {}
-        try:
-            shell = win32com_client.Dispatch("Shell.Application")
-            ns = shell.Namespace(0)
-            if ns is not None:
-                items = ns.Items()
-                count = int(getattr(items, "Count", 0) or 0)
-                for i in range(count):
-                    try:
-                        it = items.Item(i)
-                    except Exception:
-                        continue
-                    try:
-                        name = str(getattr(it, "Name", "") or "").strip()
-                    except Exception:
-                        name = ""
-                    if not name:
-                        continue
-                    key = name.lower()
-                    try:
-                        path = str(getattr(it, "Path", "") or "").strip()
-                    except Exception:
-                        path = ""
-                    try:
-                        is_folder = bool(getattr(it, "IsFolder", False))
-                    except Exception:
-                        is_folder = False
-                    is_virtual = bool(path.startswith("::")) if path else True
-                    rec = {
-                        "name": str(name),
-                        "path": str(path),
-                        "is_folder": bool(is_folder),
-                        "is_virtual": bool(is_virtual),
-                    }
-                    ordered.append(rec)
-                    out.setdefault(key, []).append(rec)
-        except Exception:
-            out = {}
-            ordered = []
+        out, ordered = fetch_desktop_shell_items(_get_win32com_client())
         cls._desktop_shell_items_cache = dict(out)
         cls._desktop_shell_items_cache_list = list(ordered)
         cls._desktop_shell_items_cache_ts = now
@@ -3616,20 +1007,7 @@ class DesktopWidget(QMainWindow):
 
     @staticmethod
     def _is_recycle_caption(caption):
-        key = str(caption or "").strip().lower()
-        if not key:
-            return False
-        recycle_keys = {
-            "recycle bin",
-            "휴지통",
-            "papelera de reciclaje",
-            "corbeille",
-            "cestino",
-            "корзина",
-            "kosz",
-            "lixeira",
-        }
-        return bool(key in recycle_keys)
+        return is_recycle_caption(caption)
 
     @classmethod
     def _desktop_icon_identity(cls, caption):
@@ -6472,58 +3850,15 @@ class DesktopWidget(QMainWindow):
 
     @staticmethod
     def _runtime_binary_dirs():
-        dirs = []
-        try:
-            meipass = str(getattr(sys, "_MEIPASS", "") or "").strip()
-            if meipass:
-                dirs.append(meipass)
-        except Exception:
-            pass
-        try:
-            exe_path = str(getattr(sys, "executable", "") or "").strip()
-            if exe_path:
-                exe_dir = os.path.dirname(os.path.abspath(exe_path))
-                if exe_dir:
-                    dirs.append(exe_dir)
-        except Exception:
-            pass
-        try:
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            if script_dir:
-                dirs.append(script_dir)
-        except Exception:
-            pass
-        out = []
-        seen = set()
-        for raw in dirs:
-            base = str(raw or "").strip()
-            if not base:
-                continue
-            for candidate in (base, os.path.join(base, "bin")):
-                key = os.path.normcase(os.path.normpath(str(candidate)))
-                if key in seen:
-                    continue
-                seen.add(key)
-                out.append(str(candidate))
-        return out
+        return runtime_binary_dirs(include_cwd=False, include_bin_subdir=True)
 
     @classmethod
     def _find_runtime_binary(cls, name):
-        raw = str(name or "").strip()
-        if not raw:
-            return ""
-        names = [raw]
-        if os.name == "nt" and not raw.lower().endswith(".exe"):
-            names.insert(0, f"{raw}.exe")
-        for folder in cls._runtime_binary_dirs():
-            for fname in names:
-                candidate = os.path.join(folder, fname)
-                try:
-                    if os.path.isfile(candidate):
-                        return candidate
-                except Exception:
-                    continue
-        return ""
+        return find_runtime_binary(
+            name,
+            include_cwd=False,
+            include_bin_subdir=True,
+        )
 
     def _resolve_ffmpeg_path(self):
         cached = getattr(self, "_video_proxy_ffmpeg_path", None)
@@ -6563,12 +3898,7 @@ class DesktopWidget(QMainWindow):
         if not path:
             ffmpeg_path = self._resolve_ffmpeg_path()
             if ffmpeg_path:
-                probe_names = ["ffprobe.exe"] if os.name == "nt" else ["ffprobe"]
-                for probe_name in probe_names:
-                    candidate = os.path.join(os.path.dirname(ffmpeg_path), probe_name)
-                    if os.path.exists(candidate):
-                        path = candidate
-                        break
+                path = str(find_ffprobe_beside_ffmpeg(ffmpeg_path) or "")
         self._video_proxy_ffprobe_path = path
         return path
 
@@ -6593,40 +3923,11 @@ class DesktopWidget(QMainWindow):
         ffprobe = self._resolve_ffprobe_path()
         if not ffprobe:
             return 0
-        cmd = [
-            ffprobe,
-            "-v",
-            "error",
-            "-select_streams",
-            "v:0",
-            "-show_entries",
-            "stream=height",
-            "-of",
-            "csv=p=0",
-            str(path),
-        ]
-        try:
-            run_kwargs = {
-                "capture_output": True,
-                "text": True,
-                "timeout": 3.0,
-                "check": False,
-            }
-            if os.name == "nt":
-                flags = 0
-                flags |= int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
-                if flags:
-                    run_kwargs["creationflags"] = int(flags)
-            proc = subprocess.run(cmd, **run_kwargs)
-            if int(proc.returncode) == 0:
-                out = str(proc.stdout or "").strip()
-                h = int(out) if out.isdigit() else 0
-                if h > 0:
-                    cache[signature] = int(h)
-                    self._video_proxy_source_height_cache = cache
-                    return int(h)
-        except Exception:
-            pass
+        h = int(probe_video_height(ffprobe, path, timeout_sec=3.0) or 0)
+        if h > 0:
+            cache[signature] = int(h)
+            self._video_proxy_source_height_cache = cache
+            return int(h)
         return 0
 
     def _video_decode_target_height_for_current_widget(self):
@@ -6660,163 +3961,22 @@ class DesktopWidget(QMainWindow):
         return f"{sig}|{int(target_height)}"
 
     def _ensure_video_proxy_file(self, source_path, target_height, allow_build=True):
-        out_path = self._video_proxy_output_path(source_path, target_height)
-        if not out_path:
-            return ""
-        try:
-            if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
-                return out_path
-        except Exception:
-            pass
-        if not bool(allow_build):
-            return ""
-        key = self._video_proxy_key(source_path, target_height)
-        if not key:
-            return ""
-        failed = getattr(self, "_video_proxy_failed_keys", set())
-        if key in failed:
-            return ""
-        ffmpeg = self._resolve_ffmpeg_path()
-        if not ffmpeg:
-            failed.add(key)
-            self._video_proxy_failed_keys = failed
-            return ""
-        out_dir = os.path.dirname(out_path)
-        try:
-            os.makedirs(out_dir, exist_ok=True)
-        except Exception:
-            failed.add(key)
-            self._video_proxy_failed_keys = failed
-            return ""
-        temp_out = out_path + ".tmp.mp4"
-        try:
-            if os.path.exists(temp_out):
-                os.remove(temp_out)
-        except Exception:
-            pass
-        cmd = [
-            ffmpeg,
-            "-y",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-i",
-            str(source_path),
-            "-vf",
-            f"scale=-2:{int(target_height)}:flags=lanczos",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "ultrafast",
-            "-crf",
-            "23",
-            "-threads",
-            "1",
-            "-pix_fmt",
-            "yuv420p",
-            "-movflags",
-            "+faststart",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "128k",
-            str(temp_out),
-        ]
-        ok = False
-        try:
-            run_kwargs = {
-                "capture_output": True,
-                "text": True,
-                "timeout": 180.0,
-                "check": False,
-            }
-            if os.name == "nt":
-                flags = 0
-                flags |= int(getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0))
-                flags |= int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
-                if flags:
-                    run_kwargs["creationflags"] = int(flags)
-            proc = subprocess.run(cmd, **run_kwargs)
-            ok = int(proc.returncode) == 0
-        except Exception:
-            ok = False
-        if ok:
-            try:
-                if os.path.exists(temp_out) and os.path.getsize(temp_out) > 0:
-                    os.replace(temp_out, out_path)
-                    self._video_dbg(
-                        "proxy_built",
-                        source=self._debug_media_name(source_path),
-                        target=f"{int(target_height)}p",
-                    )
-                    return out_path
-            except Exception:
-                ok = False
-        try:
-            if os.path.exists(temp_out):
-                os.remove(temp_out)
-        except Exception:
-            pass
-        failed.add(key)
-        self._video_proxy_failed_keys = failed
-        self._video_dbg(
-            "proxy_failed",
-            source=self._debug_media_name(source_path),
-            target=f"{int(target_height)}p",
+        return self._video_proxy_service.ensure_video_proxy_file(
+            source_path,
+            target_height,
+            allow_build=bool(allow_build),
         )
-        return ""
 
     def _enqueue_video_proxy_build(self, source_path, target_height):
-        src = str(source_path or "")
-        h = int(target_height or 0)
-        if not src or h <= 0:
-            return False
-        key = self._video_proxy_key(src, h)
-        if not key:
-            return False
-        out_path = self._video_proxy_output_path(src, h)
-        if out_path:
-            try:
-                if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
-                    return False
-            except Exception:
-                pass
-        failed = getattr(self, "_video_proxy_failed_keys", set())
-        if key in failed:
-            return False
-        start_worker = False
-        with self._video_proxy_build_lock:
-            if key in self._video_proxy_building_keys:
-                return False
-            self._video_proxy_building_keys.add(key)
-            self._video_proxy_build_queue.append((key, src, h))
-            if not bool(getattr(self, "_video_proxy_build_worker_running", False)):
-                self._video_proxy_build_worker_running = True
-                start_worker = True
-        self._video_dbg(
-            "proxy_queue",
-            source=self._debug_media_name(src),
-            target=f"{int(h)}p",
+        return bool(
+            self._video_proxy_service.enqueue_video_proxy_build(
+                source_path,
+                target_height,
+            )
         )
-        if start_worker:
-            t = threading.Thread(target=self._video_proxy_build_worker, daemon=True)
-            t.start()
-        return True
 
     def _video_proxy_build_worker(self):
-        while True:
-            with self._video_proxy_build_lock:
-                if not self._video_proxy_build_queue:
-                    self._video_proxy_build_worker_running = False
-                    return
-                key, src, h = self._video_proxy_build_queue.popleft()
-            try:
-                self._ensure_video_proxy_file(src, h, allow_build=True)
-            except Exception:
-                pass
-            finally:
-                with self._video_proxy_build_lock:
-                    self._video_proxy_building_keys.discard(key)
+        self._video_proxy_service.video_proxy_build_worker()
 
     def _resolve_video_playback_path(self, source_path, allow_build=True):
         src = str(source_path or "")
@@ -7963,12 +5123,16 @@ class DesktopWidget(QMainWindow):
         bg_options = ["transparent", "black", "white"]
         bg_idx = max(0, min(int(self.bg_color_mode), len(bg_options) - 1))
         bg = bg_options[bg_idx]
-        
 
-        self.container.setStyleSheet(f"QWidget#mainContainer {{ background-color: {bg}; border-radius: {radius}px; }}")
+        container_style = f"QWidget#mainContainer {{ background-color: {bg}; border-radius: {radius}px; }}"
+        if container_style != getattr(self, "_container_style_cache_key", None):
+            self.container.setStyleSheet(container_style)
+            self._container_style_cache_key = container_style
         if hasattr(self, "placeholder"):
-            self.placeholder.setStyleSheet(f"background: #222; border-radius: {radius}px;")
-     
+            placeholder_style = f"background: #222; border-radius: {radius}px;"
+            if placeholder_style != getattr(self, "_placeholder_style_cache_key", None):
+                self.placeholder.setStyleSheet(placeholder_style)
+                self._placeholder_style_cache_key = placeholder_style
 
         self._sync_desktop_icon_mask_timer()
         clone_icons = self._should_clone_desktop_icons()
@@ -8030,157 +5194,27 @@ class DesktopWidget(QMainWindow):
             self.clearMask()
 
     def update_playlist(self):
-        folder = str(getattr(self, "folder_path", "") or "").strip()
-        if not folder or not os.path.isdir(folder):
-            # Prevent stale media list when folder path is invalid/missing.
-            self.playlist = []
-            return
-        media_ext = self._supported_media_extensions()
-        try:
-            files = os.listdir(folder)
-        except OSError:
-            self.playlist = []
-            return
-        entries = []
-        for name in sorted(files):
-            path = os.path.join(folder, str(name))
-            low = str(name).lower()
-            if low.endswith(media_ext):
-                entries.append(path)
-        candidates = list(entries)
-        if not candidates:
-            self.playlist = []
-            return
-
-        filtered = [p for p in candidates if p not in self.quarantined_media]
-        if filtered:
-            self.playlist = filtered
-            return
-
-        # If everything got quarantined, recover gracefully instead of showing an empty widget forever.
-        self.quarantined_media.clear()
-        self._save_quarantined_media()
-        self.playlist = candidates
+        _update_playlist_impl(self)
 
     def _set_watched_folder(self, folder_path):
-        old_files = self.folder_watcher.files()
-        if old_files:
-            self.folder_watcher.removePaths(old_files)
-        old_dirs = self.folder_watcher.directories()
-        if old_dirs:
-            self.folder_watcher.removePaths(old_dirs)
-        if folder_path and os.path.isdir(folder_path):
-            self.folder_watcher.addPath(folder_path)
+        _set_watched_folder_impl(self, folder_path)
 
     def _on_folder_changed_signal(self, _path):
-        self.folder_refresh_timer.start()
+        _on_folder_changed_signal_impl(self, _path)
 
     def _refresh_playlist_from_folder_change(self):
-        if not self.folder_path:
-            return
-
-        prev_playlist = list(self.playlist)
-        current_path = None
-        if 0 <= self.current_idx < len(self.playlist):
-            current_path = self.playlist[self.current_idx]
-
-        self.update_playlist()
-        self._set_watched_folder(self.folder_path)
-
-        if not self.playlist:
-            if self.stack.currentIndex() != 0:
-                self.current_idx = -1
-                self.next_media()
-            return
-
-        if current_path and current_path in self.playlist:
-            self.current_idx = self.playlist.index(current_path)
-            self._sync_current_media_cycle_policy()
-            return
-
-        if prev_playlist != self.playlist:
-            next_hint = 0
-            if current_path and current_path in prev_playlist:
-                removed_index = prev_playlist.index(current_path)
-                next_hint = min(removed_index, len(self.playlist) - 1)
-            elif self.current_idx >= 0:
-                next_hint = min(self.current_idx, len(self.playlist) - 1)
-
-            self.current_idx = next_hint - 1
-            self.next_media()
+        _refresh_playlist_from_folder_change_impl(self)
 
     def open_settings(self):
         old_folder = self.folder_path
         old_exec = str(self.exec_path or "")
-        
 
-        current_data = {
-            'w': self.width(), 'h': self.height(),
-            'is_muted': self.is_muted,
-            'gpu_guard_enabled': self.gpu_guard_enabled,
-            'folder_path': self.folder_path,
-            'exec_path': self.exec_path,
-            'focus_binding_summary': self.get_exec_manual_focus_summary(),
-            'focus_binding_host': self,
-            'interval': self.interval_ms // 1000,
-            'bg_color_mode': self.bg_color_mode,
-            'corner_mode': self.coerce_corner_mode(getattr(self, 'corner_mode', self.CORNER_ROUNDED)),
-            'media_fit_mode': int(getattr(self, "media_fit_mode", 0)),
-            'video_transition_mode': int(getattr(self, "video_transition_mode", self.VIDEO_TRANSITION_SINGLE)),
-            'video_decode_mode': int(getattr(self, "video_decode_mode", self.VIDEO_DECODE_ORIGINAL)),
-            'video_dual_fade_ms': int(getattr(self, "_video_swap_fade_duration_ms", self.VIDEO_DUAL_FADE_DEFAULT_MS)),
-            'opacity_pct': self.current_opacity_pct,
-            'layer_mode': getattr(self, 'layer_mode', self.LAYER_NORMAL),
-            'layer_schema_version': int(self.LAYER_SCHEMA_VERSION),
-            'is_locked': getattr(self, 'is_locked', False)
-        }
-        
+        dialog = SettingsDialog(self, _build_settings_dialog_data_impl(self))
 
-        dialog = SettingsDialog(self, current_data)
-        
         if dialog.exec():
-            self.resize(dialog.width_input.value(), dialog.height_input.value())
-            self.is_muted = dialog.mute_checkbox.isChecked()
-            self._apply_mute_state()
-            self.gpu_guard_enabled = dialog.gpu_guard_checkbox.isChecked()
-            self.exec_path = dialog.exec_path
-            if self._normalize_exec_path(old_exec) != self._normalize_exec_path(self.exec_path):
-                self._clear_bound_exec_window()
-                self._clear_manual_focus_binding(persist=False, clear_bound=False)
-            self.folder_path = str(dialog.folder_path or "").strip()
-            source_changed = (old_folder != self.folder_path)
-            self._set_watched_folder(self.folder_path)
-            self.interval_ms = dialog.sec_input.value() * 1000
-            self.bg_color_mode = dialog.bg_combo.currentIndex()
-            self.corner_mode = self.coerce_corner_mode(dialog.corner_combo.currentIndex())
-            self.media_fit_mode = int(dialog.media_mode_combo.currentIndex())
-            self.video_transition_mode = self.coerce_video_transition_mode(
-                dialog.video_transition_combo.currentIndex()
-            )
-            self.video_decode_mode = self.coerce_video_decode_mode(
-                dialog.video_decode_combo.currentIndex()
-            )
-            self._video_swap_fade_duration_ms = self.coerce_video_dual_fade_ms(
-                dialog.video_dual_fade_ms_spin.value()
-            )
-            
-
-            self.apply_window_settings(dialog.layer_combo.currentIndex(), dialog.lock_cb.isChecked())
-            self.apply_mask_and_style()
-            self._sync_current_media_cycle_policy()
-            
-            if source_changed:
-                self.update_playlist(); self.current_idx = -1; self.next_media()
-            else:
-                self._apply_media_scale_mode()
-
-            self.current_opacity_pct = dialog.opacity_slider.value()
-            self.setWindowOpacity(self.current_opacity_pct / 100.0)
-            if not self.gpu_guard_enabled:
-                self.set_performance_paused(False, reason="guard_disabled")
-            self.save_all_settings()
+            _apply_settings_dialog_result_impl(self, dialog, old_folder, old_exec)
         else:
-             self.setWindowOpacity(self.current_opacity_pct / 100.0)
+            self.setWindowOpacity(self.current_opacity_pct / 100.0)
 
     def apply_window_settings(self, layer, lock, cancel_interaction=True):
         # Prevent stale drag/resize state from leaking across lock toggles.
@@ -8224,908 +5258,131 @@ class DesktopWidget(QMainWindow):
                 self.selection_overlay.hide()
 
     def _schedule_settings_sync(self, delay_ms=None):
-        if not hasattr(self, "_settings_sync_timer"):
-            return
-        try:
-            delay = int(self._settings_sync_delay_ms if delay_ms is None else delay_ms)
-        except Exception:
-            delay = int(getattr(self, "_settings_sync_delay_ms", 700))
-        delay = max(0, delay)
-        if delay <= 0:
-            self._flush_settings_sync()
-            return
-        self._settings_sync_timer.start(delay)
+        _schedule_settings_sync_impl(self, delay_ms=delay_ms)
 
     def _flush_settings_sync(self):
-        if hasattr(self, "_settings_sync_timer") and self._settings_sync_timer.isActive():
-            self._settings_sync_timer.stop()
-        try:
-            self.settings.sync()
-        except Exception:
-            pass
+        _flush_settings_sync_impl(self)
 
     def save_all_settings(self, sync=None):
-        self.settings.setValue("folder_path", self.folder_path)
-        self.settings.setValue("exec_path", self.exec_path)
-        self.settings.setValue("exec_manual_focus_enabled", bool(getattr(self, "_exec_manual_focus_enabled", False)))
-        self.settings.setValue("exec_manual_focus_proc_path", str(getattr(self, "_exec_manual_focus_proc_path", "") or ""))
-        self.settings.setValue("exec_manual_focus_proc_name", str(getattr(self, "_exec_manual_focus_proc_name", "") or ""))
-        self.settings.setValue("exec_manual_focus_title", str(getattr(self, "_exec_manual_focus_title", "") or ""))
-        self.settings.setValue("exec_manual_focus_class", str(getattr(self, "_exec_manual_focus_class", "") or ""))
-        self.settings.setValue("interval", self.interval_ms // 1000)
-        self.settings.setValue("bg_color_mode", self.bg_color_mode)
-        self.settings.setValue(
-            "corner_mode",
-            int(self.coerce_corner_mode(getattr(self, "corner_mode", self.CORNER_ROUNDED))),
-        )
-        self.settings.setValue("media_fit_mode", int(getattr(self, "media_fit_mode", 0)))
-        self.settings.setValue("video_transition_mode", int(getattr(self, "video_transition_mode", self.VIDEO_TRANSITION_SINGLE)))
-        self.settings.setValue("video_decode_mode", int(getattr(self, "video_decode_mode", self.VIDEO_DECODE_ORIGINAL)))
-        self.settings.setValue("video_dual_fade_ms", int(getattr(self, "_video_swap_fade_duration_ms", self.VIDEO_DUAL_FADE_DEFAULT_MS)))
-        self.settings.setValue("is_muted", bool(self.is_muted))
-        self.settings.setValue("gpu_guard_enabled", bool(self.gpu_guard_enabled))
-        self.settings.setValue("layer_mode", int(getattr(self, "layer_mode", self.LAYER_NORMAL)))
-        self.settings.setValue("layer_schema_version", int(self.LAYER_SCHEMA_VERSION))
-        self.settings.setValue("is_locked", bool(getattr(self, "is_locked", False)))
-        self.settings.setValue("opacity_pct", self.current_opacity_pct)
-        self.settings.setValue("w", self.width())
-        self.settings.setValue("h", self.height())
-        
-        self.settings.setValue("pos", self._global_top_left())
-        self.settings.setValue("size", self.size())
-        self._save_position_metadata()
-        self._save_quarantined_media()
-        
-        if sync is True:
-            self._flush_settings_sync()
-        elif sync is None:
-            self._schedule_settings_sync()
+        _save_all_settings_impl(self, sync=sync)
 
     def preview_opacity(self, val_pct):
         self.setWindowOpacity(val_pct / 100.0)
 
     def next_media(self, prefer_preload=True):
-        # 1. existing timer/playback stop to avoid overlap
-        self._media_resetting = True
-        self.timer.stop()
-        self._clear_active_gif_loop_watch()
-        self._cancel_pending_gif_swap()
-        self._media_resetting = False
-
-        if not self.playlist:
-            self._stop_all_video_players(clear_source=True)
-            if self.movie:
-                self.movie.stop()
-                self.movie.deleteLater()
-                self.movie = None
-            self.current_static_pixmap = None
-            self.current_media_path = None
-            self.stack.setCurrentIndex(0)
-            self._refresh_icon_overlay_for_current_media()
-            return
-
-        attempts = len(self.playlist)
-        while attempts > 0 and self.playlist:
-            # 2. advance index
-            next_idx = (self.current_idx + 1) % len(self.playlist)
-            source_path = str(self.playlist[next_idx] or "")
-
-            if bool(prefer_preload) and self._try_start_dual_video_preload(source_path):
-                self.current_idx = int(next_idx)
-                self.current_media_path = source_path
-                self._refresh_icon_overlay_for_current_media()
-                if self._performance_paused:
-                    self.set_performance_paused(True, reason="guard_active", force=True)
-                return
-
-            self._stop_all_video_players(clear_source=True)
-            if self.movie:
-                self.movie.stop()
-                self.movie.deleteLater()
-                self.movie = None
-            self.current_static_pixmap = None
-            self.current_media_path = None
-            self.current_idx = int(next_idx)
-            runtime_path = str(source_path)
-            runtime_is_video = self._is_video_path(runtime_path)
-            self.current_media_path = runtime_path
-
-            # 3. branch by extension
-            if runtime_is_video:
-                self._set_video_active_slot(int(getattr(self, "_video_active_slot", 0)))
-                self._play_video_path_on_active_player(runtime_path)
-                return
-
-            if self._is_gif_path(runtime_path):
-                if not self._start_gif_direct(runtime_path):
-                    self._record_media_failure(source_path, "invalid_gif")
-                    if source_path in self.quarantined_media:
-                        self.playlist.pop(self.current_idx)
-                        self.current_idx -= 1
-                    attempts -= 1
-                    continue
-                self._refresh_icon_overlay_for_current_media()
-                return
-
-            self.stack.setCurrentIndex(1)
-            pix = QPixmap(runtime_path)
-            if pix.isNull():
-                self._record_media_failure(source_path, "invalid_image")
-                if source_path in self.quarantined_media:
-                    self.playlist.pop(self.current_idx)
-                    self.current_idx -= 1
-                attempts -= 1
-                continue
-
-            self.current_static_pixmap = pix
-            self._update_static_pixmap_size()
-            if self._is_single_media_mode_active():
-                if self.timer.isActive():
-                    self.timer.stop()
-            else:
-                self.timer.start(self.interval_ms)
-            self._refresh_icon_overlay_for_current_media()
-            return
-
-        self.current_media_path = None
-        self.stack.setCurrentIndex(0)
-        self._refresh_icon_overlay_for_current_media()
+        _next_media_impl(self, prefer_preload=prefer_preload)
 
     def _update_static_pixmap_size(self):
-        if self.current_static_pixmap and not self.current_static_pixmap.isNull():
-            target = self._safe_target_size(getattr(self, "img_label", None), self.size())
-            fill_mode = self._is_media_fill_mode()
-            expand_mode = getattr(
-                Qt.AspectRatioMode,
-                "KeepAspectRatioByExpanding",
-                Qt.AspectRatioMode.KeepAspectRatio,
-            )
-            if fill_mode:
-                scaled = self.current_static_pixmap.scaled(
-                    target,
-                    expand_mode,
-                    Qt.TransformationMode.SmoothTransformation
-                )
-                if int(scaled.width()) > int(target.width()) or int(scaled.height()) > int(target.height()):
-                    cut_w = min(int(target.width()), int(scaled.width()))
-                    cut_h = min(int(target.height()), int(scaled.height()))
-                    cut_x = max(0, (int(scaled.width()) - int(cut_w)) // 2)
-                    cut_y = max(0, (int(scaled.height()) - int(cut_h)) // 2)
-                    scaled = scaled.copy(int(cut_x), int(cut_y), int(cut_w), int(cut_h))
-            else:
-                scaled = self.current_static_pixmap.scaled(
-                    target,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation
-                )
-            self.img_label.setPixmap(
-                scaled
-            )
+        _update_static_pixmap_size_impl(self)
 
     def check_video_status(self, s, player=None):
-        src_player = player if isinstance(player, QMediaPlayer) else self.sender()
-        if isinstance(src_player, QMediaPlayer):
-            pending_slot = int(getattr(self, "_video_dual_pending_slot", -1))
-            if pending_slot >= 0:
-                pending_player = self._video_player_for_slot(pending_slot)
-                if src_player is pending_player:
-                    if s == QMediaPlayer.MediaStatus.InvalidMedia:
-                        self._video_dbg(
-                            "pending_invalid_status",
-                            seq=int(getattr(self, "_video_dual_pending_seq", 0)),
-                            pending_media=self._debug_media_name(getattr(self, "_video_dual_pending_path", "")),
-                        )
-                        self._fallback_from_dual_pending("pending_invalid_media")
-                    return
-            if src_player is not self.media_player:
-                return
-        if self._media_resetting:
-            return
-        if s in (
-            QMediaPlayer.MediaStatus.LoadedMedia,
-            QMediaPlayer.MediaStatus.BufferingMedia,
-            QMediaPlayer.MediaStatus.BufferedMedia,
-        ):
-            self._apply_mute_state()
-            return
-        if s == QMediaPlayer.MediaStatus.EndOfMedia:
-            if int(getattr(self, "_video_dual_pending_slot", -1)) >= 0:
-                self._video_dbg(
-                    "active_end",
-                    seq=int(getattr(self, "_video_dual_pending_seq", 0)),
-                    pending_ready=bool(getattr(self, "_video_dual_pending_ready", False)),
-                    frame_ready=bool(getattr(self, "_video_dual_pending_frame_ready", False)),
-                    pending_frozen=bool(getattr(self, "_video_dual_pending_frozen", False)),
-                    current=self._debug_media_name(getattr(self, "current_media_path", "")),
-                )
-                if self._is_dual_pending_swap_ready():
-                    if self._swap_to_dual_pending():
-                        return
-                self._video_dual_waiting_for_swap = True
-                if hasattr(self, "_video_dual_end_wait_timer"):
-                    self._video_dual_end_wait_timer.start()
-                return
-            if self._is_single_media_mode_active() and self._is_native_video_infinite_loop_active():
-                try:
-                    self.media_player.play()
-                except Exception:
-                    pass
-                return
-            if self._restart_current_video_loop():
-                return
-            self.next_media()
-            return
-        if s == QMediaPlayer.MediaStatus.InvalidMedia:
-            self._skip_current_media("invalid_video_status")
+        _check_video_status_impl(self, s, player=player)
 
     def _on_video_error(self, error, error_string, player=None):
-        src_player = player if isinstance(player, QMediaPlayer) else self.sender()
-        if isinstance(src_player, QMediaPlayer):
-            pending_slot = int(getattr(self, "_video_dual_pending_slot", -1))
-            if pending_slot >= 0:
-                pending_player = self._video_player_for_slot(pending_slot)
-                if src_player is pending_player:
-                    self._video_dbg(
-                        "pending_error",
-                        seq=int(getattr(self, "_video_dual_pending_seq", 0)),
-                        error=str(error_string or error),
-                        pending_media=self._debug_media_name(getattr(self, "_video_dual_pending_path", "")),
-                    )
-                    self._fallback_from_dual_pending(f"pending_error:{error_string or error}")
-                    return
-            if src_player is not self.media_player:
-                return
-        if self._media_resetting:
-            return
-        if error == QMediaPlayer.Error.NoError:
-            return
-        reason = error_string if error_string else str(error)
-        self._video_dbg(
-            "active_error",
-            error=reason,
-            current=self._debug_media_name(getattr(self, "current_media_path", "")),
-        )
-        self._skip_current_media(f"video_error:{reason}")
+        _on_video_error_impl(self, error, error_string, player=player)
 
     def _on_video_position_changed(self, position_ms, player=None):
-        src_player = player if isinstance(player, QMediaPlayer) else self.sender()
-        if not isinstance(src_player, QMediaPlayer):
-            return
-        pending_slot = int(getattr(self, "_video_dual_pending_slot", -1))
-        if pending_slot >= 0:
-            pending_player = self._video_player_for_slot(pending_slot)
-            if src_player is pending_player:
-                try:
-                    pos = int(position_ms)
-                except Exception:
-                    pos = -1
-                if pos > 0:
-                    self._video_dual_pending_ready = True
-                    # Preload watchdog is only for "no progress" cases.
-                    if hasattr(self, "_video_dual_preload_timer") and self._video_dual_preload_timer.isActive():
-                        self._video_dual_preload_timer.stop()
-                    if bool(getattr(self, "_video_dual_waiting_for_swap", False)) and self._is_dual_pending_swap_ready():
-                        self._video_dbg(
-                            "pending_ready_during_wait",
-                            seq=int(getattr(self, "_video_dual_pending_seq", 0)),
-                            pos_ms=int(pos),
-                            pending_media=self._debug_media_name(getattr(self, "_video_dual_pending_path", "")),
-                        )
-                        self._video_dual_waiting_for_swap = False
-                        if hasattr(self, "_video_dual_end_wait_timer") and self._video_dual_end_wait_timer.isActive():
-                            self._video_dual_end_wait_timer.stop()
-                        self._swap_to_dual_pending()
-                return
-        if src_player is not self.media_player:
-            return
-        if self._media_resetting:
-            return
-        if int(self.stack.currentIndex()) != 2:
-            return
-        if int(getattr(self, "_video_dual_pending_slot", -1)) >= 0:
-            return
-        if not self._is_dual_video_transition_enabled():
-            return
-        if bool(getattr(self, "_performance_paused", False)):
-            return
-        current_path = str(getattr(self, "current_media_path", "") or "")
-        if not self._is_video_path(current_path):
-            return
-        try:
-            pos = int(position_ms)
-        except Exception:
-            pos = -1
-        if pos < 0:
-            return
-        try:
-            duration = int(src_player.duration())
-        except Exception:
-            duration = 0
-        if duration <= 0:
-            return
-        remain_ms = int(duration - pos)
-        if remain_ms > int(self._dual_preload_lookahead_ms(duration)):
-            return
-        current_key = self._normalize_exec_path(current_path)
-        if current_key and current_key == str(getattr(self, "_video_dual_preload_triggered_for_path", "")):
-            return
-        next_idx, next_path = self._next_playlist_entry()
-        if next_idx < 0 or not next_path:
-            return
-        if not self._is_video_path(next_path):
-            return
-        if self._normalize_exec_path(next_path) == self._normalize_exec_path(current_path):
-            return
-        if self._try_start_dual_video_preload(next_path):
-            self._video_dual_preload_triggered_for_path = current_key
-            self.current_idx = int(next_idx)
-            self.current_media_path = next_path
-            self._refresh_icon_overlay_for_current_media()
-            self._video_dbg(
-                "lookahead_trigger",
-                seq=int(getattr(self, "_video_dual_pending_seq", 0)),
-                remain_ms=int(remain_ms),
-                duration_ms=int(duration),
-                from_media=self._debug_media_name(current_path),
-                to_media=self._debug_media_name(next_path),
-            )
-            if self._performance_paused:
-                self.set_performance_paused(True, reason="guard_active", force=True)
+        _on_video_position_changed_impl(self, position_ms, player=player)
 
     def _on_video_frame_changed(self, frame, slot=-1):
-        pending_slot = int(getattr(self, "_video_dual_pending_slot", -1))
-        if pending_slot < 0:
-            return
-        if int(slot) != int(pending_slot):
-            return
-        is_valid = False
-        try:
-            is_valid = bool(frame.isValid())
-        except Exception:
-            is_valid = frame is not None
-        if not is_valid:
-            return
-        self._video_dual_pending_frame_ready = True
-        self._video_dual_pending_ready = True
-        if hasattr(self, "_video_dual_preload_timer") and self._video_dual_preload_timer.isActive():
-            self._video_dual_preload_timer.stop()
-        if not bool(getattr(self, "_video_dual_pending_frozen", False)):
-            pending_player = self._video_player_for_slot(pending_slot)
-            if isinstance(pending_player, QMediaPlayer):
-                try:
-                    pending_player.pause()
-                    self._video_dual_pending_frozen = True
-                    self._video_dbg(
-                        "pending_frame_ready",
-                        seq=int(getattr(self, "_video_dual_pending_seq", 0)),
-                        slot=int(pending_slot),
-                        pending_media=self._debug_media_name(getattr(self, "_video_dual_pending_path", "")),
-                    )
-                except Exception:
-                    self._video_dual_pending_frozen = False
-        if bool(getattr(self, "_video_dual_waiting_for_swap", False)) and self._is_dual_pending_swap_ready():
-            self._video_dual_waiting_for_swap = False
-            if hasattr(self, "_video_dual_end_wait_timer") and self._video_dual_end_wait_timer.isActive():
-                self._video_dual_end_wait_timer.stop()
-            self._swap_to_dual_pending()
+        _on_video_frame_changed_impl(self, frame, slot=slot)
 
 
     def mousePressEvent(self, e):
-        if e.button() == Qt.MouseButton.LeftButton:
-            if bool(getattr(self, "is_locked", False)):
-                self.cancel_active_interaction()
-                return
-            self._reset_axis_snap()
-            local_pos = e.position().toPoint() if hasattr(e, "position") else self.mapFromGlobal(e.globalPosition().toPoint())
-            if self._is_shift_down() and not getattr(self, "is_locked", False):
-                corner = self._corner_hit_test(local_pos)
-                if corner:
-                    self.is_resizing = True
-                    self.resize_corner = corner
-                    self.resize_start_pos = e.globalPosition().toPoint()
-                    self.resize_start_geo = self.geometry()
-                    self.start_pos = None
-                    self.is_moving = False
-                    self._set_resize_cursor(corner)
-                    self._show_size_hud()
-                    self._refresh_resize_ui()
-                    return
-            self.start_pos = e.globalPosition().toPoint()
-            self.is_moving = False
+        _mouse_press_event_impl(self, e)
 
     def mouseMoveEvent(self, e):
-        if bool(getattr(self, "is_locked", False)):
-            if self.start_pos or self.is_moving or self.is_resizing:
-                self.cancel_active_interaction()
-            else:
-                self._refresh_resize_ui()
-            return
-        if self.is_resizing:
-            self._apply_corner_resize(e.globalPosition().toPoint())
-            self._show_size_hud()
-            return
-
-        self._refresh_resize_ui()
-        if self.start_pos:
-            current_global = e.globalPosition().toPoint()
-            delta = current_global - self.start_pos
-            if delta.manhattanLength() > self._drag_threshold:
-                if not self.is_moving:
-                    self._set_drag_topmost(True)
-                self.is_moving = True
-                prev_x = self.x()
-                prev_y = self.y()
-                raw_x = self.x() + delta.x()
-                raw_y = self.y() + delta.y()
-                snap_x = self._apply_axis_snap("x", raw_x, current_global.x())
-                snap_y = self._apply_axis_snap("y", raw_y, current_global.y())
-                self._move_exact((snap_x, snap_y))
-                moved_dx = self.x() - prev_x
-                moved_dy = self.y() - prev_y
-                if moved_dx or moved_dy:
-                    if hasattr(self, "manager") and self.manager and hasattr(self.manager, "move_temp_group_by_delta"):
-                        self.manager.move_temp_group_by_delta(self.profile_id, moved_dx, moved_dy)
-                self._show_size_hud()
-                self.start_pos = current_global
+        _mouse_move_event_impl(self, e)
 
     def mouseReleaseEvent(self, e):
-        if e.button() == Qt.MouseButton.LeftButton:
-            if bool(getattr(self, "is_locked", False)):
-                self.cancel_active_interaction()
-                return
-            if self.is_resizing:
-                self.is_resizing = False
-                self.resize_corner = None
-                self.resize_start_pos = None
-                self._reset_axis_snap()
-                self.save_all_settings()
-                if hasattr(self, "manager") and self.manager and hasattr(self.manager, "save_temp_group_positions"):
-                    self.manager.save_temp_group_positions(self.profile_id)
-                self._hide_size_hud()
-                self._refresh_resize_ui()
-                return
-            if getattr(self, 'is_moving', False):
-                self.save_all_settings()
-                if hasattr(self, "manager") and self.manager and hasattr(self.manager, "save_temp_group_positions"):
-                    self.manager.save_temp_group_positions(self.profile_id)
-                self._hide_size_hud()
-            else:
-                has_manual_focus = bool(getattr(self, "_exec_manual_focus_enabled", False))
-                has_exec_target = bool(self.exec_path and os.path.exists(self.exec_path))
-                if not has_exec_target and not has_manual_focus:
-                    self.start_pos = None
-                    self.is_moving = False
-                    self._set_drag_topmost(False)
-                    self._reset_axis_snap()
-                    self._hide_size_hud()
-                    self._refresh_resize_ui()
-                    return
-                self._launch_or_focus_exec(self.exec_path)
-        self._set_drag_topmost(False)
-        self.start_pos = None
-        self.is_moving = False
-        self._reset_axis_snap()
-        self._hide_size_hud()
-        self._refresh_resize_ui()
+        _mouse_release_event_impl(self, e)
 
     def wheelEvent(self, e):
-        if e.modifiers() & Qt.KeyboardModifier.ControlModifier:
-            wheel_delta = e.angleDelta().y()
-            steps = int(wheel_delta / 120) if wheel_delta else 0
-            if steps == 0 and wheel_delta != 0:
-                steps = 1 if wheel_delta > 0 else -1
-            if steps != 0:
-                if hasattr(self, "manager") and self.manager and hasattr(self.manager, "adjust_temp_group_opacity"):
-                    self.manager.adjust_temp_group_opacity(self.profile_id, steps * 5)
-                else:
-                    new_opacity = max(10, min(100, self.current_opacity_pct + (steps * 5)))
-                    if new_opacity != self.current_opacity_pct:
-                        self.current_opacity_pct = new_opacity
-                        self.setWindowOpacity(self.current_opacity_pct / 100.0)
-                        self.save_all_settings()
-            return
-
-        if not self.playlist:
-            return
-
-        if e.angleDelta().y() > 0:
-            self.current_idx = (self.current_idx - 2) % len(self.playlist)
-
-        self.next_media(prefer_preload=False)
+        _wheel_event_impl(self, e)
 
     def dragEnterEvent(self, event):
-        path = self._extract_first_local_drop_path(event)
-        if path and (os.path.isdir(path) or os.path.isfile(path)):
-            event.acceptProposedAction()
-        else:
-            event.ignore()
+        _drag_enter_event_impl(self, event)
 
     def dragMoveEvent(self, event):
-        path = self._extract_first_local_drop_path(event)
-        if path and (os.path.isdir(path) or os.path.isfile(path)):
-            event.acceptProposedAction()
-        else:
-            event.ignore()
+        _drag_move_event_impl(self, event)
 
     def dragLeaveEvent(self, event):
-        event.accept()
+        _drag_leave_event_impl(self, event)
 
     def dropEvent(self, event):
-        path = self._extract_first_local_drop_path(event)
-        if self._apply_drop_target(path):
-            event.acceptProposedAction()
-        else:
-            event.ignore()
+        _drop_event_impl(self, event)
 
     def contextMenuEvent(self, e):
-        menu = QMenu(self)
-        menu.setStyleSheet("QMenu { background-color: #333; color: white; border: 1px solid #555; } QMenu::item:selected { background-color: #555; }")
-        action_settings = menu.addAction("위젯 설정")
-        action_settings.triggered.connect(self.open_settings)
-        action_master = menu.addAction("위젯 컨트롤러")
-        action_master.triggered.connect(self.open_master_controller)
-        menu.exec(e.globalPos())
+        _context_menu_event_impl(self, e)
 
     def open_master_controller(self):
-        if hasattr(self, "manager") and self.manager and hasattr(self.manager, "show_master_window"):
-            self.manager.show_master_window()
+        _open_master_controller_impl(self)
 
     def showEvent(self, e):
-        if not bool(getattr(self, "_initial_media_prepared", False)):
-            if bool(getattr(self, "_defer_initial_prepare_on_show", False)):
-                self._defer_initial_prepare_on_show = False
-                QTimer.singleShot(0, self.prepare_media_before_show)
-            else:
-                self.prepare_media_before_show()
+        _prepare_first_show_impl(self)
         super().showEvent(e)
-        self._sync_video_viewport_update_mode()
-        # Hidden pre-warm can still use a stale child size on some starts.
-        # Re-apply once visible so static image size matches final widget geometry.
-        self._apply_media_scale_mode()
-        if self._should_clone_desktop_icons() or self._should_punch_desktop_icons():
-            self.apply_mask_and_style()
-            self._schedule_desktop_icon_overlay_bootstrap(retries=4, delay_ms=60)
+        _handle_post_show_impl(self)
 
     def resizeEvent(self, e):
-        if hasattr(self, "desktop_icon_clone_overlay"):
-            self.desktop_icon_clone_overlay.setGeometry(self.rect())
-            if self.desktop_icon_clone_overlay.isVisible():
-                self.desktop_icon_clone_overlay.raise_()
-        if hasattr(self, 'selection_overlay'):
-            self.selection_overlay.setGeometry(self.rect())
-            self.selection_overlay.raise_()
-        if hasattr(self, 'resize_overlay'):
-            self.resize_overlay.setGeometry(self.rect())
-            if self.resize_overlay.isVisible():
-                self.resize_overlay.raise_()
-        if hasattr(self, "group_badge"):
-            self._place_group_badge()
-            if self.group_badge.isVisible():
-                self.group_badge.raise_()
-        if hasattr(self, 'size_hud') and self.size_hud.isVisible():
-            self._refresh_size_hud()
-        if hasattr(self, "action_hud") and self.action_hud.isVisible():
-            self._refresh_action_hud()
-
-        self._apply_media_scale_mode()
-
-        self.apply_mask_and_style()
-        self._refresh_resize_ui()
-        self._refresh_group_badge()
+        _handle_resize_impl(self)
         super().resizeEvent(e)
 
     def moveEvent(self, e):
-        if self._should_clone_desktop_icons() or self._should_punch_desktop_icons():
-            self.apply_mask_and_style()
+        _handle_move_impl(self)
         super().moveEvent(e)
 
     def closeEvent(self, event):
-        self.timer.stop()
-        self._clear_active_gif_loop_watch()
-        self._cancel_pending_gif_swap()
-        self._cancel_video_crossfade()
-        self._cancel_video_dual_pending(clear_source=True)
-        self._stop_exec_launch_learning()
-        self._clear_bound_exec_window()
-        
-
-        self._stop_all_video_players(clear_source=True)
-        
-
-        if isinstance(getattr(self, "_video_primary_player", None), QMediaPlayer):
-            self._video_primary_player.deleteLater()
-        if isinstance(getattr(self, "_video_secondary_player", None), QMediaPlayer):
-            self._video_secondary_player.deleteLater()
-        self.audio_output.deleteLater()
-        if self.movie:
-            self.movie.stop()
-            self.movie.deleteLater()
-
-        if hasattr(self, "folder_refresh_timer"):
-            self.folder_refresh_timer.stop()
-        if hasattr(self, "folder_watcher"):
-            old_dirs = self.folder_watcher.directories()
-            if old_dirs:
-                self.folder_watcher.removePaths(old_dirs)
-            old_files = self.folder_watcher.files()
-            if old_files:
-                self.folder_watcher.removePaths(old_files)
-        app = QApplication.instance()
-        if app:
-            app.removeEventFilter(self)
-        if hasattr(self, "_desktop_icon_mask_timer") and self._desktop_icon_mask_timer.isActive():
-            self._desktop_icon_mask_timer.stop()
-        if hasattr(self, "_desktop_icon_bootstrap_timer") and self._desktop_icon_bootstrap_timer.isActive():
-            self._desktop_icon_bootstrap_timer.stop()
-        self._set_clone_overlay_items([])
-        if hasattr(self, "_settings_sync_timer") and self._settings_sync_timer.isActive():
-            self._settings_sync_timer.stop()
-             
-        skip_sync = bool(getattr(self.manager, "_bulk_set_switch_active", False))
-        self.save_all_settings(sync=(not skip_sync))
+        _prepare_close_impl(self)
         super().closeEvent(event)
+
+
+_bind_settings_dialog_desktop_widget(DesktopWidget)
 
 
 class MasterController(QMainWindow):
     @staticmethod
     def _frozen_executable_path():
-        if not bool(getattr(sys, "frozen", False)):
-            return ""
-        try:
-            exe_path = str(getattr(sys, "executable", "") or "").strip()
-            if not exe_path:
-                return ""
-            exe_path = os.path.abspath(exe_path)
-        except Exception:
-            return ""
-        if not os.path.isfile(exe_path):
-            return ""
-        return exe_path
+        return _mc_frozen_executable_path_impl()
 
     @staticmethod
     def _windows_startup_folder_path():
-        try:
-            appdata = str(os.environ.get("APPDATA", "") or "").strip()
-        except Exception:
-            appdata = ""
-        if not appdata:
-            return ""
-        return os.path.join(appdata, "Microsoft", "Windows", "Start Menu", "Programs", "Startup")
+        return _mc_windows_startup_folder_path_impl()
 
     @staticmethod
     def _startup_shortcut_icon_path(exe_path):
-        exe = str(exe_path or "").strip()
-        if not exe:
-            return ""
-        exe_dir = os.path.dirname(exe)
-        exe_name = os.path.splitext(os.path.basename(exe))[0]
-        icon_names = ["icon.ico"]
-        if exe_name:
-            icon_names.append(f"{exe_name}.ico")
-        icon_names.extend(["MyCanvas.ico"])
-        seen = set()
-        for name in icon_names:
-            candidate = os.path.join(exe_dir, name)
-            norm = os.path.normcase(os.path.normpath(candidate))
-            if norm in seen:
-                continue
-            seen.add(norm)
-            if os.path.isfile(candidate):
-                return candidate
-        return exe
+        return _mc_startup_shortcut_icon_path_impl(exe_path)
 
     @staticmethod
     def _startup_shortcut_pref_key():
-        return "startup_shortcut_enabled_v1"
+        return _mc_startup_shortcut_pref_key_impl()
 
     def _startup_shortcut_path(self, exe_path=""):
-        resolved_exe = str(exe_path or "").strip()
-        if not resolved_exe:
-            resolved_exe = self._frozen_executable_path()
-        if not resolved_exe:
-            return ""
-        startup_dir = self._windows_startup_folder_path()
-        if not startup_dir:
-            return ""
-        exe_name = os.path.splitext(os.path.basename(resolved_exe))[0] or "MyCanvas"
-        return os.path.join(startup_dir, f"{exe_name}.lnk")
+        return _mc_startup_shortcut_path_impl(self, exe_path=exe_path)
 
     def _startup_shortcut_enabled(self):
-        raw = self.master_settings.value(self._startup_shortcut_pref_key(), None)
-        if raw is None:
-            return _as_bool(os.environ.get("MYCANVAS_ENSURE_STARTUP_SHORTCUT", "0"), False)
-        return _as_bool(raw, False)
+        return _mc_startup_shortcut_enabled_impl(self)
 
     @staticmethod
     def _fast_startup_enabled():
-        return _as_bool(os.environ.get("MYCANVAS_FAST_STARTUP", "1"), True)
+        return _mc_fast_startup_enabled_impl()
 
     @staticmethod
     def _minimal_validation_enabled():
-        return _as_bool(os.environ.get("MYCANVAS_MIN_VALIDATION", "1"), True)
+        return _mc_minimal_validation_enabled_impl()
 
     @staticmethod
     def _fast_set_switch_enabled():
-        return _as_bool(os.environ.get("MYCANVAS_FAST_SET_SWITCH", "1"), True)
+        return _mc_fast_set_switch_enabled_impl()
 
     @classmethod
     def _resolve_app_icon(cls):
-        # Fast path: only check the most likely locations.
-        quick_candidates = []
-        try:
-            exe_path = str(getattr(sys, "executable", "") or "").strip()
-            if exe_path:
-                exe_dir = os.path.dirname(os.path.abspath(exe_path))
-                quick_candidates.append(os.path.join(exe_dir, "MyCanvas.ico"))
-                quick_candidates.append(os.path.join(exe_dir, "icon.ico"))
-        except Exception:
-            pass
-        try:
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            if script_dir:
-                quick_candidates.append(os.path.join(script_dir, "MyCanvas.ico"))
-                quick_candidates.append(os.path.join(script_dir, "icon.ico"))
-        except Exception:
-            pass
-
-        seen = set()
-        for candidate in quick_candidates:
-            key = os.path.normcase(os.path.normpath(str(candidate)))
-            if key in seen:
-                continue
-            seen.add(key)
-            try:
-                if os.path.isfile(candidate):
-                    icon = QIcon(candidate)
-                    if not icon.isNull():
-                        return icon
-            except Exception:
-                continue
-
-        # Slow fallback path only when fast-start mode is disabled.
-        if not bool(cls._fast_startup_enabled()):
-            runtime_dirs = []
-            try:
-                meipass = str(getattr(sys, "_MEIPASS", "") or "").strip()
-                if meipass:
-                    runtime_dirs.append(meipass)
-            except Exception:
-                pass
-            try:
-                exe_path = str(getattr(sys, "executable", "") or "").strip()
-                if exe_path:
-                    runtime_dirs.append(os.path.dirname(os.path.abspath(exe_path)))
-            except Exception:
-                pass
-            try:
-                script_dir = os.path.dirname(os.path.abspath(__file__))
-                if script_dir:
-                    runtime_dirs.append(script_dir)
-            except Exception:
-                pass
-            try:
-                cwd = os.getcwd()
-                if cwd:
-                    runtime_dirs.append(cwd)
-            except Exception:
-                pass
-            ordered_dirs = []
-            seen_dirs = set()
-            for d in runtime_dirs:
-                key = os.path.normcase(os.path.normpath(str(d)))
-                if key in seen_dirs:
-                    continue
-                seen_dirs.add(key)
-                ordered_dirs.append(str(d))
-            icon_names = []
-            try:
-                exe_name = os.path.splitext(
-                    os.path.basename(str(getattr(sys, "executable", "") or "").strip())
-                )[0]
-                if exe_name:
-                    icon_names.append(f"{exe_name}.ico")
-            except Exception:
-                pass
-            icon_names.extend(["MyCanvas.ico", "icon.ico"])
-            seen_paths = set()
-            for folder in ordered_dirs:
-                for name in icon_names:
-                    candidate = os.path.join(folder, name)
-                    key = os.path.normcase(os.path.normpath(candidate))
-                    if key in seen_paths:
-                        continue
-                    seen_paths.add(key)
-                    try:
-                        if os.path.isfile(candidate):
-                            icon = QIcon(candidate)
-                            if not icon.isNull():
-                                return icon
-                    except Exception:
-                        continue
-
-            try:
-                exe_path = str(getattr(sys, "executable", "") or "").strip()
-                if exe_path and os.path.isfile(exe_path):
-                    exe_icon = QFileIconProvider().icon(QFileInfo(exe_path))
-                    if not exe_icon.isNull():
-                        return exe_icon
-            except Exception:
-                pass
-
-        fallback = QIcon("MyCanvas.ico")
-        if not fallback.isNull():
-            return fallback
-        pixmap = QPixmap(16, 16)
-        pixmap.fill(Qt.GlobalColor.green)
-        return QIcon(pixmap)
+        return _mc_resolve_app_icon_impl(cls)
 
     def _ensure_windows_startup_shortcut(self, force=False):
-        if (not bool(force)) and (not self._startup_shortcut_enabled()):
-            return
-        exe_path = self._frozen_executable_path()
-        win32com_client = _get_win32com_client()
-        if not exe_path or win32com_client is None:
-            return
-        shortcut_path = self._startup_shortcut_path(exe_path)
-        if not shortcut_path:
-            return
-        startup_dir = os.path.dirname(shortcut_path)
-        try:
-            os.makedirs(startup_dir, exist_ok=True)
-        except Exception:
-            return
-        exe_name = os.path.splitext(os.path.basename(exe_path))[0] or "MyCanvas"
-        icon_path = self._startup_shortcut_icon_path(exe_path)
-        marker = ""
-        try:
-            norm_exe = os.path.normcase(os.path.normpath(str(exe_path)))
-            marker = f"{norm_exe}|{int(os.path.getmtime(exe_path))}"
-        except Exception:
-            marker = str(exe_path)
-        marker_key = "startup_shortcut_marker_v1"
-        marker_settings = None
-        try:
-            marker_settings = QSettings("MyHomeApp", "MasterV3")
-            old_marker = str(marker_settings.value(marker_key, "") or "")
-            if old_marker == marker:
-                try:
-                    if os.path.isfile(shortcut_path):
-                        return
-                except Exception:
-                    return
-        except Exception:
-            marker_settings = None
-        try:
-            shell = win32com_client.Dispatch("WScript.Shell")
-            shortcut = shell.CreateShortCut(shortcut_path)
-            shortcut.Targetpath = exe_path
-            shortcut.WorkingDirectory = os.path.dirname(exe_path)
-            shortcut.Arguments = ""
-            shortcut.IconLocation = f"{icon_path},0"
-            shortcut.Description = f"{exe_name} auto start"
-            shortcut.Save()
-            if marker_settings is not None:
-                try:
-                    marker_settings.setValue(marker_key, marker)
-                    marker_settings.sync()
-                except Exception:
-                    pass
-        except Exception:
-            pass
+        _mc_ensure_windows_startup_shortcut_impl(self, force=force)
 
     def _remove_windows_startup_shortcut(self):
-        shortcut_path = self._startup_shortcut_path(self._frozen_executable_path())
-        if shortcut_path:
-            try:
-                if os.path.isfile(shortcut_path):
-                    os.remove(shortcut_path)
-            except Exception:
-                pass
-        try:
-            self.master_settings.remove("startup_shortcut_marker_v1")
-            self.master_settings.sync()
-        except Exception:
-            pass
+        _mc_remove_windows_startup_shortcut_impl(self)
 
     def __init__(self):
         super().__init__()
@@ -9146,6 +5403,7 @@ class MasterController(QMainWindow):
         self._master_settings_sync_timer.setSingleShot(True)
         self._master_settings_sync_timer.timeout.connect(self._flush_master_settings_sync)
         self.widgets = {}
+        self._desktop_widget_cls = DesktopWidget
         self._temp_group_ids = set()
         self._exec_window_claims = {}
         self.profile_rows = {}
@@ -9705,101 +5963,44 @@ class MasterController(QMainWindow):
         
     @staticmethod
     def _as_list(value):
-        if isinstance(value, list):
-            return [str(v) for v in value if str(v)]
-        if value in (None, ""):
-            return []
-        return [str(value)]
+        return _mset_as_list_impl(value)
 
     @staticmethod
     def _normalize_ids(values):
-        out = []
-        seen = set()
-        for value in values:
-            sid = str(value)
-            if not sid or sid in seen:
-                continue
-            out.append(sid)
-            seen.add(sid)
-        return out
+        return _mset_normalize_ids_impl(values)
 
     def _set_key(self, set_id, field):
-        return f"sets/{set_id}/{field}"
+        return _mset_set_key_impl(self, set_id, field)
 
     def _all_profile_ids(self):
-        return self._normalize_ids(self._as_list(self.master_settings.value("profile_ids", [])))
+        return _mset_all_profile_ids_impl(self)
 
     def _next_profile_id(self, existing_ids=None):
-        if existing_ids is None:
-            existing_ids = self._all_profile_ids()
-        max_id = 0
-        for pid in existing_ids:
-            try:
-                max_id = max(max_id, int(str(pid)))
-            except Exception:
-                continue
-        return str(max_id + 1)
+        return _mset_next_profile_id_impl(self, existing_ids=existing_ids)
 
     def _next_set_id(self):
-        max_id = 0
-        for sid in self._set_order:
-            try:
-                max_id = max(max_id, int(str(sid)))
-            except Exception:
-                continue
-        return str(max_id + 1)
+        return _mset_next_set_id_impl(self)
 
     def _default_set_name(self):
-        used = {str(data.get("name", "")).strip() for data in self._set_defs.values()}
-        idx = 1
-        while True:
-            candidate = f"세트{idx}"
-            if candidate not in used:
-                return candidate
-            idx += 1
+        return _mset_default_set_name_impl(self)
 
     def _profile_run_enabled(self, pid):
-        spid = str(pid)
-        raw = QSettings("MyHomeApp", f"Profile_{spid}").value("run_enabled", None)
-        if raw is None:
-            return True
-        return _as_bool(raw, True)
+        return _mset_profile_run_enabled_impl(self, pid)
 
     def _set_profile_run_enabled(self, pid, enabled):
-        spid = str(pid)
-        settings = QSettings("MyHomeApp", f"Profile_{spid}")
-        settings.setValue("run_enabled", bool(enabled))
-        settings.sync()
+        _mset_set_profile_run_enabled_impl(self, pid, enabled)
 
     def _clone_profile_settings(self, src_pid, dst_pid):
-        src = QSettings("MyHomeApp", f"Profile_{src_pid}")
-        dst = QSettings("MyHomeApp", f"Profile_{dst_pid}")
-        dst.clear()
-        for key in src.allKeys():
-            dst.setValue(key, src.value(key))
-        if dst.value("run_enabled", None) is None:
-            dst.setValue("run_enabled", True)
-        dst.sync()
+        _mset_clone_profile_settings_impl(self, src_pid, dst_pid)
 
     def _set_current_set_id(self, set_id, persist=True):
-        sid = str(set_id)
-        if sid not in self._set_defs:
-            sid = self._set_order[0] if self._set_order else ""
-        self._current_set_id = sid
-        if persist and sid:
-            self.master_settings.setValue("current_set_id", sid)
-            self.master_settings.sync()
-        self._refresh_set_ui()
+        _mset_set_current_set_id_impl(self, set_id, persist=persist)
 
     def selected_set_id(self):
-        return str(self._current_set_id) if self._current_set_id else ""
+        return _mset_selected_set_id_impl(self)
 
     def get_set_items(self):
-        items = []
-        for sid in self._set_order:
-            data = self._set_defs.get(str(sid), {})
-            items.append((str(sid), str(data.get("name", f"세트{sid}")), len(data.get("profiles", []))))
-        return items
+        return _mset_get_set_items_impl(self)
 
     def _clear_set_list_sidebar(self):
         if not hasattr(self, "set_list_layout"):
@@ -9933,188 +6134,22 @@ class MasterController(QMainWindow):
             self.load_profiles()
 
     def _load_set_state(self):
-        profile_ids = self._all_profile_ids()
-        raw_set_ids = self._normalize_ids(self._as_list(self.master_settings.value("set_ids", [])))
-        if bool(getattr(self, "_fast_startup_mode", False)) and _as_bool(
-            os.environ.get("MYCANVAS_MIN_VALIDATION", "1"),
-            True,
-        ):
-            if not raw_set_ids:
-                raw_set_ids = ["1"]
-            profile_set = set(profile_ids)
-            set_defs = {}
-            for sid in raw_set_ids:
-                name_raw = self.master_settings.value(self._set_key(sid, "name"), f"세트{sid}")
-                name = str(name_raw).strip() or f"세트{sid}"
-                raw_profiles = self._normalize_ids(
-                    self._as_list(self.master_settings.value(self._set_key(sid, "profiles"), []))
-                )
-                if profile_set:
-                    raw_profiles = [pid for pid in raw_profiles if pid in profile_set]
-                set_defs[sid] = {"name": name, "profiles": raw_profiles}
-            if not set_defs:
-                set_defs = {"1": {"name": "세트1", "profiles": list(profile_ids)}}
-                raw_set_ids = ["1"]
-            current_sid = str(self.master_settings.value("current_set_id", raw_set_ids[0]))
-            if current_sid not in set_defs:
-                current_sid = raw_set_ids[0]
-            applied_sid = str(self.master_settings.value("applied_set_id", current_sid))
-            if applied_sid not in set_defs:
-                applied_sid = current_sid
-            self._set_order = list(raw_set_ids)
-            self._set_defs = set_defs
-            self._current_set_id = current_sid
-            self._applied_set_id = applied_sid
-            return
-        changed = False
-
-        if not raw_set_ids:
-            raw_set_ids = ["1"]
-            self.master_settings.setValue("set_ids", raw_set_ids)
-            self.master_settings.setValue(self._set_key("1", "name"), "세트1")
-            self.master_settings.setValue(self._set_key("1", "profiles"), list(profile_ids))
-            changed = True
-
-        set_defs = {}
-        assigned_profiles = set()
-        for sid in raw_set_ids:
-            name_raw = self.master_settings.value(self._set_key(sid, "name"), f"세트{sid}")
-            name = str(name_raw).strip() or f"세트{sid}"
-            raw_profiles = self._normalize_ids(
-                self._as_list(self.master_settings.value(self._set_key(sid, "profiles"), []))
-            )
-            clean_profiles = []
-            for pid in raw_profiles:
-                if pid not in profile_ids:
-                    changed = True
-                    continue
-                if pid in assigned_profiles:
-                    changed = True
-                    continue
-                assigned_profiles.add(pid)
-                clean_profiles.append(pid)
-            if raw_profiles != clean_profiles:
-                self.master_settings.setValue(self._set_key(sid, "profiles"), clean_profiles)
-                changed = True
-            if str(name_raw) != name:
-                self.master_settings.setValue(self._set_key(sid, "name"), name)
-                changed = True
-            set_defs[sid] = {"name": name, "profiles": clean_profiles}
-
-        if not set_defs:
-            raw_set_ids = ["1"]
-            set_defs = {"1": {"name": "세트1", "profiles": list(profile_ids)}}
-            self.master_settings.setValue("set_ids", raw_set_ids)
-            self.master_settings.setValue(self._set_key("1", "name"), "세트1")
-            self.master_settings.setValue(self._set_key("1", "profiles"), list(profile_ids))
-            changed = True
-
-        current_sid = str(self.master_settings.value("current_set_id", raw_set_ids[0]))
-        if current_sid not in set_defs:
-            current_sid = raw_set_ids[0]
-            self.master_settings.setValue("current_set_id", current_sid)
-            changed = True
-
-        # Backward-compat: if profile_ids contains entries that are not referenced by
-        # any set, attach them to the currently selected set so they remain operable.
-        unassigned_profiles = [pid for pid in profile_ids if pid not in assigned_profiles]
-        if unassigned_profiles:
-            attach_sid = current_sid if current_sid in set_defs else (raw_set_ids[0] if raw_set_ids else "")
-            if attach_sid:
-                existing_profiles = list(set_defs.get(attach_sid, {}).get("profiles", []))
-                merged_profiles = existing_profiles + [pid for pid in unassigned_profiles if pid not in existing_profiles]
-                if merged_profiles != existing_profiles:
-                    set_defs.setdefault(attach_sid, {"name": f"세트{attach_sid}", "profiles": []})
-                    set_defs[attach_sid]["profiles"] = merged_profiles
-                    self.master_settings.setValue(self._set_key(attach_sid, "profiles"), merged_profiles)
-                    changed = True
-
-        self._set_order = list(raw_set_ids)
-        self._set_defs = set_defs
-        self._current_set_id = current_sid
-        applied_sid = str(self.master_settings.value("applied_set_id", current_sid))
-        if applied_sid not in set_defs:
-            applied_sid = current_sid
-            self.master_settings.setValue("applied_set_id", applied_sid)
-            changed = True
-        self._applied_set_id = applied_sid
-        if changed:
-            self.master_settings.sync()
+        _mset_load_set_state_impl(self)
 
     def _migrate_profile_run_flags(self):
-        if bool(getattr(self, "_fast_startup_mode", False)) and _as_bool(
-            os.environ.get("MYCANVAS_MIN_VALIDATION", "1"),
-            True,
-        ):
-            return
-        marker_key = "run_flag_migrated_v1"
-        if _as_bool(self.master_settings.value(marker_key, False), False):
-            return
-        profile_ids = self._all_profile_ids()
-        legacy_raw = self.master_settings.value("active_profiles", None)
-        has_legacy = legacy_raw is not None
-        legacy_active = set(self._as_list(legacy_raw)) if has_legacy else set()
-        for pid in profile_ids:
-            settings = QSettings("MyHomeApp", f"Profile_{pid}")
-            if settings.value("run_enabled", None) is None:
-                should_run = (pid in legacy_active) if has_legacy else True
-                settings.setValue("run_enabled", bool(should_run))
-        self.master_settings.setValue(marker_key, True)
-        self.master_settings.sync()
+        _mset_migrate_profile_run_flags_impl(self)
 
     def _current_set_profiles(self):
-        sid = self.selected_set_id()
-        data = self._set_defs.get(sid, {})
-        return list(data.get("profiles", []))
+        return _mset_current_set_profiles_impl(self)
 
     def _set_current_profiles(self, profile_ids):
-        sid = self.selected_set_id()
-        if not sid or sid not in self._set_defs:
-            return
-        clean_profiles = self._normalize_ids(profile_ids)
-        self._set_defs[sid]["profiles"] = clean_profiles
-        self.master_settings.setValue(self._set_key(sid, "profiles"), clean_profiles)
-        self.master_settings.sync()
+        _mset_set_current_profiles_impl(self, profile_ids)
 
     def _remove_profile_from_sets(self, profile_id):
-        spid = str(profile_id)
-        changed = False
-        for sid in self._set_order:
-            data = self._set_defs.get(sid, {})
-            profiles = [pid for pid in data.get("profiles", []) if pid != spid]
-            if profiles != data.get("profiles", []):
-                data["profiles"] = profiles
-                self._set_defs[sid] = data
-                self.master_settings.setValue(self._set_key(sid, "profiles"), profiles)
-                changed = True
-        if changed:
-            self.master_settings.sync()
+        _mset_remove_profile_from_sets_impl(self, profile_id)
 
     def _cleanup_orphan_profiles(self):
-        referenced = set()
-        for data in self._set_defs.values():
-            for pid in data.get("profiles", []):
-                referenced.add(str(pid))
-
-        profile_ids = self._all_profile_ids()
-        orphan_ids = [pid for pid in profile_ids if pid not in referenced]
-        if not orphan_ids:
-            return 0
-
-        for pid in orphan_ids:
-            profile_settings = QSettings("MyHomeApp", f"Profile_{pid}")
-            profile_settings.clear()
-            profile_settings.sync()
-
-        kept_profile_ids = [pid for pid in profile_ids if pid in referenced]
-        self.master_settings.setValue("profile_ids", kept_profile_ids)
-        active_ids = self._as_list(self.master_settings.value("active_profiles", []))
-        self.master_settings.setValue(
-            "active_profiles",
-            [pid for pid in active_ids if pid in referenced]
-        )
-        self.master_settings.sync()
-        return len(orphan_ids)
+        return _mset_cleanup_orphan_profiles_impl(self)
 
     def _profile_startup_media_kind(self, pid):
         if _as_bool(os.environ.get("MYCANVAS_FAST_STARTUP", "1"), True):
@@ -10146,672 +6181,109 @@ class MasterController(QMainWindow):
 
     @staticmethod
     def _startup_delay_for_kind(kind, mode="default"):
-        key = str(kind or "").strip().lower()
-        fast = _as_bool(os.environ.get("MYCANVAS_FAST_STARTUP", "1"), True)
-        queue_mode = str(mode or "").strip().lower()
-        if queue_mode == "set_switch" and _as_bool(os.environ.get("MYCANVAS_FAST_SET_SWITCH", "1"), True):
-            if key == "video":
-                return 150 if fast else 240
-            if key == "gif":
-                return 90 if fast else 160
-            return 10 if fast else 30
-        if key == "video":
-            return 200 if fast else 300
-        if key == "gif":
-            return 130 if fast else 210
-        return 20 if fast else 50
+        return _mqueue_startup_delay_for_kind_impl(kind, mode=mode)
 
     def _cancel_startup_queue(self):
-        if hasattr(self, "_startup_queue_timer") and self._startup_queue_timer.isActive():
-            self._startup_queue_timer.stop()
-        self._startup_queue = []
-        self._startup_queue_active = False
-        self._startup_queue_mode = "default"
+        _mqueue_cancel_startup_queue_impl(self)
 
     def _build_profile_startup_queue(self, profile_ids):
-        ordered = []
-        for order_idx, pid in enumerate(profile_ids):
-            spid = str(pid)
-            if not self._profile_run_enabled(spid):
-                continue
-            name = QSettings("MyHomeApp", f"Profile_{spid}").value("name", "New 세팅")
-            kind = self._profile_startup_media_kind(spid)
-            if kind == "video":
-                priority = 1
-            elif kind == "gif":
-                priority = 2
-            else:
-                priority = 0
-            ordered.append((int(priority), int(order_idx), spid, str(name), str(kind)))
-        ordered.sort(key=lambda x: (x[0], x[1]))
-        return [(pid, name, kind) for _prio, _idx, pid, name, kind in ordered]
+        return _mqueue_build_profile_startup_queue_impl(self, profile_ids)
 
     def _build_set_startup_queue(self, set_id):
-        sid = str(set_id)
-        data = self._set_defs.get(sid, {})
-        return self._build_profile_startup_queue(data.get("profiles", []))
+        return _mqueue_build_set_startup_queue_impl(self, set_id)
 
     def _begin_startup_queue(self, entries, mode="default"):
-        self._cancel_startup_queue()
-        self._startup_queue_mode = str(mode or "default").strip().lower() or "default"
-        self._startup_queue = list(entries)
-        self._startup_queue_active = bool(self._startup_queue)
-        if not self._startup_queue_active:
-            self.update_active_status()
-            self.load_profiles()
-            self._refresh_apply_button_state()
-            self._startup_queue_mode = "default"
-            return
-        self._run_next_startup_item()
+        _mqueue_begin_startup_queue_impl(self, entries, mode=mode)
 
     def _run_next_startup_item(self):
-        if not bool(getattr(self, "_startup_queue_active", False)):
-            return
-        if not self._startup_queue:
-            self._startup_queue_active = False
-            self.update_active_status()
-            self.load_profiles()
-            self._refresh_apply_button_state()
-            self._startup_queue_mode = "default"
-            return
-
-        pid, name, kind = self._startup_queue.pop(0)
-        self._start_widget_instance(pid, name, startup_kind=kind)
-        self.update_active_status(sync=False)
-
-        if not self._startup_queue:
-            self._startup_queue_active = False
-            self.update_active_status(sync=True)
-            self.load_profiles()
-            self._refresh_apply_button_state()
-            self._startup_queue_mode = "default"
-            return
-        self._startup_queue_timer.start(self._startup_delay_for_kind(kind, self._startup_queue_mode))
+        _mqueue_run_next_startup_item_impl(self)
 
     def _sync_all_widget_video_viewports(self):
-        for widget in list(self.widgets.values()):
-            if not isinstance(widget, DesktopWidget):
-                continue
-            try:
-                widget._sync_video_viewport_update_mode()
-            except Exception:
-                pass
+        _mwr_sync_all_widget_video_viewports_impl(self)
 
     def _start_widget_instance(self, pid, name, startup_kind=""):
-        spid = str(pid)
-        if spid in self.widgets:
-            return False
-        widget = DesktopWidget(spid, name, self)
-        kind_key = str(startup_kind or "").strip().lower()
-        defer_prepare = bool(
-            getattr(self, "_startup_queue_active", False)
-            and kind_key in ("video", "gif")
-        )
-        widget._defer_initial_prepare_on_show = bool(defer_prepare)
-        if not defer_prepare:
-            try:
-                widget.prepare_media_before_show()
-            except Exception:
-                pass
-        self.widgets[spid] = widget
-        widget.show()
-        self._sync_all_widget_video_viewports()
-        try:
-            widget = self.widgets[spid]
-            QTimer.singleShot(
-                0,
-                lambda w=widget: (
-                    w._schedule_desktop_icon_overlay_bootstrap(retries=4, delay_ms=50)
-                    if isinstance(w, DesktopWidget)
-                    else None
-                ),
-            )
-        except Exception:
-            pass
-        if spid in self._temp_group_ids:
-            self.widgets[spid]._refresh_group_badge()
-        if self._gpu_guard_paused and bool(getattr(self.widgets[spid], "gpu_guard_enabled", False)):
-            self.widgets[spid].set_performance_paused(
-                True, reason=f"gpu {self._gpu_last_usage:.1f}%", force=True
-            )
-        return True
+        return _mwr_start_widget_instance_impl(self, pid, name, startup_kind=startup_kind)
 
     def _stop_widgets_bulk(self, target_ids):
-        target = {str(pid) for pid in target_ids}
-        if not target:
-            return False
-        changed = False
-        self._bulk_set_switch_active = True
-        try:
-            for pid in list(target):
-                widget = self.widgets.get(pid)
-                if widget is None:
-                    continue
-                widget.close()
-                widget.deleteLater()
-                self.widgets.pop(pid, None)
-                changed = True
-        finally:
-            self._bulk_set_switch_active = False
-        if changed:
-            self._sync_all_widget_video_viewports()
-        return changed
+        return _mwr_stop_widgets_bulk_impl(self, target_ids)
 
     def _stop_all_widgets_bulk(self):
-        self._cancel_startup_queue()
-        self.clear_temp_group(silent=True)
-        return self._stop_widgets_bulk(list(self.widgets.keys()))
+        return _mwr_stop_all_widgets_bulk_impl(self)
 
     def is_temp_group_member(self, pid):
-        spid = str(pid)
-        return spid in self._temp_group_ids
+        return _mtg_is_temp_group_member_impl(self, pid)
 
     def _sync_temp_group_badges(self):
-        for widget in self.widgets.values():
-            if isinstance(widget, DesktopWidget):
-                widget._refresh_group_badge()
+        _mtg_sync_temp_group_badges_impl(self)
 
     def toggle_temp_group_member(self, pid):
-        spid = str(pid)
-        if not spid or spid not in self.widgets:
-            return False
-        if spid in self._temp_group_ids:
-            self._temp_group_ids.remove(spid)
-            grouped = False
-        else:
-            self._temp_group_ids.add(spid)
-            grouped = True
-        self._sync_temp_group_badges()
-        return grouped
+        return _mtg_toggle_temp_group_member_impl(self, pid)
 
     def clear_temp_group(self, silent=False):
-        if not self._temp_group_ids:
-            return 0
-        count = len(self._temp_group_ids)
-        self._temp_group_ids.clear()
-        self._sync_temp_group_badges()
-        return count
+        return _mtg_clear_temp_group_impl(self, silent=silent)
 
     def _temp_group_shortcut_targets(self, source_pid):
-        spid = str(source_pid)
-        source_widget = self.widgets.get(spid)
-        if not isinstance(source_widget, DesktopWidget):
-            return []
-        if spid not in self._temp_group_ids:
-            return [source_widget]
-
-        targets = []
-        for pid in self._temp_group_ids:
-            widget = self.widgets.get(str(pid))
-            if isinstance(widget, DesktopWidget):
-                targets.append(widget)
-        if not targets:
-            return [source_widget]
-
-        targets.sort(key=lambda w: (0 if str(w.profile_id) == spid else 1, str(w.profile_id)))
-        return targets
+        return _mtg_temp_group_shortcut_targets_impl(self, source_pid)
 
     def _temp_group_move_targets(self, source_pid):
-        spid = str(source_pid)
-        if spid not in self._temp_group_ids:
-            return []
-        targets = []
-        for pid in self._temp_group_ids:
-            if pid == spid:
-                continue
-            widget = self.widgets.get(pid)
-            if not isinstance(widget, DesktopWidget):
-                continue
-            if not widget.isVisible():
-                continue
-            if bool(getattr(widget, "is_locked", False)):
-                continue
-            targets.append(widget)
-        return targets
+        return _mtg_temp_group_move_targets_impl(self, source_pid)
 
     def move_temp_group_by_delta(self, source_pid, dx, dy):
-        if not dx and not dy:
-            return
-        src = self.widgets.get(str(source_pid))
-        if isinstance(src, DesktopWidget) and bool(getattr(src, "is_locked", False)):
-            return
-        for widget in self._temp_group_move_targets(source_pid):
-            widget._move_exact((widget.x() + int(dx), widget.y() + int(dy)))
+        _mtg_move_temp_group_by_delta_impl(self, source_pid, dx, dy)
 
     def resize_temp_group_by_edges(self, source_pid, left_step, top_step, right_step, bottom_step):
-        try:
-            d_left = int(left_step)
-            d_top = int(top_step)
-            d_right = int(right_step)
-            d_bottom = int(bottom_step)
-        except Exception:
-            return
-        if not (d_left or d_top or d_right or d_bottom):
-            return
-
-        src = self.widgets.get(str(source_pid))
-        if isinstance(src, DesktopWidget) and bool(getattr(src, "is_locked", False)):
-            return
-
-        for widget in self._temp_group_move_targets(source_pid):
-            old_left = int(widget.x())
-            old_top = int(widget.y())
-            old_right = int(widget.x() + widget.width())
-            old_bottom = int(widget.y() + widget.height())
-
-            new_left = int(old_left + d_left)
-            new_top = int(old_top + d_top)
-            new_right = int(old_right + d_right)
-            new_bottom = int(old_bottom + d_bottom)
-
-            min_w = max(50, int(widget.minimumWidth()))
-            min_h = max(50, int(widget.minimumHeight()))
-
-            width = int(new_right - new_left)
-            height = int(new_bottom - new_top)
-
-            if width < int(min_w):
-                if d_left != 0 and d_right == 0:
-                    new_left = int(new_right - int(min_w))
-                else:
-                    new_right = int(new_left + int(min_w))
-                width = int(min_w)
-            if height < int(min_h):
-                if d_top != 0 and d_bottom == 0:
-                    new_top = int(new_bottom - int(min_h))
-                else:
-                    new_bottom = int(new_top + int(min_h))
-                height = int(min_h)
-
-            widget.setGeometry(QRect(int(new_left), int(new_top), int(width), int(height)))
+        _mtg_resize_temp_group_by_edges_impl(self, source_pid, left_step, top_step, right_step, bottom_step)
 
     def save_temp_group_positions(self, source_pid):
-        for widget in self._temp_group_move_targets(source_pid):
-            widget.save_all_settings()
+        _mtg_save_temp_group_positions_impl(self, source_pid)
 
     def _cleanup_exec_window_claims(self):
-        claims = getattr(self, "_exec_window_claims", None)
-        if not isinstance(claims, dict):
-            self._exec_window_claims = {}
-            return
-        alive_profiles = set([str(pid) for pid in getattr(self, "widgets", {}).keys()])
-        for hwnd, owner in list(claims.items()):
-            try:
-                h = int(hwnd)
-            except Exception:
-                claims.pop(hwnd, None)
-                continue
-            if h <= 0:
-                claims.pop(hwnd, None)
-                continue
-            try:
-                if not win32gui.IsWindow(int(h)):
-                    claims.pop(hwnd, None)
-                    continue
-            except Exception:
-                claims.pop(hwnd, None)
-                continue
-            if str(owner) not in alive_profiles:
-                claims.pop(hwnd, None)
+        _mclaim_cleanup_exec_window_claims_impl(self)
 
     def get_exec_window_owner(self, hwnd):
-        self._cleanup_exec_window_claims()
-        try:
-            h = int(hwnd)
-        except Exception:
-            return ""
-        return str(self._exec_window_claims.get(h, "") or "")
+        return _mclaim_get_exec_window_owner_impl(self, hwnd)
 
     def claim_exec_window(self, profile_id, hwnd):
-        self._cleanup_exec_window_claims()
-        spid = str(profile_id)
-        try:
-            h = int(hwnd)
-        except Exception:
-            return False
-        if h <= 0:
-            return False
-        owner = str(self._exec_window_claims.get(h, "") or "")
-        if owner and owner != spid:
-            return False
-        for key, value in list(self._exec_window_claims.items()):
-            if str(value) == spid and int(key) != h:
-                self._exec_window_claims.pop(key, None)
-        self._exec_window_claims[int(h)] = spid
-        return True
+        return _mclaim_claim_exec_window_impl(self, profile_id, hwnd)
 
     def release_exec_window_claim(self, profile_id=None, hwnd=None):
-        self._cleanup_exec_window_claims()
-        if hwnd is not None:
-            try:
-                h = int(hwnd)
-            except Exception:
-                h = 0
-            if h > 0:
-                if profile_id is None:
-                    self._exec_window_claims.pop(h, None)
-                else:
-                    if str(self._exec_window_claims.get(h, "") or "") == str(profile_id):
-                        self._exec_window_claims.pop(h, None)
-            return
-        if profile_id is None:
-            return
-        spid = str(profile_id)
-        for key, value in list(self._exec_window_claims.items()):
-            if str(value) == spid:
-                self._exec_window_claims.pop(key, None)
+        _mclaim_release_exec_window_claim_impl(self, profile_id=profile_id, hwnd=hwnd)
 
     def set_temp_group_mute(self, source_pid, muted):
-        targets = self._temp_group_shortcut_targets(source_pid)
-        if not targets:
-            return
-        for idx, widget in enumerate(targets):
-            widget.set_mute_shortcut_state(bool(muted), log=(idx == 0))
+        _mtg_set_temp_group_mute_impl(self, source_pid, muted)
 
     def set_temp_group_gpu_guard(self, source_pid, enabled):
-        targets = self._temp_group_shortcut_targets(source_pid)
-        if not targets:
-            return
-        for idx, widget in enumerate(targets):
-            widget.set_gpu_guard_shortcut_state(bool(enabled), log=(idx == 0), show_hud=True)
+        _mtg_set_temp_group_gpu_guard_impl(self, source_pid, enabled)
 
     def set_temp_group_corner_mode(self, source_pid, mode):
-        mode_int = DesktopWidget.coerce_corner_mode(mode)
-        targets = self._temp_group_shortcut_targets(source_pid)
-        if not targets:
-            return
-        for idx, widget in enumerate(targets):
-            widget.set_corner_mode_shortcut_state(mode_int, log=(idx == 0))
+        _mtg_set_temp_group_corner_mode_impl(self, source_pid, mode)
 
     def adjust_temp_group_opacity(self, source_pid, delta_pct):
-        try:
-            delta = int(delta_pct)
-        except Exception:
-            delta = 0
-        if delta == 0:
-            return
-        targets = self._temp_group_shortcut_targets(source_pid)
-        if not targets:
-            return
-        for widget in targets:
-            old_val = int(getattr(widget, "current_opacity_pct", 100))
-            new_val = max(10, min(100, old_val + delta))
-            if new_val == old_val:
-                continue
-            widget.current_opacity_pct = new_val
-            widget.setWindowOpacity(new_val / 100.0)
-            widget.save_all_settings()
+        _mtg_adjust_temp_group_opacity_impl(self, source_pid, delta_pct)
 
     def set_temp_group_lock(self, source_pid, lock):
-        targets = self._temp_group_shortcut_targets(source_pid)
-        if not targets:
-            return 0
-        lock_val = bool(lock)
-        for widget in targets:
-            if hasattr(widget, "cancel_active_interaction"):
-                widget.cancel_active_interaction()
-        for widget in targets:
-            widget.apply_window_settings(int(getattr(widget, "layer_mode", DesktopWidget.LAYER_NORMAL)), lock_val)
-            widget.save_all_settings()
-            if hasattr(widget, "show_lock_hud"):
-                widget.show_lock_hud(lock_val)
-        self._sync_temp_group_badges()
-        return len(targets)
+        return _mtg_set_temp_group_lock_impl(self, source_pid, lock)
 
     def apply_set(self, set_id):
-        sid = str(set_id)
-        if sid not in self._set_defs:
-            return
-
-        self._cancel_startup_queue()
-        previous_applied_sid = str(getattr(self, "_applied_set_id", "") or "")
-        self._set_current_set_id(sid, persist=False)
-        self.clear_all_highlights()
-        self.clear_temp_group(silent=True)
-        target_profiles = [
-            str(pid) for pid in self._set_defs.get(sid, {}).get("profiles", []) if self._profile_run_enabled(pid)
-        ]
-        current_running = {str(pid) for pid in self.widgets.keys()}
-        startup_entries = []
-
-        use_fast_switch = bool(self._fast_set_switch_enabled()) and sid != previous_applied_sid
-        if use_fast_switch:
-            target_set = set(target_profiles)
-            keep_ids = current_running.intersection(target_set)
-            stop_ids = current_running.difference(target_set)
-            self._stop_widgets_bulk(stop_ids)
-            start_ids = [pid for pid in target_profiles if pid not in keep_ids]
-            startup_entries = self._build_profile_startup_queue(start_ids)
-        else:
-            self._stop_all_widgets_bulk()
-            startup_entries = self._build_set_startup_queue(sid)
-
-        self._applied_set_id = sid
-        self.master_settings.setValue("current_set_id", sid)
-        self.master_settings.setValue("applied_set_id", sid)
-        if not (bool(getattr(self, "_fast_startup_mode", False)) and bool(self._minimal_validation_enabled())):
-            self.master_settings.sync()
-        self._begin_startup_queue(startup_entries, mode="set_switch")
+        _mset_apply_set_impl(self, set_id)
 
     def create_empty_set(self, name):
-        clean_name = str(name).strip()
-        if not clean_name:
-            return ""
-        sid = self._next_set_id()
-        self._set_order.append(sid)
-        self._set_defs[sid] = {"name": clean_name, "profiles": []}
-        self.master_settings.setValue("set_ids", list(self._set_order))
-        self.master_settings.setValue(self._set_key(sid, "name"), clean_name)
-        self.master_settings.setValue(self._set_key(sid, "profiles"), [])
-        self.master_settings.sync()
-        return sid
+        return _mset_create_empty_set_impl(self, name)
 
     def copy_set(self, source_set_id, new_name):
-        source_sid = str(source_set_id)
-        if source_sid not in self._set_defs:
-            return ""
-        clean_name = str(new_name).strip()
-        if not clean_name:
-            return ""
-
-        profile_ids = self._all_profile_ids()
-        profile_id_set = set(profile_ids)
-        next_profile_num = 0
-        for pid in profile_ids:
-            try:
-                next_profile_num = max(next_profile_num, int(pid))
-            except Exception:
-                continue
-
-        copied_profiles = []
-        for src_pid in self._set_defs[source_sid].get("profiles", []):
-            next_profile_num += 1
-            while str(next_profile_num) in profile_id_set:
-                next_profile_num += 1
-            new_pid = str(next_profile_num)
-            self._clone_profile_settings(src_pid, new_pid)
-            profile_ids.append(new_pid)
-            profile_id_set.add(new_pid)
-            copied_profiles.append(new_pid)
-
-        sid = self._next_set_id()
-        self._set_order.append(sid)
-        self._set_defs[sid] = {"name": clean_name, "profiles": copied_profiles}
-        self.master_settings.setValue("profile_ids", profile_ids)
-        self.master_settings.setValue("set_ids", list(self._set_order))
-        self.master_settings.setValue(self._set_key(sid, "name"), clean_name)
-        self.master_settings.setValue(self._set_key(sid, "profiles"), copied_profiles)
-        self.master_settings.sync()
-        return sid
+        return _mset_copy_set_impl(self, source_set_id, new_name)
 
     def copy_profiles_from_set(self, source_set_id, target_set_id):
-        source_sid = str(source_set_id)
-        target_sid = str(target_set_id)
-        if source_sid not in self._set_defs or target_sid not in self._set_defs:
-            return False
-        if source_sid == target_sid:
-            return False
-
-        profile_ids = self._all_profile_ids()
-        profile_id_set = set(profile_ids)
-        next_profile_num = 0
-        for pid in profile_ids:
-            try:
-                next_profile_num = max(next_profile_num, int(pid))
-            except Exception:
-                continue
-
-        copied_profiles = []
-        for src_pid in self._set_defs[source_sid].get("profiles", []):
-            next_profile_num += 1
-            while str(next_profile_num) in profile_id_set:
-                next_profile_num += 1
-            new_pid = str(next_profile_num)
-            self._clone_profile_settings(src_pid, new_pid)
-            profile_ids.append(new_pid)
-            profile_id_set.add(new_pid)
-            copied_profiles.append(new_pid)
-
-        if not copied_profiles:
-            return False
-
-        target_profiles = list(self._set_defs[target_sid].get("profiles", []))
-        target_profiles = copied_profiles + target_profiles
-        self._set_defs[target_sid]["profiles"] = target_profiles
-
-        self.master_settings.setValue("profile_ids", profile_ids)
-        self.master_settings.setValue(self._set_key(target_sid, "profiles"), target_profiles)
-        self.master_settings.sync()
-        self._refresh_set_ui()
-        return True
+        return _mset_copy_profiles_from_set_impl(self, source_set_id, target_set_id)
 
     def rename_set(self, set_id, new_name):
-        sid = str(set_id)
-        if sid not in self._set_defs:
-            return False
-        clean_name = str(new_name).strip()
-        if not clean_name:
-            return False
-        self._set_defs[sid]["name"] = clean_name
-        self.master_settings.setValue(self._set_key(sid, "name"), clean_name)
-        self.master_settings.sync()
-        self._refresh_set_ui()
-        return True
+        return _mset_rename_set_impl(self, set_id, new_name)
 
     def delete_set(self, set_id):
-        sid = str(set_id)
-        if sid not in self._set_defs:
-            return False
-        if len(self._set_order) <= 1:
-            QMessageBox.information(self, "세트 삭제", "최소 1개의 세트는 유지되어야 합니다.")
-            return False
-
-        set_name = str(self._set_defs[sid].get("name", f"세트{sid}"))
-        removed_profiles = [str(pid) for pid in self._set_defs[sid].get("profiles", [])]
-        remaining_set_ids = [str(x) for x in self._set_order if str(x) != sid]
-        if not remaining_set_ids:
-            QMessageBox.information(self, "세트 삭제", "최소 1개의 세트는 유지되어야 합니다.")
-            return False
-        absorb_target_sid = str(remaining_set_ids[0])
-        absorb_target_name = str(self._set_defs.get(absorb_target_sid, {}).get("name", f"세트{absorb_target_sid}"))
-
-        delete_profiles = False
-        if removed_profiles:
-            choice_box = QMessageBox(self)
-            choice_box.setWindowTitle("세트 삭제")
-            choice_box.setIcon(QMessageBox.Icon.Warning)
-            choice_box.setText(f"'{set_name}' 세트를 삭제합니다.")
-            choice_box.setInformativeText(
-                f"포함된 프로필 {len(removed_profiles)}개 처리 방식을 선택하세요.\n"
-                f"- 흡수: '{absorb_target_name}'(첫번째 세트)로 이동\n"
-                f"- 삭제: 프로필도 함께 완전 삭제"
-            )
-            absorb_btn = choice_box.addButton("첫번째 세트로 흡수", QMessageBox.ButtonRole.AcceptRole)
-            purge_btn = choice_box.addButton("프로필도 함께 삭제", QMessageBox.ButtonRole.DestructiveRole)
-            cancel_btn = choice_box.addButton("취소", QMessageBox.ButtonRole.RejectRole)
-            choice_box.setDefaultButton(absorb_btn)
-            choice_box.exec()
-            clicked = choice_box.clickedButton()
-            if clicked is cancel_btn:
-                return False
-            delete_profiles = (clicked is purge_btn)
-        else:
-            confirm = QMessageBox.question(
-                self,
-                "세트 삭제",
-                f"'{set_name}' 세트를 삭제하시겠습니까?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            )
-            if confirm != QMessageBox.StandardButton.Yes:
-                return False
-
-        if delete_profiles and removed_profiles:
-            remove_ids = set([str(pid) for pid in removed_profiles])
-            for pid in list(remove_ids):
-                if pid in self._temp_group_ids:
-                    self._temp_group_ids.remove(pid)
-                if pid in self.widgets:
-                    widget = self.widgets.get(pid)
-                    if widget is not None:
-                        widget.close()
-                        widget.deleteLater()
-                    self.widgets.pop(pid, None)
-                profile_settings = QSettings("MyHomeApp", f"Profile_{pid}")
-                profile_settings.clear()
-                profile_settings.sync()
-
-            profile_ids = [pid for pid in self._all_profile_ids() if str(pid) not in remove_ids]
-            self.master_settings.setValue("profile_ids", profile_ids)
-            active_ids = self._as_list(self.master_settings.value("active_profiles", []))
-            self.master_settings.setValue(
-                "active_profiles",
-                [pid for pid in active_ids if str(pid) not in remove_ids],
-            )
-        elif removed_profiles:
-            target_profiles = list(self._set_defs.get(absorb_target_sid, {}).get("profiles", []))
-            merged_profiles = target_profiles + [pid for pid in removed_profiles if pid not in target_profiles]
-            if absorb_target_sid in self._set_defs:
-                self._set_defs[absorb_target_sid]["profiles"] = merged_profiles
-            self.master_settings.setValue(self._set_key(absorb_target_sid, "profiles"), merged_profiles)
-
-        self.master_settings.remove(f"sets/{sid}")
-        self._set_defs.pop(sid, None)
-        self._set_order = [x for x in self._set_order if str(x) != sid]
-        self.master_settings.setValue("set_ids", list(self._set_order))
-        self.master_settings.sync()
-
-        selected_sid = self.selected_set_id()
-        if selected_sid == sid:
-            self.apply_set(absorb_target_sid)
-        elif str(getattr(self, "_applied_set_id", "")) == sid:
-            fallback_sid = selected_sid if selected_sid in self._set_defs else absorb_target_sid
-            self.apply_set(fallback_sid)
-        else:
-            self._refresh_set_ui()
-            self._sync_temp_group_badges()
-            self.update_active_status()
-            self.load_profiles()
-        return True
+        return _mset_delete_set_impl(self, set_id)
 
     def _on_profile_order_changed(self, ordered_ids):
-        sid = self.selected_set_id()
-        if not sid or sid not in self._set_defs:
-            return
-        current = list(self._set_defs[sid].get("profiles", []))
-        if not current:
-            return
-        current_set = set(current)
-        ordered = [pid for pid in self._normalize_ids(ordered_ids) if pid in current_set]
-        if len(ordered) != len(current):
-            for pid in current:
-                if pid not in ordered:
-                    ordered.append(pid)
-        if ordered == current:
-            return
-        self._set_defs[sid]["profiles"] = ordered
-        self.master_settings.setValue(self._set_key(sid, "profiles"), ordered)
-        self.master_settings.sync()
-        self.load_profiles()
+        _mset_on_profile_order_changed_impl(self, ordered_ids)
 
     def open_set_manager(self):
         self._load_set_state()
@@ -10823,7 +6295,10 @@ class MasterController(QMainWindow):
     def open_image_upscale_tool(self):
         dialog = getattr(self, "_image_tool_dialog", None)
         if dialog is None:
-            dialog = ImageUpscaleDialog(self)
+            dialog = ImageUpscaleDialog(
+                self,
+                title_bar_theme_fn=self._apply_window_title_bar_theme,
+            )
             dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
             dialog.destroyed.connect(lambda *_: setattr(self, "_image_tool_dialog", None))
             self._image_tool_dialog = dialog
@@ -10903,94 +6378,22 @@ class MasterController(QMainWindow):
         self.activateWindow()
 
     def _sync_startup_shortcut_toggle(self):
-        if not hasattr(self, "startup_shortcut_cb"):
-            return
-        available = bool(getattr(sys, "frozen", False))
-        enabled_pref = bool(self._startup_shortcut_enabled()) if available else False
-        prev = self.startup_shortcut_cb.blockSignals(True)
-        self.startup_shortcut_cb.setEnabled(available)
-        self.startup_shortcut_cb.setChecked(enabled_pref)
-        self.startup_shortcut_cb.blockSignals(prev)
-        if not hasattr(self, "startup_shortcut_hint_lbl"):
-            return
-        if not available:
-            self.startup_shortcut_hint_lbl.setText("개발 실행에서는 비활성화됩니다. exe에서만 동작합니다.")
-            return
-        shortcut_path = self._startup_shortcut_path(self._frozen_executable_path())
-        registered = False
-        if shortcut_path:
-            try:
-                registered = os.path.isfile(shortcut_path)
-            except Exception:
-                registered = False
-        self.startup_shortcut_hint_lbl.setText(
-            "현재 등록됨" if registered else "현재 미등록"
-        )
+        _mc_sync_startup_shortcut_toggle_impl(self)
 
     def _set_startup_shortcut_enabled(self, enabled, persist=True):
-        enable_flag = bool(enabled)
-        if persist:
-            self.master_settings.setValue(self._startup_shortcut_pref_key(), enable_flag)
-            self.master_settings.sync()
-        if enable_flag:
-            self._ensure_windows_startup_shortcut(force=True)
-        else:
-            self._remove_windows_startup_shortcut()
-        self._sync_startup_shortcut_toggle()
+        _mc_set_startup_shortcut_enabled_impl(self, enabled, persist=persist)
 
     def _on_startup_shortcut_toggled(self, checked):
-        if not bool(getattr(sys, "frozen", False)):
-            self._sync_startup_shortcut_toggle()
-            return
-        self._set_startup_shortcut_enabled(bool(checked), persist=True)
+        _mc_on_startup_shortcut_toggled_impl(self, checked)
 
     def _apply_gpu_guard_thresholds(self, high_pct, low_pct, persist=True):
-        try:
-            high = float(high_pct)
-        except Exception:
-            high = 90.0
-        try:
-            low = float(low_pct)
-        except Exception:
-            low = 70.0
-
-        high = max(1.0, min(100.0, high))
-        low = max(0.0, min(99.0, low))
-        if low >= high:
-            low = max(0.0, high - 1.0)
-
-        self._gpu_guard_high_pct = high
-        self._gpu_guard_low_pct = low
-        self._sync_gpu_threshold_inputs()
-
-        if persist:
-            self.master_settings.setValue("gpu_guard_high_pct", int(round(high)))
-            self.master_settings.setValue("gpu_guard_low_pct", int(round(low)))
-            self.master_settings.sync()
+        _mc_apply_gpu_guard_thresholds_impl(self, high_pct, low_pct, persist=persist)
 
     def _sync_gpu_threshold_inputs(self):
-        if not hasattr(self, "gpu_pause_slider") or not hasattr(self, "gpu_resume_slider"):
-            return
-        pause_val = int(round(self._gpu_guard_high_pct))
-        resume_val = int(round(self._gpu_guard_low_pct))
-        prev = self.gpu_pause_slider.blockSignals(True)
-        self.gpu_pause_slider.setValue(pause_val)
-        self.gpu_pause_slider.blockSignals(prev)
-        prev = self.gpu_resume_slider.blockSignals(True)
-        self.gpu_resume_slider.setValue(resume_val)
-        self.gpu_resume_slider.blockSignals(prev)
-        if hasattr(self, "gpu_pause_value_lbl"):
-            self.gpu_pause_value_lbl.setText(f"{pause_val}%")
-        if hasattr(self, "gpu_resume_value_lbl"):
-            self.gpu_resume_value_lbl.setText(f"{resume_val}%")
+        _mc_sync_gpu_threshold_inputs_impl(self)
 
     def _on_gpu_threshold_inputs_changed(self):
-        self._apply_gpu_guard_thresholds(
-            self.gpu_pause_slider.value(),
-            self.gpu_resume_slider.value(),
-            persist=True,
-        )
-        self._sync_gpu_threshold_inputs()
+        _mc_on_gpu_threshold_inputs_changed_impl(self)
 
     @staticmethod
     def _action_icon_pixmap(kind, color_hex, size=16):
@@ -12049,34 +7452,13 @@ class MasterController(QMainWindow):
                 self.load_profiles()
 
     def _schedule_master_settings_sync(self, delay_ms=None):
-        if not hasattr(self, "_master_settings_sync_timer"):
-            return
-        try:
-            delay = int(self._master_settings_sync_delay_ms if delay_ms is None else delay_ms)
-        except Exception:
-            delay = int(getattr(self, "_master_settings_sync_delay_ms", 650))
-        delay = max(0, delay)
-        if delay <= 0:
-            self._flush_master_settings_sync()
-            return
-        self._master_settings_sync_timer.start(delay)
+        _mc_schedule_master_settings_sync_impl(self, delay_ms=delay_ms)
 
     def _flush_master_settings_sync(self):
-        if hasattr(self, "_master_settings_sync_timer") and self._master_settings_sync_timer.isActive():
-            self._master_settings_sync_timer.stop()
-        try:
-            self.master_settings.sync()
-        except Exception:
-            pass
+        _mc_flush_master_settings_sync_impl(self)
 
     def update_active_status(self, sync=True):
-        """현재 켜져 있는 위젯들의 ID 목록을 저장"""
-        active_ids = [str(pid) for pid in self.widgets.keys()]
-        self.master_settings.setValue("active_profiles", active_ids)
-        if bool(sync):
-            self._flush_master_settings_sync()
-        else:
-            self._schedule_master_settings_sync()
+        _mc_update_active_status_impl(self, sync=sync)
 
 
 if __name__ == "__main__":
@@ -12100,7 +7482,3 @@ if __name__ == "__main__":
         import traceback
         traceback.print_exc()
         input("엔터를 누르면 종료합니다...") # 에러 확인을 위해 잠시 멈춤
-
-
-
-

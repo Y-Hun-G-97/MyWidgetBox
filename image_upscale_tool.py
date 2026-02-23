@@ -1,50 +1,12 @@
 import os
 import shutil
 import subprocess
-import sys
+
+from media_runtime import find_runtime_binary
 
 
 class ToolExecutionError(RuntimeError):
     pass
-
-
-def _runtime_binary_dirs():
-    dirs = []
-    try:
-        meipass = str(getattr(sys, "_MEIPASS", "") or "").strip()
-        if meipass:
-            dirs.append(meipass)
-    except Exception:
-        pass
-    try:
-        exe_path = str(getattr(sys, "executable", "") or "").strip()
-        if exe_path:
-            exe_dir = os.path.dirname(os.path.abspath(exe_path))
-            if exe_dir:
-                dirs.append(exe_dir)
-    except Exception:
-        pass
-    try:
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        if script_dir:
-            dirs.append(script_dir)
-    except Exception:
-        pass
-    try:
-        cwd = os.getcwd()
-        if cwd:
-            dirs.append(cwd)
-    except Exception:
-        pass
-    out = []
-    seen = set()
-    for raw in dirs:
-        key = os.path.normcase(os.path.normpath(str(raw)))
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(str(raw))
-    return out
 
 
 def find_ffmpeg_binary():
@@ -56,12 +18,13 @@ def find_ffmpeg_binary():
         if path and os.path.isfile(path):
             return path
 
-    names = ["ffmpeg.exe", "ffmpeg"] if os.name == "nt" else ["ffmpeg"]
-    for folder in _runtime_binary_dirs():
-        for name in names:
-            candidate = os.path.join(folder, name)
-            if os.path.isfile(candidate):
-                return candidate
+    runtime_found = find_runtime_binary(
+        "ffmpeg",
+        include_cwd=True,
+        include_bin_subdir=False,
+    )
+    if runtime_found:
+        return runtime_found
 
     fallback = str(shutil.which("ffmpeg") or "").strip()
     if fallback and os.path.isfile(fallback):
