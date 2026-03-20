@@ -576,9 +576,40 @@ def mouse_press_event(widget, e):
         widget.is_moving = False
 
 
+def _is_left_button_down(event):
+    buttons = Qt.MouseButton.NoButton
+    if event is not None and hasattr(event, "buttons"):
+        try:
+            buttons = event.buttons()
+        except Exception:
+            buttons = Qt.MouseButton.NoButton
+    if buttons == Qt.MouseButton.NoButton:
+        try:
+            buttons = QApplication.mouseButtons()
+        except Exception:
+            buttons = Qt.MouseButton.NoButton
+    return bool(buttons & Qt.MouseButton.LeftButton)
+
+
+def _drag_start_threshold(widget):
+    threshold = max(1, int(getattr(widget, "_drag_threshold", 5)))
+    try:
+        threshold = max(threshold, int(QApplication.startDragDistance()))
+    except Exception:
+        pass
+    return int(threshold)
+
+
 def mouse_move_event(widget, e):
+    if (
+        widget.start_pos is not None
+        or bool(getattr(widget, "is_moving", False))
+        or bool(getattr(widget, "is_resizing", False))
+    ) and not _is_left_button_down(e):
+        widget.cancel_active_interaction()
+        return
     if bool(getattr(widget, "is_locked", False)):
-        if widget.start_pos or widget.is_moving or widget.is_resizing:
+        if widget.start_pos is not None or widget.is_moving or widget.is_resizing:
             widget.cancel_active_interaction()
         else:
             widget._refresh_resize_ui()
@@ -589,10 +620,10 @@ def mouse_move_event(widget, e):
         return
 
     widget._refresh_resize_ui()
-    if widget.start_pos:
+    if widget.start_pos is not None:
         current_global = e.globalPosition().toPoint()
         delta = current_global - widget.start_pos
-        if delta.manhattanLength() > widget._drag_threshold:
+        if delta.manhattanLength() >= _drag_start_threshold(widget):
             if not widget.is_moving:
                 widget._set_drag_topmost(True)
             widget.is_moving = True

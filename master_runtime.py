@@ -1,12 +1,14 @@
 # Consolidated master runtime utilities
+import base64
 import os
+import subprocess
 import sys
 
 from PyQt6.QtCore import QFileInfo, Qt, QSettings
 from PyQt6.QtGui import QIcon, QPixmap
 from PyQt6.QtWidgets import QFileIconProvider
 
-from mycanvas_core import _as_bool, _get_win32com_client
+from mycanvas_core import _as_bool
 
 
 def frozen_executable_path():
@@ -76,7 +78,10 @@ def startup_shortcut_path(_controller, exe_path=""):
 def startup_shortcut_enabled(controller):
     raw = controller.master_settings.value(startup_shortcut_pref_key(), None)
     if raw is None:
-        return _as_bool(os.environ.get("MYCANVAS_ENSURE_STARTUP_SHORTCUT", "0"), False)
+        raw = os.environ.get(
+            "MYCANVAS_ENSURE_STARTUP_TASK",
+            os.environ.get("MYCANVAS_ENSURE_STARTUP_SHORTCUT", "0"),
+        )
     return _as_bool(raw, False)
 
 
@@ -203,77 +208,129 @@ def resolve_app_icon(controller_cls):
     return QIcon(pixmap)
 
 
-def ensure_windows_startup_shortcut(controller, force=False):
-    if (not bool(force)) and (not startup_shortcut_enabled(controller)):
-        return
-    exe_path = frozen_executable_path()
-    win32com_client = _get_win32com_client()
-    if not exe_path or win32com_client is None:
-        return
-    shortcut_path = startup_shortcut_path(controller, exe_path)
+def _powershell_executable():
+    system_root = str(os.environ.get("SystemRoot", r"C:\Windows") or r"C:\Windows").strip() or r"C:\Windows"
+    candidate = os.path.join(system_root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+    if os.path.isfile(candidate):
+        return candidate
+    return "powershell.exe"
+
+
+def _run_powershell(script, timeout_sec=15):
+    encoded = base64.b64encode(str(script or "").encode("utf-16-le")).decode("ascii")
+    try:
+        return subprocess.run(
+            [
+                _powershell_executable(),
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-EncodedCommand",
+                encoded,
+            ],
+            capture_output=True,
+            timeout=max(1, int(timeout_sec)),
+            check=False,
+        )
+    except Exception:
+        return None
+
+
+def _ps_single_quote(value):
+    return str(value or "").replace("'", "''")
+
+
+def _current_windows_user():
+    username = str(os.environ.get("USERNAME", "") or "").strip()
+    if not username:
+        return ""
+    domain = str(os.environ.get("USERDOMAIN", "") or "").strip()
+    if domain:
+        return f"{domain}\\{username}"
+    return username
+
+
+def _startup_task_name(_controller=None, exe_path=""):
+    _ = str(exe_path or "")
+    return "MyCanvas Auto Start"
+
+
+def _startup_task_registered(controller, exe_path=""):
+    task_name = _startup_task_name(controller, exe_path=exe_path)
+    script = f"""
+$ErrorActionPreference = 'Stop'
+Import-Module ScheduledTasks -ErrorAction Stop
+$task = Get-ScheduledTask -TaskName '{_ps_single_quote(task_name)}' -ErrorAction SilentlyContinue
+if ($null -eq $task) {{
+    exit 1
+}}
+exit 0
+"""
+    result = _run_powershell(script)
+    return bool(result is not None and result.returncode == 0)
+
+
+def _remove_legacy_startup_shortcut(controller, exe_path=""):
+    shortcut_path = startup_shortcut_path(controller, exe_path=exe_path or frozen_executable_path())
     if not shortcut_path:
         return
-    startup_dir = os.path.dirname(shortcut_path)
     try:
-        os.makedirs(startup_dir, exist_ok=True)
-    except Exception:
-        return
-    exe_name = os.path.splitext(os.path.basename(exe_path))[0] or "MyCanvas"
-    icon_path = startup_shortcut_icon_path(exe_path)
-    marker = ""
-    try:
-        norm_exe = os.path.normcase(os.path.normpath(str(exe_path)))
-        marker = f"{norm_exe}|{int(os.path.getmtime(exe_path))}"
-    except Exception:
-        marker = str(exe_path)
-    marker_key = "startup_shortcut_marker_v1"
-    marker_settings = None
-    try:
-        marker_settings = QSettings("MyHomeApp", "MasterV3")
-        old_marker = str(marker_settings.value(marker_key, "") or "")
-        if old_marker == marker:
-            try:
-                if os.path.isfile(shortcut_path):
-                    return
-            except Exception:
-                return
-    except Exception:
-        marker_settings = None
-    try:
-        shell = win32com_client.Dispatch("WScript.Shell")
-        shortcut = shell.CreateShortCut(shortcut_path)
-        shortcut.Targetpath = exe_path
-        shortcut.WorkingDirectory = os.path.dirname(exe_path)
-        shortcut.Arguments = ""
-        shortcut.IconLocation = f"{icon_path},0"
-        shortcut.Description = f"{exe_name} auto start"
-        shortcut.Save()
-        if marker_settings is not None:
-            try:
-                marker_settings.setValue(marker_key, marker)
-                marker_settings.sync()
-            except Exception:
-                pass
+        if os.path.isfile(shortcut_path):
+            os.remove(shortcut_path)
     except Exception:
         pass
 
 
+def ensure_windows_startup_shortcut(controller, force=False):
+    if (not bool(force)) and (not startup_shortcut_enabled(controller)):
+        return False
+    exe_path = frozen_executable_path()
+    user_name = _current_windows_user()
+    if not exe_path or not user_name:
+        return False
+    working_dir = os.path.dirname(exe_path)
+    exe_name = os.path.splitext(os.path.basename(exe_path))[0] or "MyCanvas"
+    task_name = _startup_task_name(controller, exe_path=exe_path)
+    description = f"{exe_name} auto start"
+    script = f"""
+$ErrorActionPreference = 'Stop'
+Import-Module ScheduledTasks -ErrorAction Stop
+$user = '{_ps_single_quote(user_name)}'
+$action = New-ScheduledTaskAction -Execute '{_ps_single_quote(exe_path)}' -WorkingDirectory '{_ps_single_quote(working_dir)}'
+$trigger = New-ScheduledTaskTrigger -AtLogOn -User $user
+$principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew
+Register-ScheduledTask -TaskName '{_ps_single_quote(task_name)}' -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description '{_ps_single_quote(description)}' -Force | Out-Null
+exit 0
+"""
+    result = _run_powershell(script)
+    success = bool(result is not None and result.returncode == 0)
+    if success:
+        _remove_legacy_startup_shortcut(controller, exe_path=exe_path)
+    return success
+
+
 def remove_windows_startup_shortcut(controller):
-    shortcut_path = startup_shortcut_path(controller, frozen_executable_path())
-    if shortcut_path:
-        try:
-            if os.path.isfile(shortcut_path):
-                os.remove(shortcut_path)
-        except Exception:
-            pass
+    exe_path = frozen_executable_path()
+    task_name = _startup_task_name(controller, exe_path=exe_path)
+    script = f"""
+$ErrorActionPreference = 'Stop'
+Import-Module ScheduledTasks -ErrorAction Stop
+$task = Get-ScheduledTask -TaskName '{_ps_single_quote(task_name)}' -ErrorAction SilentlyContinue
+if ($null -ne $task) {{
+    Unregister-ScheduledTask -TaskName '{_ps_single_quote(task_name)}' -Confirm:$false | Out-Null
+}}
+exit 0
+"""
+    _ = _run_powershell(script)
+    _remove_legacy_startup_shortcut(controller, exe_path=exe_path)
     try:
         controller.master_settings.remove("startup_shortcut_marker_v1")
         controller.master_settings.sync()
     except Exception:
         pass
-
-import os
-import sys
+    return True
 
 
 def sync_startup_shortcut_toggle(controller):
@@ -309,6 +366,46 @@ def set_startup_shortcut_enabled(controller, enabled, persist=True):
         controller._ensure_windows_startup_shortcut(force=True)
     else:
         controller._remove_windows_startup_shortcut()
+    sync_startup_shortcut_toggle(controller)
+
+
+def on_startup_shortcut_toggled(controller, checked):
+    if not bool(getattr(sys, "frozen", False)):
+        sync_startup_shortcut_toggle(controller)
+        return
+    set_startup_shortcut_enabled(controller, bool(checked), persist=True)
+
+
+def sync_startup_shortcut_toggle(controller):
+    if not hasattr(controller, "startup_shortcut_cb"):
+        return
+    available = bool(getattr(sys, "frozen", False))
+    enabled_pref = bool(controller._startup_shortcut_enabled()) if available else False
+    prev = controller.startup_shortcut_cb.blockSignals(True)
+    controller.startup_shortcut_cb.setEnabled(available)
+    controller.startup_shortcut_cb.setChecked(enabled_pref)
+    controller.startup_shortcut_cb.blockSignals(prev)
+    if not hasattr(controller, "startup_shortcut_hint_lbl"):
+        return
+    if not available:
+        controller.startup_shortcut_hint_lbl.setText("개발 실행에서는 비활성화됩니다. exe에서만 동작합니다.")
+        return
+    registered = _startup_task_registered(controller, exe_path=controller._frozen_executable_path())
+    controller.startup_shortcut_hint_lbl.setText(
+        "현재 작업 스케줄러 등록됨" if registered else "현재 미등록"
+    )
+
+
+def set_startup_shortcut_enabled(controller, enabled, persist=True):
+    enable_flag = bool(enabled)
+    if enable_flag:
+        enabled_state = bool(controller._ensure_windows_startup_shortcut(force=True))
+    else:
+        controller._remove_windows_startup_shortcut()
+        enabled_state = False
+    if persist:
+        controller.master_settings.setValue(controller._startup_shortcut_pref_key(), bool(enabled_state))
+        controller.master_settings.sync()
     sync_startup_shortcut_toggle(controller)
 
 
