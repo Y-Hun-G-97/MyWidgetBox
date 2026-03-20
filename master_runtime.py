@@ -219,6 +219,23 @@ def _powershell_executable():
 def _run_powershell(script, timeout_sec=15):
     encoded = base64.b64encode(str(script or "").encode("utf-16-le")).decode("ascii")
     try:
+        run_kwargs = {
+            "capture_output": True,
+            "timeout": max(1, int(timeout_sec)),
+            "check": False,
+        }
+        creationflags = int(getattr(subprocess, "CREATE_NO_WINDOW", 0) or 0)
+        if creationflags:
+            run_kwargs["creationflags"] = creationflags
+        startupinfo_cls = getattr(subprocess, "STARTUPINFO", None)
+        if callable(startupinfo_cls):
+            startupinfo = startupinfo_cls()
+            show_flag = int(getattr(subprocess, "STARTF_USESHOWWINDOW", 0) or 0)
+            if show_flag:
+                startupinfo.dwFlags |= show_flag
+            if hasattr(startupinfo, "wShowWindow"):
+                startupinfo.wShowWindow = 0
+            run_kwargs["startupinfo"] = startupinfo
         return subprocess.run(
             [
                 _powershell_executable(),
@@ -229,9 +246,7 @@ def _run_powershell(script, timeout_sec=15):
                 "-EncodedCommand",
                 encoded,
             ],
-            capture_output=True,
-            timeout=max(1, int(timeout_sec)),
-            check=False,
+            **run_kwargs,
         )
     except Exception:
         return None
