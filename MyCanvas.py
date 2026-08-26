@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 import sys
 import os
 import json
@@ -54,9 +54,11 @@ from mycanvas_ui_primitives import (
     ResizeHandleOverlay,
     SetNameLabel,
 )
-from image_upscale_dialog import ImageUpscaleDialog
 from set_manager_dialog import SetManagerDialog
 from settings_dialog import (
+    FolderLayoutChoiceDialog,
+    FolderSlideDialog,
+    FolderSpreadDialog,
     SettingsDialog,
     bind_settings_dialog_desktop_widget as _bind_settings_dialog_desktop_widget,
 )
@@ -2216,12 +2218,73 @@ class DesktopWidget(QMainWindow):
     def _supported_media_extensions():
         return tuple(sorted(set(DesktopWidget._image_extensions() + DesktopWidget._video_extensions())))
 
+    @staticmethod
+    def _scan_media_paths_for_folder(folder_path):
+        folder = str(folder_path or "").strip()
+        if not folder or not os.path.isdir(folder):
+            return []
+        media_ext = tuple(DesktopWidget._supported_media_extensions())
+        try:
+            names = sorted(os.listdir(folder))
+        except OSError:
+            return []
+        paths = []
+        for name in names:
+            p = os.path.join(folder, str(name))
+            if os.path.isfile(p) and str(name).lower().endswith(media_ext):
+                paths.append(os.path.normpath(p))
+        return paths
+
     def _apply_drop_target(self, path):
         if not path:
             return False
         if os.path.isdir(path):
-            self.folder_path = path
-            self._set_watched_folder(path)
+            folder_path = os.path.normpath(path)
+            media_paths = self._scan_media_paths_for_folder(folder_path)
+            if not media_paths:
+                QMessageBox.information(
+                    self,
+                    "미디어 없음",
+                    "드롭한 폴더에 지원되는 미디어 파일(이미지, GIF, 동영상)이 없습니다.",
+                )
+                return False
+
+            choice_dialog = FolderLayoutChoiceDialog(self, folder_path)
+            if choice_dialog.exec() != QDialog.DialogCode.Accepted:
+                return False
+
+            if choice_dialog.choice == "spread":
+                spread_dialog = FolderSpreadDialog(self, folder_path, media_paths, self.size())
+                if spread_dialog.exec() != QDialog.DialogCode.Accepted:
+                    return False
+                if hasattr(self, "manager") and self.manager and hasattr(self.manager, "create_spread_widgets"):
+                    return bool(self.manager.create_spread_widgets(
+                        self.profile_id,
+                        dict(spread_dialog.result_data or {}),
+                        origin_widget=self,
+                    ))
+                return False
+
+            if choice_dialog.choice == "slide":
+                slide_dialog = FolderSlideDialog(self, folder_path, media_paths)
+                if slide_dialog.exec() != QDialog.DialogCode.Accepted:
+                    return False
+                chosen_paths = list(slide_dialog.result_paths or [])
+                self.folder_path = folder_path
+                if len(chosen_paths) == len(media_paths):
+                    self.folder_item_paths = []
+                else:
+                    self.folder_item_paths = chosen_paths
+                self._set_watched_folder(folder_path)
+                self.update_playlist()
+                self.current_idx = -1
+                self.next_media()
+                self.save_all_settings()
+                return True
+
+            self.folder_path = folder_path
+            self.folder_item_paths = []
+            self._set_watched_folder(folder_path)
             self.update_playlist()
             self.current_idx = -1
             self.next_media()
@@ -3578,6 +3641,14 @@ class DesktopWidget(QMainWindow):
             return set()
         return {str(value)}
 
+    @staticmethod
+    def _as_path_list(value):
+        if isinstance(value, (list, tuple)):
+            return [os.path.normpath(str(v)) for v in value if str(v)]
+        if value in (None, ""):
+            return []
+        return [os.path.normpath(str(value))]
+
     def _save_quarantined_media(self):
         self.settings.setValue("quarantined_media", sorted(self.quarantined_media))
 
@@ -3683,6 +3754,7 @@ class DesktopWidget(QMainWindow):
 
     def load_settings(self):
         self.folder_path = str(self.settings.value("folder_path", "") or "")
+        self.folder_item_paths = self._as_path_list(self.settings.value("folder_item_paths", []))
         self.exec_path = self.settings.value("exec_path", "")
         self._exec_manual_focus_enabled = _as_bool(
             self.settings.value("exec_manual_focus_enabled", False),
@@ -5212,6 +5284,10 @@ class DesktopWidget(QMainWindow):
         dialog = SettingsDialog(self, _build_settings_dialog_data_impl(self))
 
         if dialog.exec():
+            spread_data = getattr(dialog, "pending_spread_config", None)
+            if spread_data and hasattr(self, "manager") and self.manager and hasattr(self.manager, "create_spread_widgets"):
+                if self.manager.create_spread_widgets(self.profile_id, dict(spread_data), origin_widget=self):
+                    return
             _apply_settings_dialog_result_impl(self, dialog, old_folder, old_exec)
         else:
             self.setWindowOpacity(self.current_opacity_pct / 100.0)
@@ -5554,6 +5630,9 @@ class MasterController(QMainWindow):
                 font-weight: 600;
                 padding-left: 6px;
             }
+                font-weight: 600;
+                padding-left: 6px;
+            }
             QLabel#setNewLabel {
                 color: #d8e6ff;
                 font-size: 12px;
@@ -5728,6 +5807,51 @@ class MasterController(QMainWindow):
                 border: none;
                 color: #6f7f99;
             }
+            QPushButton#bulkRunBtn,
+            QPushButton#bulkStopBtn,
+            QPushButton#bulkActionBtn,
+            QPushButton#bulkDeleteBtn {
+                min-height: 25px;
+                padding: 0 4px;
+                font-size: 11px;
+                font-weight: 600;
+                border-radius: 6px;
+                color: #e5edf8;
+                background-color: #283a54;
+                border: 1px solid #486187;
+            }
+            QPushButton#bulkRunBtn:hover {
+                background-color: #2b7d68;
+                border-color: #4bd8b3;
+                color: #dbfff3;
+            }
+            QPushButton#bulkStopBtn:hover {
+                background-color: #6e505e;
+                border-color: #a8738a;
+                color: #ffe9ef;
+            }
+            QPushButton#bulkActionBtn:hover {
+                background-color: #3b5780;
+                border-color: #6287be;
+                color: #ffffff;
+            }
+            QPushButton#bulkDeleteBtn:hover {
+                background-color: #8c3642;
+                border-color: #b54f5c;
+                color: #ffe4e9;
+            }
+            QPushButton#bulkRunBtn:disabled,
+            QPushButton#bulkStopBtn:disabled,
+            QPushButton#bulkActionBtn:disabled,
+            QPushButton#bulkDeleteBtn:disabled {
+                color: #556478;
+                background-color: #1e2a3c;
+                border-color: #2a374a;
+            }
+            QCheckBox#selectAllCheck,
+            QCheckBox#profileCheck {
+                spacing: 4px;
+            }
         """)
 
         central = QWidget()
@@ -5869,9 +5993,55 @@ class MasterController(QMainWindow):
         right_panel_layout.setContentsMargins(0, 0, 0, 0)
         right_panel_layout.setSpacing(6)
 
+        header_top_row = QHBoxLayout()
+        header_top_row.setContentsMargins(2, 4, 2, 2)
+        header_top_row.setSpacing(6)
+
+        self.select_all_check = QCheckBox()
+        self.select_all_check.setObjectName("selectAllCheck")
+        self.select_all_check.setToolTip("전체 선택 / 해제")
+        self.select_all_check.toggled.connect(self._on_select_all_toggled)
+
         self.profile_column_label = QLabel("위젯 리스트")
         self.profile_column_label.setObjectName("groupHeaderLabel")
-        right_panel_layout.addWidget(self.profile_column_label, 0)
+
+        header_top_row.addWidget(self.select_all_check, 0, Qt.AlignmentFlag.AlignVCenter)
+        header_top_row.addWidget(self.profile_column_label, 1, Qt.AlignmentFlag.AlignVCenter)
+        right_panel_layout.addLayout(header_top_row)
+
+        bulk_toolbar = QHBoxLayout()
+        bulk_toolbar.setContentsMargins(0, 0, 0, 2)
+        bulk_toolbar.setSpacing(4)
+
+        self.bulk_run_btn = QPushButton("▶ 실행")
+        self.bulk_run_btn.setObjectName("bulkRunBtn")
+        self.bulk_run_btn.setToolTip("선택한 위젯들을 일괄 실행합니다")
+        self.bulk_run_btn.clicked.connect(self.bulk_run_profiles)
+        self.bulk_run_btn.setEnabled(False)
+
+        self.bulk_stop_btn = QPushButton("⏹ 정지")
+        self.bulk_stop_btn.setObjectName("bulkStopBtn")
+        self.bulk_stop_btn.setToolTip("선택한 위젯들을 일괄 정지합니다")
+        self.bulk_stop_btn.clicked.connect(self.bulk_stop_profiles)
+        self.bulk_stop_btn.setEnabled(False)
+
+        self.bulk_settings_btn = QPushButton("⚙ 설정")
+        self.bulk_settings_btn.setObjectName("bulkActionBtn")
+        self.bulk_settings_btn.setToolTip("선택한 위젯들의 옵션을 일괄 변경합니다 (실행/연동 제외)")
+        self.bulk_settings_btn.clicked.connect(self.open_bulk_settings)
+        self.bulk_settings_btn.setEnabled(False)
+
+        self.bulk_delete_btn = QPushButton("🗑 삭제")
+        self.bulk_delete_btn.setObjectName("bulkDeleteBtn")
+        self.bulk_delete_btn.setToolTip("선택한 위젯들을 일괄 삭제합니다")
+        self.bulk_delete_btn.clicked.connect(self.delete_checked_profiles)
+        self.bulk_delete_btn.setEnabled(False)
+
+        bulk_toolbar.addWidget(self.bulk_run_btn, 1)
+        bulk_toolbar.addWidget(self.bulk_stop_btn, 1)
+        bulk_toolbar.addWidget(self.bulk_settings_btn, 1)
+        bulk_toolbar.addWidget(self.bulk_delete_btn, 1)
+        right_panel_layout.addLayout(bulk_toolbar)
 
         self.list_widget = ProfileListWidget()
         self.list_widget.setObjectName("profileList")
@@ -5895,17 +6065,13 @@ class MasterController(QMainWindow):
         self.exit_btn = QPushButton("프로그램 종료 (Exit)")
         self.exit_btn.setObjectName("dangerBtn")
         self.exit_btn.clicked.connect(self.quit_app)
-        self.image_tool_btn = QPushButton("이미지 업스케일")
-        self.image_tool_btn.setObjectName("secondaryBtn")
         self.run_all_btn = QPushButton("세트 적용")
         self.run_all_btn.setObjectName("secondaryBtn")
         btn_box.addWidget(self.exit_btn)
-        btn_box.addWidget(self.image_tool_btn)
         btn_box.addWidget(self.run_all_btn)
         layout.addLayout(btn_box)
 
         self.run_all_btn.clicked.connect(self.run_all)
-        self.image_tool_btn.clicked.connect(self.open_image_upscale_tool)
         self.list_widget.itemClicked.connect(self.highlight_widget)
         self.list_widget.itemDoubleClicked.connect(self.rename_profile)
         self.list_widget.itemEntered.connect(self._on_profile_item_entered)
@@ -5916,7 +6082,6 @@ class MasterController(QMainWindow):
         self._set_defs = {}
         self._current_set_id = ""
         self._applied_set_id = ""
-        self._image_tool_dialog = None
         self._load_set_state()
         self._migrate_profile_run_flags()
         self._refresh_set_ui()
@@ -6133,6 +6298,13 @@ class MasterController(QMainWindow):
             self.clear_all_highlights()
             self.load_profiles()
 
+    def open_set_manager(self):
+        self._load_set_state()
+        dialog = SetManagerDialog(self, self)
+        dialog.exec()
+        self._refresh_set_ui()
+        self.load_profiles()
+
     def _load_set_state(self):
         _mset_load_set_state_impl(self)
 
@@ -6287,29 +6459,8 @@ class MasterController(QMainWindow):
 
     def open_set_manager(self):
         self._load_set_state()
-        dialog = SetManagerDialog(self, self)
-        dialog.exec()
         self._refresh_set_ui()
         self.load_profiles()
-
-    def open_image_upscale_tool(self):
-        dialog = getattr(self, "_image_tool_dialog", None)
-        if dialog is None:
-            dialog = ImageUpscaleDialog(
-                self,
-                title_bar_theme_fn=self._apply_window_title_bar_theme,
-            )
-            dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
-            dialog.destroyed.connect(lambda *_: setattr(self, "_image_tool_dialog", None))
-            self._image_tool_dialog = dialog
-        try:
-            if dialog.isMinimized():
-                dialog.showNormal()
-        except Exception:
-            pass
-        dialog.show()
-        dialog.raise_()
-        dialog.activateWindow()
 
     def _toggle_gpu_cfg_panel(self, expanded=None):
         if expanded is None:
@@ -6433,6 +6584,14 @@ class MasterController(QMainWindow):
         elif kind == "delete":
             painter.drawLine(QPointF(4.2, 4.2), QPointF(11.8, 11.8))
             painter.drawLine(QPointF(11.8, 4.2), QPointF(4.2, 11.8))
+        elif kind == "copy":
+            painter.drawRect(QRectF(3.5, 5.5, 6.5, 6.5))
+            painter.drawPolyline([
+                QPointF(6.0, 3.5),
+                QPointF(12.5, 3.5),
+                QPointF(12.5, 10.0),
+                QPointF(10.0, 10.0),
+            ])
 
         painter.end()
         return pixmap
@@ -6688,6 +6847,12 @@ class MasterController(QMainWindow):
         btn_set.clicked.connect(lambda _, p=spid: self.open_widget_settings(p))
         btn_del.clicked.connect(lambda _, p=spid: self.delete_profile(p))
 
+        checkbox = QCheckBox(row)
+        checkbox.setObjectName("profileCheck")
+        checkbox.setFixedSize(18, 18)
+        checkbox.setChecked(spid in self._temp_group_ids)
+        checkbox.toggled.connect(lambda checked, p=spid: self._on_row_checkbox_changed(p, checked))
+
         action_wrap = QWidget()
         action_wrap_layout = QHBoxLayout(action_wrap)
         action_wrap_layout.setContentsMargins(0, 0, 0, 0)
@@ -6696,10 +6861,12 @@ class MasterController(QMainWindow):
             action_wrap_layout.addWidget(btn)
         action_wrap.setFixedWidth(4 * 28 + 3 * action_wrap_layout.spacing())
 
+        row_layout.addWidget(checkbox, 0, Qt.AlignmentFlag.AlignVCenter)
         row_layout.addWidget(status_dot, 0, Qt.AlignmentFlag.AlignVCenter)
         row_layout.addWidget(lbl, 1, Qt.AlignmentFlag.AlignVCenter)
         row_layout.addWidget(action_wrap, 0, Qt.AlignmentFlag.AlignVCenter)
         row.set_action_buttons(btns)
+        row._checkbox = checkbox
         row._name_label = lbl
         row._status_dot = status_dot
         row._btn_run = btn_run
@@ -6721,6 +6888,7 @@ class MasterController(QMainWindow):
         self.profile_rows[spid] = row
         self._profile_row_items[spid] = item
         self._refresh_profile_row(spid, str(name), bool(is_running))
+        self._sync_bulk_action_ui()
         return row
 
     def _profile_list_order(self):
@@ -6744,12 +6912,12 @@ class MasterController(QMainWindow):
             return str(name)
         action_wrap = getattr(row, "_action_wrap", None)
         margin_width = int(layout.contentsMargins().left()) + int(layout.contentsMargins().right())
-        status_width = 10 + int(layout.spacing())
+        status_width = 10 + 18 + int(layout.spacing()) * 2
         action_width = (int(action_wrap.width()) if isinstance(action_wrap, QWidget) else 0) + int(layout.spacing())
         viewport_w = int(self.list_widget.viewport().width())
         if viewport_w <= 0:
             viewport_w = max(260, int(self.width()) - 48)
-        name_max_width = max(84, int(viewport_w) - int(margin_width) - int(status_width) - int(action_width) - 12)
+        name_max_width = max(60, int(viewport_w) - int(margin_width) - int(status_width) - int(action_width) - 12)
         return QFontMetrics(label.font()).elidedText(
             str(name), Qt.TextElideMode.ElideRight, int(name_max_width)
         )
@@ -6763,6 +6931,7 @@ class MasterController(QMainWindow):
         status_dot = getattr(row, "_status_dot", None)
         btn_run = getattr(row, "_btn_run", None)
         btn_stop = getattr(row, "_btn_stop", None)
+        cb = getattr(row, "_checkbox", None)
         if not isinstance(label, QLabel) or not isinstance(status_dot, QLabel):
             return False
         if not isinstance(btn_run, QPushButton) or not isinstance(btn_stop, QPushButton):
@@ -6772,6 +6941,11 @@ class MasterController(QMainWindow):
         row._full_name = full_name
         label.setToolTip(full_name)
         label.setText(self._elide_profile_row_name(row, full_name))
+
+        if isinstance(cb, QCheckBox):
+            cb.blockSignals(True)
+            cb.setChecked(spid in self._temp_group_ids)
+            cb.blockSignals(False)
 
         running_prop = "true" if bool(is_running) else "false"
         row_changed = False
@@ -6842,10 +7016,272 @@ class MasterController(QMainWindow):
                 if hovered_pid is not None and str(hovered_pid) not in self.profile_rows:
                     self._set_hovered_profile_row(None)
                 self._profiles_loaded_set_id = sid
+                self._sync_bulk_action_ui()
                 return
 
         self._rebuild_profile_rows(profile_ids)
         self._profiles_loaded_set_id = sid
+        self._sync_bulk_action_ui()
+
+    def _on_row_checkbox_changed(self, pid, checked):
+        spid = str(pid)
+        if checked:
+            self._temp_group_ids.add(spid)
+        else:
+            self._temp_group_ids.discard(spid)
+        self._sync_temp_group_badges()
+        self._sync_bulk_action_ui()
+
+    def _on_select_all_toggled(self, checked):
+        for spid, row in self.profile_rows.items():
+            if isinstance(row, ProfileRowWidget) and hasattr(row, "_checkbox") and row._checkbox:
+                row._checkbox.blockSignals(True)
+                row._checkbox.setChecked(bool(checked))
+                row._checkbox.blockSignals(False)
+                if checked:
+                    self._temp_group_ids.add(str(spid))
+                else:
+                    self._temp_group_ids.discard(str(spid))
+        self._sync_temp_group_badges()
+        self._sync_bulk_action_ui()
+
+    def _checked_profile_ids(self):
+        checked = []
+        for spid, row in self.profile_rows.items():
+            if isinstance(row, ProfileRowWidget) and hasattr(row, "_checkbox") and row._checkbox:
+                if row._checkbox.isChecked():
+                    checked.append(str(spid))
+        return checked
+
+    def _sync_bulk_action_ui(self):
+        checked_count = len(self._checked_profile_ids())
+        total_count = len(self.profile_rows)
+        has_checked = checked_count > 0
+        if has_checked:
+            self.profile_column_label.setText(f"위젯 리스트 ({checked_count}개 선택)")
+        else:
+            self.profile_column_label.setText("위젯 리스트")
+        
+        for btn in (
+            getattr(self, "bulk_run_btn", None),
+            getattr(self, "bulk_stop_btn", None),
+            getattr(self, "bulk_settings_btn", None),
+            getattr(self, "bulk_delete_btn", None),
+        ):
+            if btn is not None:
+                btn.setEnabled(has_checked)
+        
+        if hasattr(self, "select_all_check"):
+            self.select_all_check.blockSignals(True)
+            self.select_all_check.setChecked(bool(total_count > 0 and checked_count == total_count))
+            self.select_all_check.blockSignals(False)
+
+    def bulk_run_profiles(self):
+        checked_ids = self._checked_profile_ids()
+        if not checked_ids:
+            return
+        for pid in checked_ids:
+            spid = str(pid)
+            if spid not in self.widgets:
+                name = str(QSettings("MyHomeApp", f"Profile_{spid}").value("name", "New 세팅"))
+                self.run_widget(spid, name)
+        self.update_active_status()
+        self.load_profiles()
+
+    def bulk_stop_profiles(self):
+        checked_ids = self._checked_profile_ids()
+        if not checked_ids:
+            return
+        for pid in checked_ids:
+            spid = str(pid)
+            if spid in self.widgets:
+                self.stop_widget(spid)
+        self.update_active_status()
+        self.load_profiles()
+
+    def open_bulk_settings(self):
+        checked_ids = self._checked_profile_ids()
+        if not checked_ids:
+            return
+
+        first_pid = checked_ids[0]
+        first_running = first_pid in self.widgets
+        s_obj = QSettings("MyHomeApp", f"Profile_{first_pid}")
+
+        if first_running:
+            w = self.widgets[first_pid]
+            base_data = {
+                'folder_path': w.folder_path,
+                'folder_item_paths': list(getattr(w, 'folder_item_paths', []) or []),
+                'exec_path': w.exec_path,
+                'w': w.width(),
+                'h': w.height(),
+                'layer_mode': getattr(w, 'layer_mode', DesktopWidget.LAYER_NORMAL),
+                'layer_schema_version': int(DesktopWidget.LAYER_SCHEMA_VERSION),
+                'is_locked': getattr(w, 'is_locked', False),
+                'opacity_pct': w.current_opacity_pct,
+                'bg_color_mode': w.bg_color_mode,
+                'corner_mode': DesktopWidget.coerce_corner_mode(getattr(w, 'corner_mode', DesktopWidget.CORNER_ROUNDED)),
+                'media_fit_mode': int(getattr(w, 'media_fit_mode', 0)),
+                'video_transition_mode': int(getattr(w, 'video_transition_mode', DesktopWidget.VIDEO_TRANSITION_SINGLE)),
+                'video_decode_mode': int(getattr(w, 'video_decode_mode', DesktopWidget.VIDEO_DECODE_ORIGINAL)),
+                'video_dual_fade_ms': int(getattr(w, '_video_swap_fade_duration_ms', DesktopWidget.VIDEO_DUAL_FADE_DEFAULT_MS)),
+                'interval': w.interval_ms // 1000,
+                'is_muted': w.is_muted,
+                'gpu_guard_enabled': getattr(w, 'gpu_guard_enabled', False),
+            }
+        else:
+            base_data = {
+                'folder_path': s_obj.value("folder_path", ""),
+                'folder_item_paths': DesktopWidget._as_path_list(s_obj.value("folder_item_paths", [])),
+                'exec_path': s_obj.value("exec_path", ""),
+                'w': int(s_obj.value("w", 200)),
+                'h': int(s_obj.value("h", 200)),
+                'layer_mode': DesktopWidget.coerce_layer_mode(
+                    int(s_obj.value("layer_mode", DesktopWidget.LAYER_NORMAL)),
+                    int(s_obj.value("layer_schema_version", 0)),
+                ),
+                'layer_schema_version': int(DesktopWidget.LAYER_SCHEMA_VERSION),
+                'is_locked': _as_bool(s_obj.value("is_locked", False), False),
+                'opacity_pct': int(s_obj.value("opacity_pct", 100)),
+                'bg_color_mode': int(s_obj.value("bg_color_mode", 1)),
+                'corner_mode': DesktopWidget.coerce_corner_mode(
+                    s_obj.value("corner_mode", DesktopWidget.CORNER_ROUNDED)
+                ),
+                'media_fit_mode': int(s_obj.value("media_fit_mode", 0)),
+                'video_transition_mode': DesktopWidget.coerce_video_transition_mode(
+                    s_obj.value("video_transition_mode", DesktopWidget.VIDEO_TRANSITION_SINGLE)
+                ),
+                'video_decode_mode': DesktopWidget.coerce_video_decode_mode(
+                    s_obj.value("video_decode_mode", DesktopWidget.VIDEO_DECODE_ORIGINAL)
+                ),
+                'video_dual_fade_ms': DesktopWidget.coerce_video_dual_fade_ms(
+                    s_obj.value("video_dual_fade_ms", DesktopWidget.VIDEO_DUAL_FADE_DEFAULT_MS)
+                ),
+                'interval': int(s_obj.value("interval", 5)),
+                'is_muted': _as_bool(s_obj.value("is_muted", True), True),
+                'gpu_guard_enabled': _as_bool(s_obj.value("gpu_guard_enabled", False), False),
+            }
+
+        dialog = SettingsDialog(self, base_data, bulk_mode=True, target_count=len(checked_ids))
+        if not dialog.exec():
+            return
+
+        new_w = dialog.width_input.value()
+        new_h = dialog.height_input.value()
+        new_interval = dialog.sec_input.value() * 1000
+        new_opacity = dialog.opacity_slider.value()
+        new_bg = dialog.bg_combo.currentIndex()
+        new_corner = DesktopWidget.coerce_corner_mode(dialog.corner_combo.currentIndex())
+        new_media_fit = dialog.media_mode_combo.currentIndex()
+        new_video_transition = DesktopWidget.coerce_video_transition_mode(
+            dialog.video_transition_combo.currentIndex()
+        )
+        new_video_decode_mode = DesktopWidget.coerce_video_decode_mode(
+            dialog.video_decode_combo.currentIndex()
+        )
+        new_video_dual_fade_ms = DesktopWidget.coerce_video_dual_fade_ms(
+            dialog.video_dual_fade_ms_spin.value()
+        )
+        new_layer = dialog.layer_combo.currentIndex()
+        new_lock = dialog.lock_cb.isChecked()
+        new_mute = dialog.mute_checkbox.isChecked()
+        new_gpu_guard = dialog.gpu_guard_checkbox.isChecked()
+
+        for pid in checked_ids:
+            spid = str(pid)
+            prof_s = QSettings("MyHomeApp", f"Profile_{spid}")
+            prof_s.setValue("w", new_w)
+            prof_s.setValue("h", new_h)
+            prof_s.setValue("opacity_pct", new_opacity)
+            prof_s.setValue("bg_color_mode", new_bg)
+            prof_s.setValue("corner_mode", int(new_corner))
+            prof_s.setValue("media_fit_mode", int(new_media_fit))
+            prof_s.setValue("video_transition_mode", int(new_video_transition))
+            prof_s.setValue("video_decode_mode", int(new_video_decode_mode))
+            prof_s.setValue("video_dual_fade_ms", int(new_video_dual_fade_ms))
+            prof_s.setValue("layer_mode", new_layer)
+            prof_s.setValue("layer_schema_version", int(DesktopWidget.LAYER_SCHEMA_VERSION))
+            prof_s.setValue("is_locked", bool(new_lock))
+            prof_s.setValue("interval", new_interval // 1000)
+            prof_s.setValue("is_muted", bool(new_mute))
+            prof_s.setValue("gpu_guard_enabled", bool(new_gpu_guard))
+            prof_s.sync()
+
+            if spid in self.widgets:
+                w = self.widgets[spid]
+                if w.width() != new_w or w.height() != new_h:
+                    w.resize(new_w, new_h)
+                w.current_opacity_pct = new_opacity
+                w.setWindowOpacity(new_opacity / 100.0)
+                w.bg_color_mode = new_bg
+                w.corner_mode = DesktopWidget.coerce_corner_mode(new_corner)
+                w.media_fit_mode = int(new_media_fit)
+                w.video_transition_mode = int(new_video_transition)
+                w.video_decode_mode = int(new_video_decode_mode)
+                w._video_swap_fade_duration_ms = int(new_video_dual_fade_ms)
+                w.apply_mask_and_style()
+                w._sync_current_media_cycle_policy()
+                w.apply_window_settings(new_layer, new_lock)
+                w.is_muted = new_mute
+                w._apply_mute_state()
+                w.gpu_guard_enabled = bool(new_gpu_guard)
+                if not w.gpu_guard_enabled:
+                    w.set_performance_paused(False, reason="guard_disabled")
+                elif self._gpu_guard_paused:
+                    w.set_performance_paused(True, reason=f"gpu {self._gpu_last_usage:.1f}%", force=True)
+                w.interval_ms = new_interval
+                if w.timer.isActive():
+                    w.timer.setInterval(new_interval)
+                if hasattr(w, "_apply_media_scale_mode"):
+                    w._apply_media_scale_mode()
+
+        self.load_profiles()
+
+    def delete_checked_profiles(self):
+        checked_ids = self._checked_profile_ids()
+        if not checked_ids:
+            return
+
+        confirm = QMessageBox.question(
+            self,
+            "일괄 삭제 확인",
+            f"선택한 {len(checked_ids)}개의 위젯 세팅을 완전히 삭제하시겠습니까?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+
+        sid = self.selected_set_id()
+        p_ids = self._all_profile_ids()
+        set_profiles = list(self._set_defs.get(sid, {}).get("profiles", [])) if sid in self._set_defs else []
+
+        for pid in checked_ids:
+            spid = str(pid)
+            if spid in self._temp_group_ids:
+                self._temp_group_ids.remove(spid)
+            if spid in self.widgets:
+                w = self.widgets[spid]
+                w.close()
+                w.deleteLater()
+                del self.widgets[spid]
+            prof_s = QSettings("MyHomeApp", f"Profile_{spid}")
+            prof_s.clear()
+            prof_s.sync()
+            if spid in p_ids:
+                p_ids.remove(spid)
+            if spid in set_profiles:
+                set_profiles.remove(spid)
+
+        self.master_settings.setValue("profile_ids", p_ids)
+        if sid in self._set_defs:
+            self._set_defs[sid]["profiles"] = set_profiles
+            self.master_settings.setValue(self._set_key(sid, "profiles"), set_profiles)
+        self.master_settings.sync()
+
+        self._sync_temp_group_badges()
+        self.update_active_status()
+        self.load_profiles(force_rebuild=True)
 
     def open_widget_settings(self, pid):
         pid = str(pid)
@@ -6858,6 +7294,7 @@ class MasterController(QMainWindow):
             w = self.widgets[pid]
             current_data = {
                 'folder_path': w.folder_path,
+                'folder_item_paths': list(getattr(w, 'folder_item_paths', []) or []),
                 'exec_path': w.exec_path,
                 'focus_binding_summary': w.get_exec_manual_focus_summary() if hasattr(w, "get_exec_manual_focus_summary") else "자동 (실행파일 기준)",
                 'focus_binding_host': w,
@@ -6881,6 +7318,7 @@ class MasterController(QMainWindow):
 
             current_data = {
                 'folder_path': s_obj.value("folder_path", ""),
+                'folder_item_paths': DesktopWidget._as_path_list(s_obj.value("folder_item_paths", [])),
                 'exec_path': s_obj.value("exec_path", ""),
                 'focus_binding_summary': DesktopWidget._format_exec_manual_focus_summary(
                     _as_bool(s_obj.value("exec_manual_focus_enabled", False), False),
@@ -6925,8 +7363,13 @@ class MasterController(QMainWindow):
             dialog.opacity_slider.valueChanged.connect(self.widgets[pid].preview_opacity)
 
         if dialog.exec():
+            spread_data = getattr(dialog, "pending_spread_config", None)
+            if spread_data:
+                self.create_spread_widgets(pid, dict(spread_data), origin_widget=self.widgets.get(pid))
+                return
 
             new_folder = dialog.folder_path
+            new_folder_item_paths = list(getattr(dialog, "folder_item_paths", []) or [])
             new_exec = dialog.exec_path
             new_w = dialog.width_input.value()
             new_h = dialog.height_input.value()
@@ -6954,6 +7397,7 @@ class MasterController(QMainWindow):
             s_obj.setValue("layer_schema_version", int(DesktopWidget.LAYER_SCHEMA_VERSION))
             s_obj.setValue("is_locked", bool(new_lock))
             s_obj.setValue("folder_path", new_folder)
+            s_obj.setValue("folder_item_paths", new_folder_item_paths)
             s_obj.setValue("exec_path", new_exec)
             if DesktopWidget._normalize_exec_path(stored_prev_exec) != DesktopWidget._normalize_exec_path(new_exec):
                 s_obj.setValue("exec_manual_focus_enabled", False)
@@ -7013,12 +7457,15 @@ class MasterController(QMainWindow):
 
 
                 old_folder = str(w.folder_path or "")
-                source_changed = (old_folder != str(new_folder or ""))
+                old_folder_items = list(getattr(w, "folder_item_paths", []) or [])
+                source_changed = (old_folder != str(new_folder or "") or old_folder_items != new_folder_item_paths)
                 if new_folder:
                     w.folder_path = new_folder
+                    w.folder_item_paths = list(new_folder_item_paths)
                     w._set_watched_folder(new_folder)
                 else:
                     w.folder_path = str(new_folder or "")
+                    w.folder_item_paths = []
                     w._set_watched_folder(w.folder_path)
                 w.interval_ms = new_interval
 
@@ -7038,11 +7485,108 @@ class MasterController(QMainWindow):
 
 
             self.load_profiles()
-        
         else:
-
             if is_running:
                 self.widgets[pid].setWindowOpacity(self.widgets[pid].current_opacity_pct / 100.0)
+
+    def create_spread_widgets(self, origin_pid, spread_config, origin_widget=None):
+        if not spread_config:
+            return False
+        folder_path = str(spread_config.get("folder_path", "") or "").strip()
+        item_paths = list(spread_config.get("item_paths", []) or [])
+        if not item_paths:
+            return False
+
+        w = max(50, int(spread_config.get("w", 200)))
+        h = max(50, int(spread_config.get("h", 200)))
+        rows = max(1, int(spread_config.get("rows", 1)))
+        cols = max(1, int(spread_config.get("cols", 1)))
+        margin = max(0, int(spread_config.get("margin", 10)))
+
+        spid = str(origin_pid) if origin_pid not in (None, "") else ""
+        target_widget = origin_widget or (self.widgets.get(spid) if spid else None)
+
+        if target_widget and target_widget.isVisible():
+            start_x = target_widget.x()
+            start_y = target_widget.y()
+        else:
+            screen = QApplication.primaryScreen()
+            screen_geo = screen.availableGeometry() if screen else QRect(0, 0, 1920, 1080)
+            total_w = cols * w + (cols - 1) * margin
+            total_h = rows * h + (rows - 1) * margin
+            start_x = max(screen_geo.left() + 40, screen_geo.left() + (screen_geo.width() - total_w) // 2)
+            start_y = max(screen_geo.top() + 40, screen_geo.top() + (screen_geo.height() - total_h) // 2)
+
+        sid = self.selected_set_id()
+        if sid not in self._set_defs and self._set_order:
+            sid = self._set_order[0]
+        current_set_profiles = list(self._set_defs.get(sid, {}).get("profiles", [])) if sid in self._set_defs else []
+
+        all_pids = self._all_profile_ids()
+        created_count = 0
+
+        for idx, item_path in enumerate(item_paths):
+            r = idx // cols
+            c = idx % cols
+            pos_x = start_x + c * (w + margin)
+            pos_y = start_y + r * (h + margin)
+            item_name = os.path.basename(item_path)
+
+            if idx == 0 and target_widget:
+                target_widget.folder_path = folder_path
+                target_widget.folder_item_paths = [item_path]
+                target_widget._set_watched_folder(folder_path)
+                target_widget.move(pos_x, pos_y)
+                target_widget.resize(w, h)
+                target_widget.update_playlist()
+                target_widget.current_idx = -1
+                target_widget.next_media()
+                target_widget.save_all_settings()
+                created_count += 1
+                continue
+
+            new_id = self._next_profile_id(all_pids)
+            all_pids.append(new_id)
+
+            new_settings = QSettings("MyHomeApp", f"Profile_{new_id}")
+            new_settings.setValue("name", item_name)
+            new_settings.setValue("x", pos_x)
+            new_settings.setValue("y", pos_y)
+            new_settings.setValue("w", w)
+            new_settings.setValue("h", h)
+            new_settings.setValue("pos", QPoint(pos_x, pos_y))
+            new_settings.setValue("size", QSize(w, h))
+            new_settings.setValue("folder_path", folder_path)
+            new_settings.setValue("folder_item_paths", [item_path])
+            new_settings.setValue("layer_mode", int(DesktopWidget.LAYER_NORMAL))
+            new_settings.setValue("layer_schema_version", int(DesktopWidget.LAYER_SCHEMA_VERSION))
+            new_settings.setValue("corner_mode", 0)
+            new_settings.setValue("media_fit_mode", 0)
+            new_settings.setValue("video_transition_mode", int(DesktopWidget.VIDEO_TRANSITION_SINGLE))
+            new_settings.setValue("video_decode_mode", int(DesktopWidget.VIDEO_DECODE_ORIGINAL))
+            new_settings.setValue("video_dual_fade_ms", int(DesktopWidget.VIDEO_DUAL_FADE_DEFAULT_MS))
+            new_settings.setValue("interval", 5)
+            new_settings.setValue("is_muted", True)
+            new_settings.setValue("gpu_guard_enabled", False)
+            new_settings.setValue("run_enabled", True)
+            new_settings.sync()
+
+            if sid in self._set_defs:
+                if new_id not in current_set_profiles:
+                    current_set_profiles.append(new_id)
+
+            self.run_widget(new_id, item_name)
+            created_count += 1
+
+        self.master_settings.setValue("profile_ids", all_pids)
+        if sid in self._set_defs:
+            self._set_defs[sid]["profiles"] = current_set_profiles
+            self.master_settings.setValue(self._set_key(sid, "profiles"), current_set_profiles)
+        self.master_settings.sync()
+
+        self.update_active_status()
+        self.load_profiles()
+        return bool(created_count > 0)
 
     def _set_hovered_profile_row(self, pid):
         next_pid = str(pid) if pid not in (None, "") else None

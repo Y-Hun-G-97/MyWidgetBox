@@ -1,4 +1,4 @@
-﻿param()
+param()
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
@@ -27,7 +27,24 @@ Get-Process -Name "MyCanvas" -ErrorAction SilentlyContinue | ForEach-Object {
 Start-Sleep -Milliseconds 450
 Get-Process -Name "MyCanvas" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 
-python -m PyInstaller --noconfirm --clean .\MyCanvas.spec
+$pyExecutable = $null
+if (Get-Command py -ErrorAction SilentlyContinue) {
+    try {
+        & py -3.14 -m PyInstaller --version | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            $pyExecutable = "py -3.14"
+        }
+    } catch {}
+}
+if (-not $pyExecutable) {
+    $pyExecutable = "python"
+}
+
+if ($pyExecutable -eq "py -3.14") {
+    py -3.14 -m PyInstaller --noconfirm --clean .\MyCanvas.spec
+} else {
+    python -m PyInstaller --noconfirm --clean .\MyCanvas.spec
+}
 if ($LASTEXITCODE -ne 0) {
     throw "PyInstaller failed with exit code $LASTEXITCODE"
 }

@@ -16,6 +16,21 @@ def update_playlist(widget):
         widget.playlist = []
         return
 
+    selected_items = []
+    for raw in list(getattr(widget, "folder_item_paths", []) or []):
+        p = str(raw or "").strip()
+        if p and os.path.isfile(p):
+            selected_items.append(os.path.normpath(p))
+    if selected_items:
+        media_ext = tuple(widget._supported_media_extensions())
+        candidates = [
+            path for path in selected_items
+            if str(path).lower().endswith(media_ext)
+            and os.path.normcase(os.path.dirname(path)) == os.path.normcase(os.path.normpath(folder))
+        ]
+        widget.playlist = [path for path in candidates if path not in widget.quarantined_media]
+        return
+
     candidates = scan_media_paths(
         folder,
         widget._supported_media_extensions(),
@@ -110,6 +125,7 @@ def flush_settings_sync(widget):
 def save_all_settings(widget, sync=None):
     settings = widget.settings
     settings.setValue("folder_path", widget.folder_path)
+    settings.setValue("folder_item_paths", list(getattr(widget, "folder_item_paths", []) or []))
     settings.setValue("exec_path", widget.exec_path)
     settings.setValue("exec_manual_focus_enabled", bool(getattr(widget, "_exec_manual_focus_enabled", False)))
     settings.setValue("exec_manual_focus_proc_path", str(getattr(widget, "_exec_manual_focus_proc_path", "") or ""))
@@ -151,6 +167,7 @@ def build_settings_dialog_data(widget):
         "is_muted": widget.is_muted,
         "gpu_guard_enabled": widget.gpu_guard_enabled,
         "folder_path": widget.folder_path,
+        "folder_item_paths": list(getattr(widget, "folder_item_paths", []) or []),
         "exec_path": widget.exec_path,
         "focus_binding_summary": widget.get_exec_manual_focus_summary(),
         "focus_binding_host": widget,
@@ -177,8 +194,10 @@ def apply_settings_dialog_result(widget, dialog, old_folder, old_exec):
     if widget._normalize_exec_path(old_exec) != widget._normalize_exec_path(widget.exec_path):
         widget._clear_bound_exec_window()
         widget._clear_manual_focus_binding(persist=False, clear_bound=False)
+    old_folder_item_paths = list(getattr(widget, "folder_item_paths", []) or [])
     widget.folder_path = str(dialog.folder_path or "").strip()
-    source_changed = old_folder != widget.folder_path
+    widget.folder_item_paths = list(getattr(dialog, "folder_item_paths", []) or [])
+    source_changed = old_folder != widget.folder_path or old_folder_item_paths != widget.folder_item_paths
     widget._set_watched_folder(widget.folder_path)
     widget.interval_ms = dialog.sec_input.value() * 1000
     widget.bg_color_mode = dialog.bg_combo.currentIndex()

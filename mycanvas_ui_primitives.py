@@ -138,6 +138,19 @@ class ProfileRowWidget(QFrame):
             style.polish(self)
         self.update()
 
+    def mouseReleaseEvent(self, event):
+        super().mouseReleaseEvent(event)
+        if event.button() == Qt.MouseButton.LeftButton:
+            pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+            action_wrap = getattr(self, "_action_wrap", None)
+            cb = getattr(self, "_checkbox", None)
+            if action_wrap and action_wrap.isVisible() and action_wrap.geometry().contains(pos):
+                return
+            if cb and cb.geometry().contains(pos):
+                return
+            if cb:
+                cb.setChecked(not cb.isChecked())
+
 
 class ProfileListWidget(QListWidget):
     orderChanged = pyqtSignal(list)

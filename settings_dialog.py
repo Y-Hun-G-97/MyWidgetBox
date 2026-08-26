@@ -11,15 +11,772 @@ from mycanvas_ui_primitives import DownwardComboBox
 DesktopWidget = None
 
 
+DesktopWidget = None
+
+
 def bind_settings_dialog_desktop_widget(desktop_widget_cls):
     global DesktopWidget
     DesktopWidget = desktop_widget_cls
 
-class SettingsDialog(QDialog):
-    def __init__(self, parent=None, settings_data=None):
+
+class FolderLayoutChoiceDialog(QDialog):
+    def __init__(self, parent=None, folder_path=""):
         super().__init__(parent)
+        self.setObjectName("folderLayoutChoiceDialog")
+        self.setWindowTitle("미디어 폴더 추가 방식 선택")
+        self.setWindowIcon(QIcon())
+        self.setFixedWidth(460)
+        self.choice = None
+        self.folder_path = str(folder_path or "").strip()
+
+        self.setStyleSheet("""
+            QDialog#folderLayoutChoiceDialog {
+                background-color: #1d2a3d;
+            }
+            QLabel {
+                color: #e6eefc;
+                font-size: 12px;
+            }
+            QLabel#dialogTitle {
+                color: #eef3ff;
+                font-size: 16px;
+                font-weight: 700;
+            }
+            QLabel#dialogDesc {
+                color: #b7cceb;
+                font-size: 12px;
+            }
+            QLabel#folderPathLabel {
+                color: #9cbfe8;
+                font-size: 11px;
+                background-color: #162233;
+                border: 1px solid #324765;
+                border-radius: 6px;
+                padding: 6px 10px;
+            }
+            QPushButton.choiceBtn {
+                min-height: 48px;
+                border-radius: 9px;
+                padding: 8px 14px;
+                color: #ffffff;
+                background-color: #2b4366;
+                border: 1px solid #4a6c9a;
+                font-weight: 600;
+                font-size: 13px;
+                text-align: left;
+            }
+            QPushButton.choiceBtn:hover {
+                background-color: #385684;
+                border-color: #638ec7;
+            }
+            QPushButton#cancelBtn {
+                min-height: 32px;
+                border-radius: 7px;
+                padding: 0 16px;
+                color: #d1ddf0;
+                background-color: #26364d;
+                border: 1px solid #415675;
+                font-size: 12px;
+            }
+            QPushButton#cancelBtn:hover {
+                background-color: #314663;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 22, 22, 20)
+        layout.setSpacing(14)
+
+        title = QLabel("미디어 폴더 추가 방식")
+        title.setObjectName("dialogTitle")
+        layout.addWidget(title)
+
+        desc = QLabel("선택한 폴더의 미디어를 어떻게 표시할지 선택하세요.")
+        desc.setObjectName("dialogDesc")
+        layout.addWidget(desc)
+
+        if self.folder_path:
+            folder_lbl = QLabel(self.folder_path)
+            folder_lbl.setObjectName("folderPathLabel")
+            folder_lbl.setWordWrap(True)
+            layout.addWidget(folder_lbl)
+
+        layout.addSpacing(4)
+
+        slide_btn = QPushButton("▶  슬라이드쇼 방식 (기존)\n   1개 위젯에서 폴더 내 미디어를 순차적으로 전환 재생")
+        slide_btn.setProperty("class", "choiceBtn")
+        slide_btn.clicked.connect(self._choose_slide)
+        layout.addWidget(slide_btn)
+
+        spread_btn = QPushButton("⊞  스프레드 방식 (바둑판식 배열)\n   미디어마다 개별 위젯을 생성하여 바둑판식으로 화면에 나열")
+        spread_btn.setProperty("class", "choiceBtn")
+        spread_btn.clicked.connect(self._choose_spread)
+        layout.addWidget(spread_btn)
+
+        layout.addSpacing(6)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch(1)
+        cancel_btn = QPushButton("취소")
+        cancel_btn.setObjectName("cancelBtn")
+        cancel_btn.clicked.connect(self.reject)
+        btn_row.addWidget(cancel_btn)
+        layout.addLayout(btn_row)
+
+    def _choose_slide(self):
+        self.choice = "slide"
+        self.accept()
+
+    def _choose_spread(self):
+        self.choice = "spread"
+        self.accept()
+
+
+_IMAGE_EXTS = ('.png', '.jpg', '.jpeg', '.bmp', '.webp')
+_GIF_EXTS = ('.gif',)
+_VIDEO_EXTS = ('.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v')
+
+
+def _classify_media(path):
+    ext = os.path.splitext(str(path))[1].lower()
+    if ext in _GIF_EXTS:
+        return "gif"
+    if ext in _VIDEO_EXTS:
+        return "video"
+    if ext in _IMAGE_EXTS:
+        return "image"
+    return "other"
+
+
+class FolderSlideDialog(QDialog):
+    def __init__(self, parent=None, folder_path="", media_paths=None):
+        super().__init__(parent)
+        self.setObjectName("folderSlideDialog")
+        self.setWindowTitle("슬라이드 미디어 선택")
+        self.setWindowIcon(QIcon())
+        self.resize(540, 560)
+        self.setFixedWidth(540)
+        self.folder_path = str(folder_path or "").strip()
+        self.media_paths = [str(p) for p in (media_paths or []) if p and os.path.isfile(p)]
+        self.result_paths = None
+        self._current_filter = "all"
+        self._filter_btns = {}
+
+        img_count = sum(1 for p in self.media_paths if _classify_media(p) == "image")
+        gif_count = sum(1 for p in self.media_paths if _classify_media(p) == "gif")
+        vid_count = sum(1 for p in self.media_paths if _classify_media(p) == "video")
+        all_count = len(self.media_paths)
+
+        self.setStyleSheet("""
+            QDialog#folderSlideDialog {
+                background-color: #1d2a3d;
+            }
+            QLabel {
+                color: #e6eefc;
+                font-size: 12px;
+            }
+            QLabel#dialogTitle {
+                color: #eef3ff;
+                font-size: 16px;
+                font-weight: 700;
+            }
+            QLabel#dialogSubtitle {
+                color: #b7cceb;
+                font-size: 12px;
+            }
+            QLabel#sectionHeader {
+                color: #a7c1eb;
+                font-size: 12px;
+                font-weight: 700;
+            }
+            QListWidget {
+                color: #edf3ff;
+                background-color: #182537;
+                border: 1px solid #3f567a;
+                border-radius: 8px;
+                padding: 4px;
+            }
+            QListWidget::item {
+                min-height: 28px;
+                padding: 2px 6px;
+                border-radius: 4px;
+            }
+            QListWidget::item:hover {
+                background-color: #2a3d58;
+            }
+            QPushButton {
+                min-height: 30px;
+                border-radius: 6px;
+                padding: 0 12px;
+                color: #e8efff;
+                background-color: #35507a;
+                border: 1px solid #5977a4;
+                font-weight: 600;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background-color: #3f5e8e;
+            }
+            QPushButton[kind="filterBtn"] {
+                min-height: 26px;
+                padding: 0 10px;
+                font-size: 11px;
+                font-weight: 600;
+                border-radius: 6px;
+                background-color: #263852;
+                border: 1px solid #435c80;
+                color: #cddbf0;
+            }
+            QPushButton[kind="filterBtn"]:hover {
+                background-color: #32496a;
+            }
+            QPushButton[kind="filterBtn"][active="true"] {
+                background-color: #4a74e2;
+                border-color: #7296f0;
+                color: #ffffff;
+            }
+            QPushButton#primaryBtn {
+                background-color: #4f7fc8;
+                border-color: #7aa4e8;
+                font-size: 13px;
+                font-weight: 700;
+                min-height: 36px;
+                padding: 0 20px;
+            }
+            QPushButton#primaryBtn:hover {
+                background-color: #5d8dd9;
+            }
+            QPushButton#secondaryBtn {
+                min-height: 26px;
+                padding: 0 10px;
+                font-size: 11px;
+                background-color: #263852;
+                border: 1px solid #435c80;
+            }
+            QPushButton#secondaryBtn:hover {
+                background-color: #32496a;
+            }
+            QLabel#statusLabel {
+                color: #8cc3ff;
+                font-weight: 600;
+                font-size: 12px;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 18)
+        layout.setSpacing(12)
+
+        title = QLabel("슬라이드 재생 미디어 선택")
+        title.setObjectName("dialogTitle")
+        subtitle = QLabel("위젯에서 순차적으로 재생할 미디어 파일들을 선택하세요.")
+        subtitle.setObjectName("dialogSubtitle")
+        layout.addWidget(title)
+        layout.addWidget(subtitle)
+
+        filter_row = QHBoxLayout()
+        filter_row.setSpacing(6)
+        filter_label = QLabel("필터:")
+        filter_label.setObjectName("sectionHeader")
+        filter_row.addWidget(filter_label)
+
+        for cat_key, cat_name, cat_cnt in [
+            ("all", f"전체 ({all_count})", all_count),
+            ("image", f"이미지 ({img_count})", img_count),
+            ("gif", f"GIF ({gif_count})", gif_count),
+            ("video", f"영상 ({vid_count})", vid_count),
+        ]:
+            btn = QPushButton(cat_name)
+            btn.setProperty("kind", "filterBtn")
+            btn.setProperty("active", "true" if cat_key == "all" else "false")
+            if cat_cnt == 0:
+                btn.setEnabled(False)
+            btn.clicked.connect(lambda _, k=cat_key: self._apply_filter(k))
+            self._filter_btns[cat_key] = btn
+            filter_row.addWidget(btn)
+
+        filter_row.addStretch(1)
+        select_all_btn = QPushButton("전체 선택")
+        select_all_btn.setObjectName("secondaryBtn")
+        clear_btn = QPushButton("선택 해제")
+        clear_btn.setObjectName("secondaryBtn")
+        filter_row.addWidget(select_all_btn)
+        filter_row.addWidget(clear_btn)
+        layout.addLayout(filter_row)
+
+        self.list_widget = QListWidget()
+        self.list_widget.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        for path in self.media_paths:
+            cat = _classify_media(path)
+            prefix = "[IMG] " if cat == "image" else ("[GIF] " if cat == "gif" else "[VID] ")
+            item = QListWidgetItem(f"{prefix}{os.path.basename(path)}")
+            item.setToolTip(path)
+            item.setData(Qt.ItemDataRole.UserRole, path)
+            item.setData(Qt.ItemDataRole.UserRole + 1, cat)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked)
+            self.list_widget.addItem(item)
+        layout.addWidget(self.list_widget, 1)
+
+        self.status_label = QLabel("")
+        self.status_label.setObjectName("statusLabel")
+        layout.addWidget(self.status_label)
+
+        action_row = QHBoxLayout()
+        action_row.addStretch(1)
+        cancel_btn = QPushButton("취소")
+        apply_btn = QPushButton("슬라이드 적용")
+        apply_btn.setObjectName("primaryBtn")
+        action_row.addWidget(cancel_btn)
+        action_row.addWidget(apply_btn)
+        layout.addLayout(action_row)
+
+        select_all_btn.clicked.connect(lambda: self._set_filtered_checked(True))
+        clear_btn.clicked.connect(lambda: self._set_filtered_checked(False))
+        cancel_btn.clicked.connect(self.reject)
+        apply_btn.clicked.connect(self._accept_if_valid)
+
+        self.list_widget.itemClicked.connect(self._on_item_clicked)
+        self.list_widget.itemChanged.connect(lambda _item: self._refresh_status())
+        self._refresh_status()
+
+    def _on_item_clicked(self, item):
+        state = item.checkState()
+        item.setCheckState(Qt.CheckState.Unchecked if state == Qt.CheckState.Checked else Qt.CheckState.Checked)
+
+    def _apply_filter(self, category):
+        self._current_filter = str(category)
+        for cat_key, btn in self._filter_btns.items():
+            btn.setProperty("active", "true" if cat_key == self._current_filter else "false")
+            btn.style().unpolish(btn)
+            btn.style().polish(btn)
+        for idx in range(self.list_widget.count()):
+            item = self.list_widget.item(idx)
+            cat = str(item.data(Qt.ItemDataRole.UserRole + 1) or "")
+            if self._current_filter == "all" or cat == self._current_filter:
+                item.setHidden(False)
+            else:
+                item.setHidden(True)
+        self._refresh_status()
+
+    def _set_filtered_checked(self, checked):
+        state = Qt.CheckState.Checked if bool(checked) else Qt.CheckState.Unchecked
+        for idx in range(self.list_widget.count()):
+            item = self.list_widget.item(idx)
+            if not item.isHidden():
+                item.setCheckState(state)
+        self._refresh_status()
+
+    def _checked_paths(self):
+        paths = []
+        for idx in range(self.list_widget.count()):
+            item = self.list_widget.item(idx)
+            if item.checkState() == Qt.CheckState.Checked:
+                paths.append(str(item.data(Qt.ItemDataRole.UserRole) or ""))
+        return [p for p in paths if p]
+
+    def _refresh_status(self):
+        selected = len(self._checked_paths())
+        total = len(self.media_paths)
+        self.status_label.setText(f"선택 {selected}개 / 전체 {total}개")
+        self.status_label.setStyleSheet("color: #8cc3ff; font-weight: 600;")
+
+    def _accept_if_valid(self):
+        paths = self._checked_paths()
+        if not paths:
+            QMessageBox.warning(self, "슬라이드 미디어", "슬라이드로 재생할 미디어를 하나 이상 선택해주세요.")
+            return
+        self.result_paths = paths
+        self.accept()
+
+
+class FolderSpreadDialog(QDialog):
+    def __init__(self, parent=None, folder_path="", media_paths=None, current_size=None):
+        super().__init__(parent)
+        self.setObjectName("folderSpreadDialog")
+        self.setWindowTitle("스프레드(바둑판) 위젯 배치 설정")
+        self.setWindowIcon(QIcon())
+        self.resize(560, 660)
+        self.setFixedWidth(560)
+        self.folder_path = str(folder_path or "").strip()
+        self.media_paths = [str(p) for p in (media_paths or []) if p and os.path.isfile(p)]
+        self.result_data = None
+        self._current_filter = "all"
+        self._filter_btns = {}
+
+        default_w = 200
+        default_h = 200
+        if current_size and hasattr(current_size, "width") and hasattr(current_size, "height"):
+            if current_size.width() > 50:
+                default_w = int(current_size.width())
+            if current_size.height() > 50:
+                default_h = int(current_size.height())
+
+        count = len(self.media_paths)
+        import math
+        init_cols = max(1, math.ceil(math.sqrt(count))) if count > 0 else 2
+        init_rows = max(1, math.ceil(count / init_cols)) if count > 0 else 2
+
+        img_count = sum(1 for p in self.media_paths if _classify_media(p) == "image")
+        gif_count = sum(1 for p in self.media_paths if _classify_media(p) == "gif")
+        vid_count = sum(1 for p in self.media_paths if _classify_media(p) == "video")
+        all_count = len(self.media_paths)
+
+        self.setStyleSheet("""
+            QDialog#folderSpreadDialog {
+                background-color: #1d2a3d;
+            }
+            QLabel {
+                color: #e6eefc;
+                font-size: 12px;
+            }
+            QLabel#dialogTitle {
+                color: #eef3ff;
+                font-size: 16px;
+                font-weight: 700;
+            }
+            QLabel#sectionHeader {
+                color: #a7c1eb;
+                font-size: 12px;
+                font-weight: 700;
+            }
+            QFrame#cardFrame {
+                background-color: #23344d;
+                border: 1px solid #3f567a;
+                border-radius: 10px;
+                padding: 10px;
+            }
+            QSpinBox {
+                min-height: 32px;
+                color: #edf3ff;
+                background-color: #35507a;
+                border: 1px solid #5977a4;
+                border-radius: 8px;
+                padding: 2px 28px 2px 8px;
+            }
+            QSpinBox:focus {
+                border: 1px solid #77a3f2;
+            }
+            QSpinBox::up-button {
+                subcontrol-origin: border;
+                subcontrol-position: top right;
+                width: 24px;
+                height: 16px;
+                border-left: 1px solid #48658f;
+                border-bottom: 1px solid #48658f;
+                border-top-right-radius: 7px;
+                background-color: #2b4369;
+            }
+            QSpinBox::up-button:hover {
+                background-color: #3f6096;
+            }
+            QSpinBox::up-button:pressed {
+                background-color: #203352;
+            }
+            QSpinBox::up-arrow {
+                width: 7px;
+                height: 5px;
+            }
+            QSpinBox::down-button {
+                subcontrol-origin: border;
+                subcontrol-position: bottom right;
+                width: 24px;
+                height: 16px;
+                border-left: 1px solid #48658f;
+                border-bottom-right-radius: 7px;
+                background-color: #2b4369;
+            }
+            QSpinBox::down-button:hover {
+                background-color: #3f6096;
+            }
+            QSpinBox::down-button:pressed {
+                background-color: #203352;
+            }
+            QSpinBox::down-arrow {
+                width: 7px;
+                height: 5px;
+            }
+            QListWidget {
+                color: #edf3ff;
+                background-color: #182537;
+                border: 1px solid #3f567a;
+                border-radius: 8px;
+                padding: 4px;
+            }
+            QListWidget::item {
+                min-height: 28px;
+                padding: 2px 6px;
+                border-radius: 4px;
+            }
+            QListWidget::item:hover {
+                background-color: #2a3d58;
+            }
+            QPushButton {
+                min-height: 30px;
+                border-radius: 6px;
+                padding: 0 12px;
+                color: #e8efff;
+                background-color: #35507a;
+                border: 1px solid #5977a4;
+                font-weight: 600;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background-color: #3f5e8e;
+            }
+            QPushButton[kind="filterBtn"] {
+                min-height: 26px;
+                padding: 0 10px;
+                font-size: 11px;
+                font-weight: 600;
+                border-radius: 6px;
+                background-color: #263852;
+                border: 1px solid #435c80;
+                color: #cddbf0;
+            }
+            QPushButton[kind="filterBtn"]:hover {
+                background-color: #32496a;
+            }
+            QPushButton[kind="filterBtn"][active="true"] {
+                background-color: #4a74e2;
+                border-color: #7296f0;
+                color: #ffffff;
+            }
+            QPushButton#primaryBtn {
+                background-color: #4f7fc8;
+                border-color: #7aa4e8;
+                font-size: 13px;
+                font-weight: 700;
+                min-height: 36px;
+                padding: 0 20px;
+            }
+            QPushButton#primaryBtn:hover {
+                background-color: #5d8dd9;
+            }
+            QPushButton#secondaryBtn {
+                min-height: 26px;
+                padding: 0 10px;
+                font-size: 11px;
+                background-color: #263852;
+                border: 1px solid #435c80;
+            }
+            QPushButton#secondaryBtn:hover {
+                background-color: #32496a;
+            }
+            QLabel#statusLabel {
+                color: #8cc3ff;
+                font-weight: 600;
+                font-size: 12px;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 18)
+        layout.setSpacing(12)
+
+        title = QLabel("스프레드(바둑판) 위젯 배치 설정")
+        title.setObjectName("dialogTitle")
+        layout.addWidget(title)
+
+        # 1. 배치 & 크기 설정 카드
+        grid_card = QFrame()
+        grid_card.setObjectName("cardFrame")
+        grid_layout = QGridLayout(grid_card)
+        grid_layout.setContentsMargins(12, 12, 12, 12)
+        grid_layout.setHorizontalSpacing(14)
+        grid_layout.setVerticalSpacing(10)
+
+        # 위젯 너비 & 높이
+        grid_layout.addWidget(QLabel("위젯 너비(W):"), 0, 0)
+        self.width_input = QSpinBox()
+        self.width_input.setRange(50, 4000)
+        self.width_input.setValue(default_w)
+        self.width_input.setSuffix(" px")
+        grid_layout.addWidget(self.width_input, 0, 1)
+
+        grid_layout.addWidget(QLabel("위젯 높이(H):"), 0, 2)
+        self.height_input = QSpinBox()
+        self.height_input.setRange(50, 4000)
+        self.height_input.setValue(default_h)
+        self.height_input.setSuffix(" px")
+        grid_layout.addWidget(self.height_input, 0, 3)
+
+        # 행, 열, 간격
+        grid_layout.addWidget(QLabel("가로 열(Cols):"), 1, 0)
+        self.cols_input = QSpinBox()
+        self.cols_input.setRange(1, 50)
+        self.cols_input.setValue(init_cols)
+        self.cols_input.setSuffix(" 열")
+        grid_layout.addWidget(self.cols_input, 1, 1)
+
+        grid_layout.addWidget(QLabel("세로 행(Rows):"), 1, 2)
+        self.rows_input = QSpinBox()
+        self.rows_input.setRange(1, 50)
+        self.rows_input.setValue(init_rows)
+        self.rows_input.setSuffix(" 행")
+        grid_layout.addWidget(self.rows_input, 1, 3)
+
+        grid_layout.addWidget(QLabel("위젯 간격(Margin):"), 2, 0)
+        self.margin_input = QSpinBox()
+        self.margin_input.setRange(0, 500)
+        self.margin_input.setValue(10)
+        self.margin_input.setSuffix(" px")
+        grid_layout.addWidget(self.margin_input, 2, 1)
+
+        layout.addWidget(grid_card)
+
+        # 2. 미디어 목록 선택 카드
+        filter_row = QHBoxLayout()
+        filter_row.setSpacing(6)
+        list_label = QLabel("필터:")
+        list_label.setObjectName("sectionHeader")
+        filter_row.addWidget(list_label)
+
+        for cat_key, cat_name, cat_cnt in [
+            ("all", f"전체 ({all_count})", all_count),
+            ("image", f"이미지 ({img_count})", img_count),
+            ("gif", f"GIF ({gif_count})", gif_count),
+            ("video", f"영상 ({vid_count})", vid_count),
+        ]:
+            btn = QPushButton(cat_name)
+            btn.setProperty("kind", "filterBtn")
+            btn.setProperty("active", "true" if cat_key == "all" else "false")
+            if cat_cnt == 0:
+                btn.setEnabled(False)
+            btn.clicked.connect(lambda _, k=cat_key: self._apply_filter(k))
+            self._filter_btns[cat_key] = btn
+            filter_row.addWidget(btn)
+
+        filter_row.addStretch(1)
+        select_all_btn = QPushButton("전체 선택")
+        select_all_btn.setObjectName("secondaryBtn")
+        clear_btn = QPushButton("선택 해제")
+        clear_btn.setObjectName("secondaryBtn")
+        filter_row.addWidget(select_all_btn)
+        filter_row.addWidget(clear_btn)
+        layout.addLayout(filter_row)
+
+        self.list_widget = QListWidget()
+        self.list_widget.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        for path in self.media_paths:
+            cat = _classify_media(path)
+            prefix = "[IMG] " if cat == "image" else ("[GIF] " if cat == "gif" else "[VID] ")
+            item = QListWidgetItem(f"{prefix}{os.path.basename(path)}")
+            item.setToolTip(path)
+            item.setData(Qt.ItemDataRole.UserRole, path)
+            item.setData(Qt.ItemDataRole.UserRole + 1, cat)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked)
+            self.list_widget.addItem(item)
+        layout.addWidget(self.list_widget, 1)
+
+        # 상태 안내 레이블
+        self.status_label = QLabel("")
+        self.status_label.setObjectName("statusLabel")
+        layout.addWidget(self.status_label)
+
+        # 3. 하단 액션 버튼
+        action_row = QHBoxLayout()
+        action_row.addStretch(1)
+        cancel_btn = QPushButton("취소")
+        create_btn = QPushButton("스프레드 생성")
+        create_btn.setObjectName("primaryBtn")
+        action_row.addWidget(cancel_btn)
+        action_row.addWidget(create_btn)
+        layout.addLayout(action_row)
+
+        # 이벤트 연결
+        select_all_btn.clicked.connect(lambda: self._set_filtered_checked(True))
+        clear_btn.clicked.connect(lambda: self._set_filtered_checked(False))
+        cancel_btn.clicked.connect(self.reject)
+        create_btn.clicked.connect(self._accept_if_valid)
+
+        self.list_widget.itemClicked.connect(self._on_item_clicked)
+        self.cols_input.valueChanged.connect(self._refresh_status)
+        self.rows_input.valueChanged.connect(self._refresh_status)
+        self.list_widget.itemChanged.connect(lambda _item: self._refresh_status())
+        self._refresh_status()
+
+    def _on_item_clicked(self, item):
+        state = item.checkState()
+        item.setCheckState(Qt.CheckState.Unchecked if state == Qt.CheckState.Checked else Qt.CheckState.Checked)
+
+    def _apply_filter(self, category):
+        self._current_filter = str(category)
+        for cat_key, btn in self._filter_btns.items():
+            btn.setProperty("active", "true" if cat_key == self._current_filter else "false")
+            btn.style().unpolish(btn)
+            btn.style().polish(btn)
+        for idx in range(self.list_widget.count()):
+            item = self.list_widget.item(idx)
+            cat = str(item.data(Qt.ItemDataRole.UserRole + 1) or "")
+            if self._current_filter == "all" or cat == self._current_filter:
+                item.setHidden(False)
+            else:
+                item.setHidden(True)
+        self._refresh_status()
+
+    def _set_filtered_checked(self, checked):
+        state = Qt.CheckState.Checked if bool(checked) else Qt.CheckState.Unchecked
+        for idx in range(self.list_widget.count()):
+            item = self.list_widget.item(idx)
+            if not item.isHidden():
+                item.setCheckState(state)
+        self._refresh_status()
+
+    def _checked_paths(self):
+        paths = []
+        for idx in range(self.list_widget.count()):
+            item = self.list_widget.item(idx)
+            if item.checkState() == Qt.CheckState.Checked:
+                paths.append(str(item.data(Qt.ItemDataRole.UserRole) or ""))
+        return [path for path in paths if path]
+
+    def _refresh_status(self):
+        selected = len(self._checked_paths())
+        cells = int(self.rows_input.value()) * int(self.cols_input.value())
+        if selected > cells:
+            self.status_label.setText(f"선택 {selected}개 / 배치 공간 {cells}칸 ({int(self.cols_input.value())}x{int(self.rows_input.value())})  ⚠️ 공간이 부족합니다 (행/열을 늘려주세요)")
+            self.status_label.setStyleSheet("color: #ff9b9b; font-weight: 700;")
+        else:
+            self.status_label.setText(f"선택 {selected}개 / 배치 공간 {cells}칸 ({int(self.cols_input.value())}x{int(self.rows_input.value())})")
+            self.status_label.setStyleSheet("color: #8cc3ff; font-weight: 600;")
+
+    def _accept_if_valid(self):
+        paths = self._checked_paths()
+        if not paths:
+            QMessageBox.warning(self, "스프레드 배치", "생성할 미디어를 하나 이상 선택해주세요.")
+            return
+        cells = int(self.rows_input.value()) * int(self.cols_input.value())
+        if len(paths) > cells:
+            QMessageBox.warning(
+                self,
+                "스프레드 배치",
+                f"선택한 미디어 개수({len(paths)}개)가 설정된 바둑판 칸수({cells}칸)보다 많습니다.\n행 또는 열 개수를 늘려주세요.",
+            )
+            return
+        self.result_data = {
+            "folder_path": self.folder_path,
+            "item_paths": paths,
+            "w": int(self.width_input.value()),
+            "h": int(self.height_input.value()),
+            "rows": int(self.rows_input.value()),
+            "cols": int(self.cols_input.value()),
+            "margin": int(self.margin_input.value()),
+        }
+        self.accept()
+
+
+class SettingsDialog(QDialog):
+    def __init__(self, parent=None, settings_data=None, bulk_mode=False, target_count=1):
+        super().__init__(parent)
+        self.bulk_mode = bool(bulk_mode)
+        self.target_count = max(1, int(target_count))
         self.setObjectName("settingsDialog")
-        self.setWindowTitle("위젯 상세 설정")
+        if self.bulk_mode:
+            self.setWindowTitle(f"위젯 옵션 일괄 설정 ({self.target_count}개 선택됨)")
+        else:
+            self.setWindowTitle("위젯 상세 설정")
         self.setWindowIcon(QIcon())
         self._title_bar_themed = False
         self.resize(760, 680)
@@ -79,8 +836,50 @@ class SettingsDialog(QDialog):
                 border-radius: 9px;
                 padding: 2px 10px;
             }
+            QSpinBox {
+                padding-right: 28px;
+            }
             QSpinBox:focus, QComboBox:focus {
                 border: 1px solid #77a3f2;
+            }
+            QSpinBox::up-button {
+                subcontrol-origin: border;
+                subcontrol-position: top right;
+                width: 24px;
+                height: 17px;
+                border-left: 1px solid #48658f;
+                border-bottom: 1px solid #48658f;
+                border-top-right-radius: 8px;
+                background-color: #2b4369;
+            }
+            QSpinBox::up-button:hover {
+                background-color: #3f6096;
+            }
+            QSpinBox::up-button:pressed {
+                background-color: #203352;
+            }
+            QSpinBox::up-arrow {
+                width: 7px;
+                height: 5px;
+            }
+            QSpinBox::down-button {
+                subcontrol-origin: border;
+                subcontrol-position: bottom right;
+                width: 24px;
+                height: 17px;
+                border-left: 1px solid #48658f;
+                border-bottom-right-radius: 8px;
+                background-color: #2b4369;
+            }
+            QSpinBox::down-button:hover {
+                background-color: #3f6096;
+            }
+            QSpinBox::down-button:pressed {
+                background-color: #203352;
+            }
+            QSpinBox::down-arrow {
+                width: 7px;
+                height: 5px;
             }
             QComboBox {
                 padding-right: 18px;
@@ -204,9 +1003,15 @@ class SettingsDialog(QDialog):
         header_layout = QVBoxLayout(header)
         header_layout.setContentsMargins(12, 10, 12, 10)
         header_layout.setSpacing(3)
-        title_label = QLabel("위젯 상세 설정")
+        if self.bulk_mode:
+            title_text = f"위젯 옵션 일괄 설정 ({self.target_count}개 선택됨)"
+            subtitle_text = "선택한 위젯들에 공통으로 적용할 옵션을 설정합니다 (실행/연동 옵션 제외)"
+        else:
+            title_text = "위젯 상세 설정"
+            subtitle_text = "현재 위젯의 재생/표시/상호작용 설정을 변경합니다"
+        title_label = QLabel(title_text)
         title_label.setObjectName("settingsTitle")
-        subtitle_label = QLabel("현재 위젯의 재생/표시/상호작용 설정을 변경합니다")
+        subtitle_label = QLabel(subtitle_text)
         subtitle_label.setObjectName("settingsSubtitle")
         header_layout.addWidget(title_label)
         header_layout.addWidget(subtitle_label)
@@ -247,18 +1052,28 @@ class SettingsDialog(QDialog):
         s = settings_data if settings_data else {}
         
         self.folder_path = s.get('folder_path', "")
+        self.folder_item_paths = list(s.get('folder_item_paths', []) or [])
+        self.pending_spread_config = None
         self.exec_path = s.get('exec_path', "")
 
-        self.folder_label = QLabel(self.folder_path if self.folder_path else "미지정")
+        init_folder_display = self.folder_path if self.folder_path else "미지정"
+        if self.folder_path and self.folder_item_paths:
+            if len(self.folder_item_paths) == 1:
+                init_folder_display = f"{self.folder_path} ({os.path.basename(self.folder_item_paths[0])})"
+            else:
+                init_folder_display = f"{self.folder_path} (선택 {len(self.folder_item_paths)}개)"
+
+        self.folder_label = QLabel(init_folder_display)
         self.folder_label.setObjectName("pathLabel")
         self.folder_label.setWordWrap(True)
         self.folder_label.setToolTip(self.folder_path if self.folder_path else "")
         self.folder_hint_label = None
         self.folder_btn = QPushButton("폴더 선택")
+        self.file_btn = QPushButton("파일 선택")
         self.folder_help_btn = QToolButton()
         self.folder_help_btn.setObjectName("folderHelpBtn")
         self.folder_help_btn.setText("")
-        self.folder_help_btn.setToolTip("미디어 폴더 모드 설명")
+        self.folder_help_btn.setToolTip("미디어 선택 모드 설명")
         self.folder_help_btn.setCheckable(True)
         self.folder_help_btn.setAutoRaise(True)
         help_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_MessageBoxQuestion)
@@ -282,6 +1097,7 @@ class SettingsDialog(QDialog):
         folder_btn_row.setContentsMargins(0, 0, 0, 0)
         folder_btn_row.setSpacing(6)
         folder_btn_row.addWidget(self.folder_btn, 1)
+        folder_btn_row.addWidget(self.file_btn, 1)
         folder_btn_row.addWidget(self.folder_help_btn, 0)
 
         self.folder_help_panel = QFrame(self)
@@ -295,8 +1111,9 @@ class SettingsDialog(QDialog):
         folder_help_layout.setContentsMargins(10, 8, 10, 10)
         folder_help_layout.setSpacing(6)
         folder_help_text = (
-            "미디어 폴더 모드 안내\n"
-            "- 폴더 내부 이미지/영상 파일을 이름 순서대로 재생합니다."
+            "미디어 선택 모드 안내\n"
+            "- [폴더 선택]: 폴더 내의 미디어를 순차 재생(슬라이드)하거나 바둑판식(스프레드)으로 배치합니다.\n"
+            "- [파일 선택]: 원하는 특정 미디어 파일들만 직접 선택하여 고정/재생합니다."
         )
         self.folder_help_text = QLabel(
             folder_help_text
@@ -558,7 +1375,7 @@ class SettingsDialog(QDialog):
             form_layout.addRow(row_widget)
 
         _add_section_header(left_form, "실행 / 연동")
-        left_form.addRow("미디어 폴더:", self._folder_btn_row_widget)
+        left_form.addRow("미디어 선택:", self._folder_btn_row_widget)
         left_form.addRow("", self.folder_label)
         if self.folder_hint_label is not None:
             left_form.addRow("", self.folder_hint_label)
@@ -619,6 +1436,7 @@ class SettingsDialog(QDialog):
         card_layout.addLayout(action_row)
         
         self.folder_btn.clicked.connect(self.select_folder)
+        self.file_btn.clicked.connect(self.select_file)
         self.folder_help_btn.toggled.connect(self._set_folder_help_panel_visible)
         self.exec_btn.clicked.connect(self.select_exec)
         self.focus_bind_btn.clicked.connect(self._start_focus_capture)
@@ -627,6 +1445,17 @@ class SettingsDialog(QDialog):
         self.video_cache_clear_btn.clicked.connect(self._clear_video_proxy_cache)
         self.master_btn.clicked.connect(self.open_master)
         apply.clicked.connect(self.accept); cancel.clicked.connect(self.reject)
+
+        if self.bulk_mode:
+            self._folder_btn_row_widget.setEnabled(False)
+            self.exec_btn.setEnabled(False)
+            self._focus_bind_row_widget.setEnabled(False)
+            self.folder_label.setText("일괄 설정 모드에서는 미디어/실행파일 설정이 제외됩니다.")
+            self.folder_label.setStyleSheet("color: #8fa5c4; font-style: italic;")
+            self.exec_label.setText("-")
+            self.focus_binding_label.setText("-")
+            self.master_btn.setVisible(False)
+
         self._set_folder_help_panel_visible(False)
         QTimer.singleShot(0, self._apply_title_bar_theme)
         QTimer.singleShot(0, self._sync_video_transition_dependent_ui)
@@ -945,10 +1774,113 @@ class SettingsDialog(QDialog):
     def select_folder(self):
         path = QFileDialog.getExistingDirectory(self, "폴더 선택")
         if path:
-            self.folder_path = path
-            self.folder_label.setText(path)
-            self.folder_label.setToolTip(path)
+            self._apply_selected_folder(path)
             self._set_folder_help_panel_visible(False)
+
+    def _scan_media_paths_for_folder(self, folder_path):
+        if not folder_path or not os.path.isdir(folder_path):
+            return []
+        if DesktopWidget and hasattr(DesktopWidget, "_supported_media_extensions"):
+            media_ext = tuple(DesktopWidget._supported_media_extensions())
+        else:
+            media_ext = (
+                ".jpg", ".jpeg", ".png", ".bmp", ".webp", ".gif",
+                ".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"
+            )
+        try:
+            names = sorted(os.listdir(folder_path))
+        except OSError:
+            return []
+        paths = []
+        for name in names:
+            p = os.path.join(folder_path, str(name))
+            if os.path.isfile(p) and str(name).lower().endswith(media_ext):
+                paths.append(os.path.normpath(p))
+        return paths
+
+    def _apply_selected_folder(self, path):
+        folder_path = os.path.normpath(str(path or ""))
+        media_paths = self._scan_media_paths_for_folder(folder_path)
+        if not media_paths:
+            QMessageBox.information(
+                self,
+                "미디어 없음",
+                "선택한 폴더에 지원되는 미디어 파일(이미지, GIF, 동영상)이 없습니다.",
+            )
+            return
+
+        choice_dialog = FolderLayoutChoiceDialog(self, folder_path)
+        if choice_dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        if choice_dialog.choice == "spread":
+            spread_dialog = FolderSpreadDialog(
+                self,
+                folder_path,
+                media_paths,
+                QSize(int(self.width_input.value()), int(self.height_input.value())),
+            )
+            if spread_dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+
+            self.pending_spread_config = dict(spread_dialog.result_data or {})
+            item_paths = list(self.pending_spread_config.get("item_paths", []) or [])
+            self.folder_path = folder_path
+            self.folder_item_paths = item_paths[:1]
+            if "w" in self.pending_spread_config:
+                self.width_input.setValue(int(self.pending_spread_config["w"]))
+            if "h" in self.pending_spread_config:
+                self.height_input.setValue(int(self.pending_spread_config["h"]))
+            label_text = f"{folder_path} (스프레드 {len(item_paths)}개)"
+            self.folder_label.setText(label_text)
+            self.folder_label.setToolTip(folder_path)
+            return
+
+        if choice_dialog.choice == "slide":
+            slide_dialog = FolderSlideDialog(self, folder_path, media_paths)
+            if slide_dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            self.pending_spread_config = None
+            self.folder_path = folder_path
+            chosen_paths = list(slide_dialog.result_paths or [])
+            if len(chosen_paths) == len(media_paths):
+                self.folder_item_paths = []
+                label_text = folder_path
+            else:
+                self.folder_item_paths = chosen_paths
+                if len(chosen_paths) == 1:
+                    label_text = f"{folder_path} ({os.path.basename(chosen_paths[0])})"
+                else:
+                    label_text = f"{folder_path} (슬라이드 {len(chosen_paths)}개)"
+            self.folder_label.setText(label_text)
+            self.folder_label.setToolTip(folder_path)
+            return
+
+        self.pending_spread_config = None
+        self.folder_path = folder_path
+        self.folder_item_paths = []
+        self.folder_label.setText(folder_path)
+        self.folder_label.setToolTip(folder_path)
+
+    def select_file(self):
+        filter_str = "미디어 파일 (*.png *.jpg *.jpeg *.bmp *.webp *.gif *.mp4 *.mov *.avi *.mkv *.webm *.m4v);;모든 파일 (*)"
+        paths, _ = QFileDialog.getOpenFileNames(self, "미디어 파일 선택", "", filter_str)
+        if not paths:
+            return
+        norm_paths = [os.path.normpath(p) for p in paths if p and os.path.isfile(p)]
+        if not norm_paths:
+            return
+        folder_path = os.path.dirname(norm_paths[0])
+        self.pending_spread_config = None
+        self.folder_path = folder_path
+        self.folder_item_paths = norm_paths
+        if len(norm_paths) == 1:
+            label_text = f"{folder_path} ({os.path.basename(norm_paths[0])})"
+        else:
+            label_text = f"{folder_path} (선택 {len(norm_paths)}개)"
+        self.folder_label.setText(label_text)
+        self.folder_label.setToolTip(folder_path)
+        self._set_folder_help_panel_visible(False)
 
     def select_exec(self):
         path, _ = QFileDialog.getOpenFileName(self, "파일 선택", "", "실행 파일 (*.exe *.lnk);;모든 파일 (*)")
