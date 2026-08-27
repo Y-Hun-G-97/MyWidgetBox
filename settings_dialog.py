@@ -5,8 +5,8 @@ from PyQt6.QtCore import *
 from PyQt6.QtGui import *
 from PyQt6.QtWidgets import *
 
-from mycanvas_core import _as_bool
-from mycanvas_ui_primitives import DownwardComboBox
+from mywidgetbox_core import _as_bool, calc_smart_aspect_size, get_media_native_size
+from mywidgetbox_ui_primitives import DownwardComboBox
 
 DesktopWidget = None
 
@@ -396,8 +396,8 @@ class FolderSpreadDialog(QDialog):
         self.setObjectName("folderSpreadDialog")
         self.setWindowTitle("스프레드(바둑판) 위젯 배치 설정")
         self.setWindowIcon(QIcon())
-        self.resize(560, 660)
-        self.setFixedWidth(560)
+        self.resize(580, 680)
+        self.setFixedWidth(580)
         self.folder_path = str(folder_path or "").strip()
         self.media_paths = [str(p) for p in (media_paths or []) if p and os.path.isfile(p)]
         self.result_data = None
@@ -449,52 +449,56 @@ class FolderSpreadDialog(QDialog):
             QSpinBox {
                 min-height: 32px;
                 color: #edf3ff;
-                background-color: #35507a;
-                border: 1px solid #5977a4;
+                background-color: #2a3e5c;
+                border: 1px solid #4a678f;
                 border-radius: 8px;
-                padding: 2px 28px 2px 8px;
+                padding: 2px 10px;
+                font-size: 13px;
+                font-weight: 600;
             }
             QSpinBox:focus {
                 border: 1px solid #77a3f2;
+                background-color: #31496d;
             }
-            QSpinBox::up-button {
-                subcontrol-origin: border;
-                subcontrol-position: top right;
-                width: 24px;
-                height: 16px;
-                border-left: 1px solid #48658f;
-                border-bottom: 1px solid #48658f;
-                border-top-right-radius: 7px;
-                background-color: #2b4369;
-            }
-            QSpinBox::up-button:hover {
-                background-color: #3f6096;
-            }
-            QSpinBox::up-button:pressed {
-                background-color: #203352;
-            }
-            QSpinBox::up-arrow {
-                width: 7px;
-                height: 5px;
-            }
+            QSpinBox::up-button,
             QSpinBox::down-button {
-                subcontrol-origin: border;
-                subcontrol-position: bottom right;
-                width: 24px;
-                height: 16px;
-                border-left: 1px solid #48658f;
-                border-bottom-right-radius: 7px;
-                background-color: #2b4369;
+                width: 0px;
+                height: 0px;
+                border: none;
+                background: transparent;
             }
-            QSpinBox::down-button:hover {
-                background-color: #3f6096;
-            }
-            QSpinBox::down-button:pressed {
-                background-color: #203352;
-            }
+            QSpinBox::up-arrow,
             QSpinBox::down-arrow {
-                width: 7px;
-                height: 5px;
+                width: 0px;
+                height: 0px;
+                image: none;
+            }
+            QComboBox {
+                min-height: 32px;
+                color: #edf3ff;
+                background-color: #2a3e5c;
+                border: 1px solid #4a678f;
+                border-radius: 8px;
+                padding: 2px 24px 2px 10px;
+                font-size: 12px;
+                font-weight: 600;
+            }
+            QComboBox:focus {
+                border: 1px solid #77a3f2;
+                background-color: #31496d;
+            }
+            QComboBox::drop-down {
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 20px;
+                border: none;
+                background: transparent;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #23344d;
+                color: #eef4ff;
+                border: 1px solid #4a678f;
+                selection-background-color: #3f5e8e;
             }
             QListWidget {
                 color: #edf3ff;
@@ -586,42 +590,86 @@ class FolderSpreadDialog(QDialog):
         grid_layout.setHorizontalSpacing(14)
         grid_layout.setVerticalSpacing(10)
 
+        def _make_input_with_unit(spinbox, unit_text):
+            w = QWidget()
+            h = QHBoxLayout(w)
+            h.setContentsMargins(0, 0, 0, 0)
+            h.setSpacing(6)
+            h.addWidget(spinbox, 1)
+            unit_lbl = QLabel(unit_text)
+            unit_lbl.setStyleSheet("color: #b7cceb; font-weight: 600; font-size: 13px;")
+            h.addWidget(unit_lbl, 0)
+            return w
+
         # 위젯 너비 & 높이
         grid_layout.addWidget(QLabel("위젯 너비(W):"), 0, 0)
         self.width_input = QSpinBox()
         self.width_input.setRange(50, 4000)
         self.width_input.setValue(default_w)
-        self.width_input.setSuffix(" px")
-        grid_layout.addWidget(self.width_input, 0, 1)
+        self.width_input.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.width_input.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        grid_layout.addWidget(_make_input_with_unit(self.width_input, "px"), 0, 1)
 
         grid_layout.addWidget(QLabel("위젯 높이(H):"), 0, 2)
         self.height_input = QSpinBox()
         self.height_input.setRange(50, 4000)
         self.height_input.setValue(default_h)
-        self.height_input.setSuffix(" px")
-        grid_layout.addWidget(self.height_input, 0, 3)
+        self.height_input.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.height_input.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        grid_layout.addWidget(_make_input_with_unit(self.height_input, "px"), 0, 3)
+
+        self._syncing_spread_size = False
+        def _on_spread_w_changed(val):
+            if self._syncing_spread_size or self.fit_combo.currentIndex() != 0:
+                return
+            self._syncing_spread_size = True
+            try:
+                self.height_input.setValue(val)
+            finally:
+                self._syncing_spread_size = False
+
+        self.width_input.valueChanged.connect(_on_spread_w_changed)
 
         # 행, 열, 간격
         grid_layout.addWidget(QLabel("가로 열(Cols):"), 1, 0)
         self.cols_input = QSpinBox()
         self.cols_input.setRange(1, 50)
         self.cols_input.setValue(init_cols)
-        self.cols_input.setSuffix(" 열")
-        grid_layout.addWidget(self.cols_input, 1, 1)
+        self.cols_input.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.cols_input.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        grid_layout.addWidget(_make_input_with_unit(self.cols_input, "열"), 1, 1)
 
         grid_layout.addWidget(QLabel("세로 행(Rows):"), 1, 2)
         self.rows_input = QSpinBox()
         self.rows_input.setRange(1, 50)
         self.rows_input.setValue(init_rows)
-        self.rows_input.setSuffix(" 행")
-        grid_layout.addWidget(self.rows_input, 1, 3)
+        self.rows_input.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.rows_input.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        grid_layout.addWidget(_make_input_with_unit(self.rows_input, "행"), 1, 3)
 
-        grid_layout.addWidget(QLabel("위젯 간격(Margin):"), 2, 0)
+        grid_layout.addWidget(QLabel("위젯 간격:"), 2, 0)
         self.margin_input = QSpinBox()
         self.margin_input.setRange(0, 500)
         self.margin_input.setValue(10)
-        self.margin_input.setSuffix(" px")
-        grid_layout.addWidget(self.margin_input, 2, 1)
+        self.margin_input.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.margin_input.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        grid_layout.addWidget(_make_input_with_unit(self.margin_input, "px"), 2, 1)
+
+        grid_layout.addWidget(QLabel("배경색:"), 2, 2)
+        self.bg_combo = DownwardComboBox()
+        self.bg_combo.addItems(["투명 (권장)", "검정", "흰색"])
+        self.bg_combo.setCurrentIndex(0)
+        grid_layout.addWidget(self.bg_combo, 2, 3)
+
+        grid_layout.addWidget(QLabel("비율/맞춤:"), 3, 0)
+        self.fit_combo = DownwardComboBox()
+        self.fit_combo.addItems([
+            "이미지 원본 비율 자동 맞춤 (여백 없음, 권장)",
+            "위젯 영역 꽉 채우기 (크롭, 여백 없음)",
+            "지정 크기 고정 (원본 전체 보기)",
+        ])
+        self.fit_combo.setCurrentIndex(0)
+        grid_layout.addWidget(self.fit_combo, 3, 1, 1, 3)
 
         layout.addWidget(grid_card)
 
@@ -755,6 +803,10 @@ class FolderSpreadDialog(QDialog):
                 f"선택한 미디어 개수({len(paths)}개)가 설정된 바둑판 칸수({cells}칸)보다 많습니다.\n행 또는 열 개수를 늘려주세요.",
             )
             return
+        fit_idx = self.fit_combo.currentIndex()
+        fit_strategy = "auto_aspect" if fit_idx == 0 else ("crop_fill" if fit_idx == 1 else "fit_inside")
+        bg_mode = self.bg_combo.currentIndex()
+
         self.result_data = {
             "folder_path": self.folder_path,
             "item_paths": paths,
@@ -763,6 +815,8 @@ class FolderSpreadDialog(QDialog):
             "rows": int(self.rows_input.value()),
             "cols": int(self.cols_input.value()),
             "margin": int(self.margin_input.value()),
+            "fit_strategy": fit_strategy,
+            "bg_color_mode": bg_mode,
         }
         self.accept()
 
@@ -835,51 +889,25 @@ class SettingsDialog(QDialog):
                 border: 1px solid #5977a4;
                 border-radius: 9px;
                 padding: 2px 10px;
-            }
-            QSpinBox {
-                padding-right: 28px;
+                font-size: 13px;
+                font-weight: 600;
             }
             QSpinBox:focus, QComboBox:focus {
                 border: 1px solid #77a3f2;
+                background-color: #3d5d8e;
             }
-            QSpinBox::up-button {
-                subcontrol-origin: border;
-                subcontrol-position: top right;
-                width: 24px;
-                height: 17px;
-                border-left: 1px solid #48658f;
-                border-bottom: 1px solid #48658f;
-                border-top-right-radius: 8px;
-                background-color: #2b4369;
-            }
-            QSpinBox::up-button:hover {
-                background-color: #3f6096;
-            }
-            QSpinBox::up-button:pressed {
-                background-color: #203352;
-            }
-            QSpinBox::up-arrow {
-                width: 7px;
-                height: 5px;
-            }
+            QSpinBox::up-button,
             QSpinBox::down-button {
-                subcontrol-origin: border;
-                subcontrol-position: bottom right;
-                width: 24px;
-                height: 17px;
-                border-left: 1px solid #48658f;
-                border-bottom-right-radius: 8px;
-                background-color: #2b4369;
+                width: 0px;
+                height: 0px;
+                border: none;
+                background: transparent;
             }
-            QSpinBox::down-button:hover {
-                background-color: #3f6096;
-            }
-            QSpinBox::down-button:pressed {
-                background-color: #203352;
-            }
+            QSpinBox::up-arrow,
             QSpinBox::down-arrow {
-                width: 7px;
-                height: 5px;
+                width: 0px;
+                height: 0px;
+                image: none;
             }
             QComboBox {
                 padding-right: 18px;
@@ -990,6 +1018,19 @@ class SettingsDialog(QDialog):
                 color: #c6d6f3;
                 font-size: 13px;
                 line-height: 1.4;
+            }
+            QPushButton#fitAspectBtn {
+                color: #d8e8ff;
+                background-color: #2b456c;
+                border: 1px solid #486e9e;
+                border-radius: 6px;
+                min-height: 26px;
+                padding: 2px 10px;
+                font-size: 11px;
+                font-weight: 600;
+            }
+            QPushButton#fitAspectBtn:hover {
+                background-color: #385a8c;
             }
         """)
 
@@ -1166,12 +1207,63 @@ class SettingsDialog(QDialog):
         focus_bind_row.addWidget(self.focus_bind_clear_btn)
         focus_bind_row.addStretch(1)
         
+        init_w = int(s.get('w', 200))
+        init_h = int(s.get('h', 200))
         self.width_input = QSpinBox(); self.width_input.setRange(50, 5000)
-        self.width_input.setValue(s.get('w', 200))
+        self.width_input.setValue(init_w)
         self.height_input = QSpinBox(); self.height_input.setRange(50, 5000)
-        self.height_input.setValue(s.get('h', 200))
+        self.height_input.setValue(init_h)
         self.sec_input = QSpinBox(); self.sec_input.setRange(1, 3600)
         self.sec_input.setValue(s.get('interval', 5))
+
+        self.keep_aspect_ratio_cb = QCheckBox("가로세로 비율 고정")
+        self.keep_aspect_ratio_cb.setChecked(bool(s.get('keep_aspect_ratio', True)))
+        self.keep_aspect_ratio_cb.setStyleSheet("color: #b7cceb; font-size: 12px; font-weight: 600;")
+        self.keep_aspect_ratio_cb.setToolTip("너비나 높이 변경 시 가로세로 비율을 유지하여 자동으로 계산합니다.")
+
+        self._syncing_aspect_size = False
+        self._current_aspect_ratio = float(init_w) / max(1, float(init_h))
+
+        def _on_width_changed(val):
+            if self._syncing_aspect_size or not self.keep_aspect_ratio_cb.isChecked():
+                return
+            self._syncing_aspect_size = True
+            try:
+                ratio = self._current_aspect_ratio if self._current_aspect_ratio > 0 else 1.0
+                new_h = max(50, min(5000, int(round(val / ratio))))
+                self.height_input.setValue(new_h)
+            finally:
+                self._syncing_aspect_size = False
+
+        def _on_height_changed(val):
+            if self._syncing_aspect_size or not self.keep_aspect_ratio_cb.isChecked():
+                return
+            self._syncing_aspect_size = True
+            try:
+                ratio = self._current_aspect_ratio if self._current_aspect_ratio > 0 else 1.0
+                new_w = max(50, min(5000, int(round(val * ratio))))
+                self.width_input.setValue(new_w)
+            finally:
+                self._syncing_aspect_size = False
+
+        def _on_aspect_lock_toggled(checked):
+            if checked:
+                w = self.width_input.value()
+                h = max(1, self.height_input.value())
+                self._current_aspect_ratio = float(w) / float(h)
+
+        self.fit_aspect_btn = QPushButton("📐 원본 비율로 맞춤")
+        self.fit_aspect_btn.setObjectName("fitAspectBtn")
+        self.fit_aspect_btn.setToolTip("현재 선택된 이미지의 실제 원본 해상도(가로세로 비율)에 맞춰 높이를 자동 조절합니다.")
+        self.fit_aspect_btn.clicked.connect(self._on_fit_aspect_clicked)
+
+        self.ratio_row_widget = QWidget()
+        ratio_row = QHBoxLayout(self.ratio_row_widget)
+        ratio_row.setContentsMargins(0, 0, 0, 0)
+        ratio_row.setSpacing(8)
+        ratio_row.addWidget(self.keep_aspect_ratio_cb, 0)
+        ratio_row.addWidget(self.fit_aspect_btn, 0)
+        ratio_row.addStretch(1)
 
 
         self.opacity_slider = QSlider(Qt.Orientation.Horizontal)
@@ -1183,11 +1275,11 @@ class SettingsDialog(QDialog):
         self.opacity_spinbox = QSpinBox()
         self.opacity_spinbox.setRange(10, 100)
         self.opacity_spinbox.setValue(curr_op)
-        self.opacity_spinbox.setSuffix("%")
         self.opacity_slider.setToolTip("100% = 완전 표시, 10% = 거의 투명")
         self.opacity_spinbox.setToolTip("100% = 완전 표시, 10% = 거의 투명")
         for _sb in (self.width_input, self.height_input, self.sec_input, self.opacity_spinbox):
             _sb.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+            _sb.setAlignment(Qt.AlignmentFlag.AlignCenter)
             _sb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.opacity_slider.valueChanged.connect(self.opacity_spinbox.setValue)
         self.opacity_spinbox.valueChanged.connect(self.opacity_slider.setValue)
@@ -1223,6 +1315,11 @@ class SettingsDialog(QDialog):
         self.media_mode_combo.setStyle(QStyleFactory.create("Fusion"))
         self.media_mode_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.media_mode_combo.setMinimumHeight(36)
+
+        self.slide_auto_aspect_cb = QCheckBox("슬라이드 시 미디어 비율로 자동 맞춤")
+        self.slide_auto_aspect_cb.setChecked(_as_bool(s.get('auto_fit_slide_media', False), False))
+        self.slide_auto_aspect_cb.setStyleSheet("color: #dbe7fb; font-size: 12px; font-weight: 600;")
+        self.slide_auto_aspect_cb.setToolTip("슬라이드 재생 시 다음 이미지/GIF/동영상으로 전환될 때마다 해당 미디어의 실제 비율에 맞춰 위젯 높이를 자동으로 조절합니다.")
 
         self.video_transition_combo = DownwardComboBox()
         self.video_transition_combo.addItems([
@@ -1280,8 +1377,8 @@ class SettingsDialog(QDialog):
         self.video_dual_fade_ms_spin = QSpinBox()
         self.video_dual_fade_ms_spin.setRange(0, 300)
         self.video_dual_fade_ms_spin.setSingleStep(10)
-        self.video_dual_fade_ms_spin.setSuffix(" ms")
         self.video_dual_fade_ms_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.video_dual_fade_ms_spin.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.video_dual_fade_ms_spin.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.video_dual_fade_ms_spin.setValue(
             DesktopWidget.coerce_video_dual_fade_ms(
@@ -1323,6 +1420,7 @@ class SettingsDialog(QDialog):
             "- 스크롤: 파일 변경\n"
             "- Ctrl+스크롤: 불투명도 조절\n"
             "- Shift+코너 드래그: 크기 조절\n"
+            "- Ctrl+드래그 / Shift+G: 영역 드래그 다중 선택\n"
             "- Alt+클릭: 마우스 잠금 토글\n"
             "- G: 임시 그룹 토글\n"
             "- Ctrl+G: 임시 그룹 전체 해제\n"
@@ -1385,8 +1483,9 @@ class SettingsDialog(QDialog):
         left_form.addRow("", self._focus_bind_row_widget)
 
         _add_section_header(left_form, "위젯")
-        left_form.addRow("너비:", self.width_input)
-        left_form.addRow("높이:", self.height_input)
+        left_form.addRow("너비(px):", self.width_input)
+        left_form.addRow("높이(px):", self.height_input)
+        left_form.addRow("", self.ratio_row_widget)
         left_form.addRow("불투명도(%):", self.opacity_spinbox)
         left_form.addRow("", self.opacity_slider)
         left_form.addRow("레이어:", self.layer_combo)
@@ -1399,6 +1498,7 @@ class SettingsDialog(QDialog):
         _add_section_header(right_form, "재생 / 전환")
         right_form.addRow("전환 간격(초):", self.sec_input)
         right_form.addRow("미디어 맞춤:", self.media_mode_combo)
+        right_form.addRow("비율 자동 맞춤:", self.slide_auto_aspect_cb)
         right_form.addRow("영상 전환:", self.video_transition_combo)
         right_form.addRow("", self.video_transition_hint)
         right_form.addRow("듀얼 페이드:", self.video_dual_fade_ms_spin)
@@ -1862,6 +1962,44 @@ class SettingsDialog(QDialog):
         self.folder_label.setText(folder_path)
         self.folder_label.setToolTip(folder_path)
 
+    def _apply_media_aspect_to_inputs(self, media_path):
+        if not media_path or not os.path.isfile(media_path):
+            return False
+        sz = get_media_native_size(media_path)
+        if sz and len(sz) == 2 and sz[0] > 0 and sz[1] > 0:
+            iw, ih = sz[0], sz[1]
+            curr_w = self.width_input.value()
+            curr_h = self.height_input.value()
+            target_w, target_h = calc_smart_aspect_size(iw, ih, curr_w, curr_h)
+            self._syncing_aspect_size = True
+            try:
+                self.width_input.setValue(target_w)
+                self.height_input.setValue(target_h)
+                self._current_aspect_ratio = float(target_w) / max(1.0, float(target_h))
+            finally:
+                self._syncing_aspect_size = False
+            return True
+        return False
+
+    def _on_fit_aspect_clicked(self):
+        target_path = None
+        if self.folder_item_paths:
+            for p in self.folder_item_paths:
+                if p and os.path.isfile(p):
+                    target_path = p
+                    break
+        if not target_path and self.folder_path and os.path.isdir(self.folder_path):
+            scanned = self._scan_media_paths_for_folder(self.folder_path)
+            if scanned:
+                target_path = scanned[0]
+
+        if not target_path:
+            QMessageBox.information(self, "미디어 없음", "선택된 미디어 파일 또는 폴더가 없습니다.")
+            return
+
+        if not self._apply_media_aspect_to_inputs(target_path):
+            QMessageBox.information(self, "비율 확인 불가", "미디어 파일의 해상도 비율을 확인할 수 없습니다.")
+
     def select_file(self):
         filter_str = "미디어 파일 (*.png *.jpg *.jpeg *.bmp *.webp *.gif *.mp4 *.mov *.avi *.mkv *.webm *.m4v);;모든 파일 (*)"
         paths, _ = QFileDialog.getOpenFileNames(self, "미디어 파일 선택", "", filter_str)
@@ -1876,8 +2014,10 @@ class SettingsDialog(QDialog):
         self.folder_item_paths = norm_paths
         if len(norm_paths) == 1:
             label_text = f"{folder_path} ({os.path.basename(norm_paths[0])})"
+            self._apply_media_aspect_to_inputs(norm_paths[0])
         else:
             label_text = f"{folder_path} (선택 {len(norm_paths)}개)"
+            self._apply_media_aspect_to_inputs(norm_paths[0])
         self.folder_label.setText(label_text)
         self.folder_label.setToolTip(folder_path)
         self._set_folder_help_panel_visible(False)

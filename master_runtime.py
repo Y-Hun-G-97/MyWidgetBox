@@ -8,7 +8,7 @@ from PyQt6.QtCore import QFileInfo, Qt, QSettings
 from PyQt6.QtGui import QIcon, QPixmap
 from PyQt6.QtWidgets import QFileIconProvider
 
-from mycanvas_core import _as_bool
+from mywidgetbox_core import _as_bool
 
 
 def frozen_executable_path():
@@ -45,7 +45,7 @@ def startup_shortcut_icon_path(exe_path):
     icon_names = ["icon.ico"]
     if exe_name:
         icon_names.append(f"{exe_name}.ico")
-    icon_names.extend(["MyCanvas.ico"])
+    icon_names.extend(["MyWidgetBox.ico", "MyCanvas.ico"])
     seen = set()
     for name in icon_names:
         candidate = os.path.join(exe_dir, name)
@@ -104,15 +104,17 @@ def resolve_app_icon(controller_cls):
         exe_path = str(getattr(sys, "executable", "") or "").strip()
         if exe_path:
             exe_dir = os.path.dirname(os.path.abspath(exe_path))
-            quick_candidates.append(os.path.join(exe_dir, "MyCanvas.ico"))
+            quick_candidates.append(os.path.join(exe_dir, "MyWidgetBox.ico"))
             quick_candidates.append(os.path.join(exe_dir, "icon.ico"))
+            quick_candidates.append(os.path.join(exe_dir, "MyCanvas.ico"))
     except Exception:
         pass
     try:
         script_dir = os.path.dirname(os.path.abspath(__file__))
         if script_dir:
-            quick_candidates.append(os.path.join(script_dir, "MyCanvas.ico"))
+            quick_candidates.append(os.path.join(script_dir, "MyWidgetBox.ico"))
             quick_candidates.append(os.path.join(script_dir, "icon.ico"))
+            quick_candidates.append(os.path.join(script_dir, "MyCanvas.ico"))
     except Exception:
         pass
 
@@ -174,7 +176,7 @@ def resolve_app_icon(controller_cls):
                 icon_names.append(f"{exe_name}.ico")
         except Exception:
             pass
-        icon_names.extend(["MyCanvas.ico", "icon.ico"])
+        icon_names.extend(["MyWidgetBox.ico", "icon.ico", "MyCanvas.ico"])
         seen_paths = set()
         for folder in ordered_dirs:
             for name in icon_names:
@@ -200,9 +202,12 @@ def resolve_app_icon(controller_cls):
         except Exception:
             pass
 
-    fallback = QIcon("MyCanvas.ico")
+    fallback = QIcon("MyWidgetBox.ico")
     if not fallback.isNull():
         return fallback
+    fallback_prev = QIcon("MyCanvas.ico")
+    if not fallback_prev.isNull():
+        return fallback_prev
     pixmap = QPixmap(16, 16)
     pixmap.fill(Qt.GlobalColor.green)
     return QIcon(pixmap)
@@ -268,7 +273,7 @@ def _current_windows_user():
 
 def _startup_task_name(_controller=None, exe_path=""):
     _ = str(exe_path or "")
-    return "MyCanvas Auto Start"
+    return "MyWidgetBox Auto Start"
 
 
 def _startup_task_registered(controller, exe_path=""):
@@ -305,7 +310,7 @@ def ensure_windows_startup_shortcut(controller, force=False):
     if not exe_path or not user_name:
         return False
     working_dir = os.path.dirname(exe_path)
-    exe_name = os.path.splitext(os.path.basename(exe_path))[0] or "MyCanvas"
+    exe_name = os.path.splitext(os.path.basename(exe_path))[0] or "MyWidgetBox"
     task_name = _startup_task_name(controller, exe_path=exe_path)
     description = f"{exe_name} auto start"
     script = f"""

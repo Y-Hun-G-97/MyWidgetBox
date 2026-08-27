@@ -3,7 +3,7 @@ import os
 
 from PyQt6.QtCore import QSettings
 
-from mycanvas_core import _as_bool
+from mywidgetbox_core import _as_bool
 
 
 def startup_delay_for_kind(kind, mode="default"):

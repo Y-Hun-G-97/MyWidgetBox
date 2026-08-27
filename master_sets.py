@@ -4,7 +4,7 @@ import os
 from PyQt6.QtCore import QSettings
 from PyQt6.QtWidgets import QMessageBox
 
-from mycanvas_core import _as_bool
+from mywidgetbox_core import _as_bool
 
 
 def _sync_master_settings(controller, immediate=False):
@@ -459,9 +459,42 @@ def delete_set(controller, set_id):
             f"- 흡수: '{absorb_target_name}'(첫번째 세트)로 이동\n"
             f"- 삭제: 프로필도 함께 완전 삭제"
         )
+        choice_box.setStyleSheet("""
+            QMessageBox {
+                background-color: #1e2d42;
+            }
+            QMessageBox QLabel {
+                color: #e6eefc;
+                font-size: 13px;
+            }
+            QMessageBox QPushButton {
+                min-height: 32px;
+                min-width: 110px;
+                border-radius: 8px;
+                padding: 4px 14px;
+                color: #e8efff;
+                background-color: #35507a;
+                border: 1px solid #5977a4;
+                font-weight: 600;
+                font-size: 12px;
+            }
+            QMessageBox QPushButton:hover {
+                background-color: #446599;
+            }
+        """)
         absorb_btn = choice_box.addButton("첫번째 세트로 흡수", QMessageBox.ButtonRole.AcceptRole)
         purge_btn = choice_box.addButton("프로필도 함께 삭제", QMessageBox.ButtonRole.DestructiveRole)
         cancel_btn = choice_box.addButton("취소", QMessageBox.ButtonRole.RejectRole)
+        purge_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #7a3945;
+                border: 1px solid #9e4e5c;
+                color: #ffe4e9;
+            }
+            QPushButton:hover {
+                background-color: #8f4453;
+            }
+        """)
         choice_box.setDefaultButton(absorb_btn)
         choice_box.exec()
         clicked = choice_box.clickedButton()
@@ -469,13 +502,48 @@ def delete_set(controller, set_id):
             return False
         delete_profiles = clicked is purge_btn
     else:
-        confirm = QMessageBox.question(
-            controller,
-            "세트 삭제",
-            f"'{set_name}' 세트를 삭제하시겠습니까?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-        if confirm != QMessageBox.StandardButton.Yes:
+        confirm_box = QMessageBox(controller)
+        confirm_box.setWindowTitle("세트 삭제")
+        confirm_box.setIcon(QMessageBox.Icon.Question)
+        confirm_box.setText(f"'{set_name}' 세트를 삭제하시겠습니까?")
+        confirm_box.setStyleSheet("""
+            QMessageBox {
+                background-color: #1e2d42;
+            }
+            QMessageBox QLabel {
+                color: #e6eefc;
+                font-size: 13px;
+            }
+            QMessageBox QPushButton {
+                min-height: 32px;
+                min-width: 90px;
+                border-radius: 8px;
+                padding: 4px 14px;
+                color: #e8efff;
+                background-color: #35507a;
+                border: 1px solid #5977a4;
+                font-weight: 600;
+                font-size: 12px;
+            }
+            QMessageBox QPushButton:hover {
+                background-color: #446599;
+            }
+        """)
+        yes_btn = confirm_box.addButton("예", QMessageBox.ButtonRole.YesRole)
+        no_btn = confirm_box.addButton("아니오", QMessageBox.ButtonRole.NoRole)
+        yes_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #7a3945;
+                border: 1px solid #9e4e5c;
+                color: #ffe4e9;
+            }
+            QPushButton:hover {
+                background-color: #8f4453;
+            }
+        """)
+        confirm_box.setDefaultButton(no_btn)
+        confirm_box.exec()
+        if confirm_box.clickedButton() is not yes_btn:
             return False
 
     if delete_profiles and removed_profiles:
@@ -580,4 +648,6 @@ def apply_set(controller, set_id):
     controller.master_settings.setValue("applied_set_id", sid)
     if not (bool(getattr(controller, "_fast_startup_mode", False)) and bool(controller._minimal_validation_enabled())):
         _sync_master_settings(controller)
+    controller._refresh_set_ui()
+    controller.load_profiles(force_rebuild=True)
     controller._begin_startup_queue(startup_entries, mode="set_switch")

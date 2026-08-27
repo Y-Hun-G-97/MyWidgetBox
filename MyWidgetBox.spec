@@ -17,7 +17,7 @@ datas = []
 
 
 a = Analysis(
-    ['MyCanvas.py'],
+    ['MyWidgetBox.py'],
     pathex=[],
     binaries=binaries,
     datas=datas,
@@ -36,7 +36,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='MyCanvas',
+    name='MyWidgetBox',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -49,7 +49,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['MyCanvas.ico'],
+    icon=['MyWidgetBox.ico'],
 )
 
 coll = COLLECT(
@@ -60,5 +60,5 @@ coll = COLLECT(
     strip=False,
     upx=False,
     upx_exclude=[],
-    name='MyCanvas',
+    name='MyWidgetBox',
 )

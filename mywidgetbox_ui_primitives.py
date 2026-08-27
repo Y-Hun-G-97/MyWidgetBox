@@ -1,7 +1,6 @@
-from PyQt6.QtCore import QPoint, QRect, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QPainter, QPolygon
-from PyQt6.QtWidgets import QComboBox, QFrame, QLabel, QListWidget, QWidget
-from PyQt6.QtCore import QThread
+from PyQt6.QtCore import QPoint, QRect, Qt, pyqtSignal, QThread
+from PyQt6.QtGui import QBrush, QColor, QPainter, QPen, QPolygon
+from PyQt6.QtWidgets import QApplication, QComboBox, QFrame, QLabel, QListWidget, QWidget
 
 
 class OverlayWidget(QWidget):
@@ -201,3 +200,81 @@ class MediaToolWorker(QThread):
             self.succeeded.emit(result)
         except Exception as exc:
             self.failed.emit(str(exc))
+
+
+class MarqueeSelectionOverlay(QWidget):
+    """마우스 드래그 영역(박스)으로 위젯들을 일괄 임시 그룹화하는 전역 투명 오버레이 창"""
+    def __init__(self, manager=None):
+        super().__init__(None)
+        self.manager = manager
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.Tool
+            | Qt.WindowType.WindowStaysOnTopHint
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setMouseTracking(True)
+        self.setCursor(Qt.CursorShape.CrossCursor)
+
+        self.start_pos = None
+        self.current_pos = None
+
+    def start_selection(self, global_start_pos):
+        screens = QApplication.screens()
+        if not screens:
+            return
+        combined = QRect()
+        for s in screens:
+            combined = combined.united(s.geometry())
+        self.setGeometry(combined)
+
+        self.start_pos = global_start_pos
+        self.current_pos = global_start_pos
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self.grabMouse()
+        self.update()
+
+    def mouseMoveEvent(self, e):
+        self.current_pos = e.globalPosition().toPoint()
+        self.update()
+
+    def mouseReleaseEvent(self, e):
+        self.releaseMouse()
+        self.hide()
+        if self.start_pos and self.current_pos:
+            rect = QRect(self.start_pos, self.current_pos).normalized()
+            if self.manager and hasattr(self.manager, "finish_marquee_selection"):
+                self.manager.finish_marquee_selection(rect)
+        self.start_pos = None
+        self.current_pos = None
+
+    def keyPressEvent(self, e):
+        if e.key() == Qt.Key.Key_Escape:
+            self.releaseMouse()
+            self.hide()
+            self.start_pos = None
+            self.current_pos = None
+        super().keyPressEvent(e)
+
+    def paintEvent(self, e):
+        if not self.start_pos or not self.current_pos:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        local_start = self.mapFromGlobal(self.start_pos)
+        local_curr = self.mapFromGlobal(self.current_pos)
+        rect = QRect(local_start, local_curr).normalized()
+
+        if rect.width() <= 1 and rect.height() <= 1:
+            return
+
+        fill_color = QColor(64, 158, 255, 40)
+        border_pen = QPen(QColor(80, 175, 255, 230), 1.5, Qt.PenStyle.DashLine)
+        border_pen.setDashPattern([5, 3])
+
+        painter.setBrush(QBrush(fill_color))
+        painter.setPen(border_pen)
+        painter.drawRoundedRect(rect, 4, 4)

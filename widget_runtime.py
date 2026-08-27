@@ -147,6 +147,8 @@ def save_all_settings(widget, sync=None):
     settings.setValue("layer_mode", int(getattr(widget, "layer_mode", widget.LAYER_NORMAL)))
     settings.setValue("layer_schema_version", int(widget.LAYER_SCHEMA_VERSION))
     settings.setValue("is_locked", bool(getattr(widget, "is_locked", False)))
+    settings.setValue("keep_aspect_ratio", bool(getattr(widget, "keep_aspect_ratio", True)))
+    settings.setValue("auto_fit_slide_media", bool(getattr(widget, "auto_fit_slide_media", False)))
     settings.setValue("opacity_pct", widget.current_opacity_pct)
     settings.setValue("w", widget.width())
     settings.setValue("h", widget.height())
@@ -164,6 +166,8 @@ def build_settings_dialog_data(widget):
     return {
         "w": widget.width(),
         "h": widget.height(),
+        "keep_aspect_ratio": bool(getattr(widget, "keep_aspect_ratio", True)),
+        "auto_fit_slide_media": bool(getattr(widget, "auto_fit_slide_media", False)),
         "is_muted": widget.is_muted,
         "gpu_guard_enabled": widget.gpu_guard_enabled,
         "folder_path": widget.folder_path,
@@ -187,6 +191,8 @@ def build_settings_dialog_data(widget):
 
 def apply_settings_dialog_result(widget, dialog, old_folder, old_exec):
     widget.resize(dialog.width_input.value(), dialog.height_input.value())
+    widget.keep_aspect_ratio = bool(getattr(dialog, "keep_aspect_ratio_cb", None) and dialog.keep_aspect_ratio_cb.isChecked())
+    widget.auto_fit_slide_media = bool(getattr(dialog, "slide_auto_aspect_cb", None) and dialog.slide_auto_aspect_cb.isChecked())
     widget.is_muted = dialog.mute_checkbox.isChecked()
     widget._apply_mute_state()
     widget.gpu_guard_enabled = dialog.gpu_guard_checkbox.isChecked()
@@ -234,6 +240,27 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QPixmap
 
 
+def _apply_slide_auto_aspect_if_enabled(widget, media_path):
+    if not getattr(widget, "auto_fit_slide_media", False):
+        return
+    if not media_path or not os.path.isfile(media_path):
+        return
+    try:
+        from mywidgetbox_core import calc_smart_aspect_size, get_media_native_size
+        sz = get_media_native_size(media_path)
+        if sz and len(sz) == 2 and sz[0] > 0 and sz[1] > 0:
+            iw, ih = sz[0], sz[1]
+            curr_w = widget.width()
+            curr_h = widget.height()
+            target_w, target_h = calc_smart_aspect_size(iw, ih, curr_w, curr_h)
+            if widget.width() != target_w or widget.height() != target_h:
+                widget.resize(target_w, target_h)
+                if hasattr(widget, "apply_mask_and_style"):
+                    widget.apply_mask_and_style()
+    except Exception:
+        pass
+
+
 def next_media(widget, prefer_preload=True):
     # 1. existing timer/playback stop to avoid overlap
     widget._media_resetting = True
@@ -263,6 +290,7 @@ def next_media(widget, prefer_preload=True):
         if bool(prefer_preload) and widget._try_start_dual_video_preload(source_path):
             widget.current_idx = int(next_idx)
             widget.current_media_path = source_path
+            _apply_slide_auto_aspect_if_enabled(widget, source_path)
             widget._refresh_icon_overlay_for_current_media()
             if widget._performance_paused:
                 widget.set_performance_paused(True, reason="guard_active", force=True)
@@ -279,6 +307,8 @@ def next_media(widget, prefer_preload=True):
         runtime_path = str(source_path)
         runtime_is_video = widget._is_video_path(runtime_path)
         widget.current_media_path = runtime_path
+
+        _apply_slide_auto_aspect_if_enabled(widget, runtime_path)
 
         # 3. branch by extension
         if runtime_is_video:
@@ -576,6 +606,12 @@ def mouse_press_event(widget, e):
         if bool(getattr(widget, "is_locked", False)):
             widget.cancel_active_interaction()
             return
+        # Ctrl + 좌클릭 시: 영역 드래그 다중 선택(Box Select) 시작
+        if bool(e.modifiers() & Qt.KeyboardModifier.ControlModifier) or (hasattr(widget, "_is_ctrl_down") and widget._is_ctrl_down()):
+            if hasattr(widget, "manager") and widget.manager and hasattr(widget.manager, "start_marquee_selection"):
+                widget.cancel_active_interaction()
+                widget.manager.start_marquee_selection(e.globalPosition().toPoint())
+                return
         widget._reset_axis_snap()
         local_pos = e.position().toPoint() if hasattr(e, "position") else widget.mapFromGlobal(e.globalPosition().toPoint())
         if widget._is_shift_down() and not getattr(widget, "is_locked", False):

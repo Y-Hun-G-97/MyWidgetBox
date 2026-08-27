@@ -15,17 +15,17 @@ function Test-FileOrThrow {
 
 Write-Host "[build] start"
 
-Test-FileOrThrow -PathValue ".\MyCanvas.spec" -Label "Spec"
-Test-FileOrThrow -PathValue ".\MyCanvas.py" -Label "Main script"
-Test-FileOrThrow -PathValue ".\MyCanvas.ico" -Label "Icon"
+Test-FileOrThrow -PathValue ".\MyWidgetBox.spec" -Label "Spec"
+Test-FileOrThrow -PathValue ".\MyWidgetBox.py" -Label "Main script"
+Test-FileOrThrow -PathValue ".\MyWidgetBox.ico" -Label "Icon"
 Test-FileOrThrow -PathValue "C:\ffmpeg\bin\ffmpeg.exe" -Label "ffmpeg"
 Test-FileOrThrow -PathValue "C:\ffmpeg\bin\ffprobe.exe" -Label "ffprobe"
 
-Get-Process -Name "MyCanvas" -ErrorAction SilentlyContinue | ForEach-Object {
+Get-Process -Name "MyWidgetBox" -ErrorAction SilentlyContinue | ForEach-Object {
     try { $_.CloseMainWindow() | Out-Null } catch {}
 }
 Start-Sleep -Milliseconds 450
-Get-Process -Name "MyCanvas" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Get-Process -Name "MyWidgetBox" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 
 $pyExecutable = $null
 if (Get-Command py -ErrorAction SilentlyContinue) {
@@ -41,21 +41,21 @@ if (-not $pyExecutable) {
 }
 
 if ($pyExecutable -eq "py -3.14") {
-    py -3.14 -m PyInstaller --noconfirm --clean .\MyCanvas.spec
+    py -3.14 -m PyInstaller --noconfirm --clean .\MyWidgetBox.spec
 } else {
-    python -m PyInstaller --noconfirm --clean .\MyCanvas.spec
+    python -m PyInstaller --noconfirm --clean .\MyWidgetBox.spec
 }
 if ($LASTEXITCODE -ne 0) {
     throw "PyInstaller failed with exit code $LASTEXITCODE"
 }
 
-$exePath = Join-Path $root "dist\MyCanvas\MyCanvas.exe"
+$exePath = Join-Path $root "dist\MyWidgetBox\MyWidgetBox.exe"
 if (-not (Test-Path -LiteralPath $exePath -PathType Leaf)) {
     throw "Build output missing: $exePath"
 }
 
-$iconSourcePath = Join-Path $root "MyCanvas.ico"
-$distIconPath = Join-Path $root "dist\MyCanvas\icon.ico"
+$iconSourcePath = Join-Path $root "MyWidgetBox.ico"
+$distIconPath = Join-Path $root "dist\MyWidgetBox\icon.ico"
 Copy-Item -LiteralPath $iconSourcePath -Destination $distIconPath -Force
 Write-Host "[build] copied icon sidecar: $distIconPath"
 

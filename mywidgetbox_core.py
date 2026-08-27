@@ -135,3 +135,84 @@ class GpuUsageSampler:
             return None
         # Normalize to a familiar 0..100 scale.
         return max(0.0, min(100.0, total))
+
+
+def get_media_native_size(path):
+    """
+    고속으로 이미지/GIF 및 동영상(MP4, MOV, MKV, WEBM 등)의 실제 픽셀 해상도 (width, height)를 반환합니다.
+    """
+    if not path or not isinstance(path, str):
+        return None
+    import os
+    if not os.path.isfile(path):
+        return None
+
+    ext = os.path.splitext(path)[1].lower()
+    video_exts = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".wmv", ".flv", ".ts"}
+
+    if ext in video_exts:
+        try:
+            import cv2
+            cap = cv2.VideoCapture(path)
+            if cap.isOpened():
+                w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                cap.release()
+                if w > 0 and h > 0:
+                    return (w, h)
+        except Exception:
+            pass
+
+    try:
+        from PyQt6.QtGui import QImageReader
+        reader = QImageReader(path)
+        sz = reader.size()
+        if sz.isValid() and sz.width() > 0 and sz.height() > 0:
+            return (sz.width(), sz.height())
+    except Exception:
+        pass
+
+    if ext in video_exts:
+        try:
+            client = _get_win32com_client()
+            if client is not None:
+                shell = client.Dispatch("Shell.Application")
+                folder_obj = shell.NameSpace(os.path.dirname(os.path.abspath(path)))
+                file_obj = folder_obj.ParseName(os.path.basename(path))
+                for idx in (316, 314, 312, 310, 285, 287):
+                    val = str(folder_obj.GetDetailsOf(file_obj, idx) or "").strip()
+                    if val.isdigit() and int(val) > 0:
+                        h_val = str(folder_obj.GetDetailsOf(file_obj, idx + 2) or "").strip()
+                        if h_val.isdigit() and int(h_val) > 0:
+                            return (int(val), int(h_val))
+        except Exception:
+            pass
+
+    return None
+
+
+def calc_smart_aspect_size(iw, ih, base_w=200, base_h=200, min_size=50, max_size=5000):
+    """
+    미디어의 실제 해상도 (iw, ih)와 기준 크기 (base_w, base_h)를 바탕으로,
+    - 가로형 미디어 (iw >= ih): 높이를 base_h로 유지하고 너비를 가로로 시원하게 확장
+    - 세로형 미디어 (ih > iw): 너비를 base_w로 유지하고 높이를 세로로 길게 확장
+    하여 쪼그라들지 않는 최적의 (target_w, target_h)를 반환합니다.
+    """
+    try:
+        iw = float(iw)
+        ih = float(ih)
+        base_w = max(min_size, float(base_w))
+        base_h = max(min_size, float(base_h))
+        if iw <= 0 or ih <= 0:
+            return (int(base_w), int(base_h))
+
+        if iw >= ih:
+            calc_w = int(round(base_h * (iw / ih)))
+            calc_w = max(min_size, min(max_size, calc_w))
+            return (calc_w, int(base_h))
+        else:
+            calc_h = int(round(base_w * (ih / iw)))
+            calc_h = max(min_size, min(max_size, calc_h))
+            return (int(base_w), calc_h)
+    except Exception:
+        return (int(base_w), int(base_h))

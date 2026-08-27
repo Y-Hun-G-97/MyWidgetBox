@@ -25,11 +25,13 @@ except Exception:
     from PyQt6.QtMultimediaWidgets import QVideoWidget
     QGraphicsVideoItem = None
 
-from mycanvas_core import (
+from mywidgetbox_core import (
     GpuUsageSampler,
     _as_bool,
     _get_win32com_client,
     _get_win32ui,
+    calc_smart_aspect_size,
+    get_media_native_size,
 )
 from desktop_icons import (
     DesktopIconCloneOverlay,
@@ -47,7 +49,8 @@ from media_runtime import (
     probe_video_height,
     runtime_binary_dirs,
 )
-from mycanvas_ui_primitives import (
+from mywidgetbox_ui_primitives import (
+    MarqueeSelectionOverlay,
     OverlayWidget,
     ProfileListWidget,
     ProfileRowWidget,
@@ -313,6 +316,8 @@ class DesktopWidget(QMainWindow):
         self._settings_sync_timer.setSingleShot(True)
         self._settings_sync_timer.timeout.connect(self._flush_settings_sync)
         self.setAttribute(Qt.WidgetAttribute.WA_NativeWindow) 
+        self.keep_aspect_ratio = _as_bool(self.settings.value("keep_aspect_ratio", True), True)
+        self.auto_fit_slide_media = _as_bool(self.settings.value("auto_fit_slide_media", False), False)
 
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
@@ -2112,12 +2117,20 @@ class DesktopWidget(QMainWindow):
                         bool(modifiers & ctrl_mod)
                         and not bool(modifiers & (Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.MetaModifier | Qt.KeyboardModifier.ShiftModifier))
                     )
+                    only_shift = (
+                        bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
+                        and not bool(modifiers & (Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.MetaModifier | ctrl_mod))
+                    )
                     no_mod = modifiers == Qt.KeyboardModifier.NoModifier
                     if is_auto_repeat:
                         return True
                     if only_ctrl and self._consume_shortcut_once(key, 1):
                         if hasattr(self, "manager") and self.manager and hasattr(self.manager, "clear_temp_group"):
                             self.manager.clear_temp_group()
+                        return True
+                    if only_shift and self._consume_shortcut_once(key, 2):
+                        if hasattr(self, "manager") and self.manager and hasattr(self.manager, "start_marquee_selection"):
+                            self.manager.start_marquee_selection(QCursor.pos())
                         return True
                     if no_mod and self._consume_shortcut_once(key, 0):
                         if hasattr(self, "manager") and self.manager and hasattr(self.manager, "toggle_temp_group_member"):
@@ -3516,38 +3529,71 @@ class DesktopWidget(QMainWindow):
         prev_geo = QRect(self.geometry())
         delta = global_pos - self.resize_start_pos
         start = QRect(self.resize_start_geo)
-        x = start.x()
-        y = start.y()
-        w = start.width()
-        h = start.height()
         min_w = max(50, self.minimumWidth())
         min_h = max(50, self.minimumHeight())
 
-        if self.resize_corner == "tl":
-            x = start.x() + delta.x()
-            y = start.y() + delta.y()
-            w = start.width() - delta.x()
-            h = start.height() - delta.y()
-        elif self.resize_corner == "tr":
-            y = start.y() + delta.y()
-            w = start.width() + delta.x()
-            h = start.height() - delta.y()
-        elif self.resize_corner == "bl":
-            x = start.x() + delta.x()
-            w = start.width() - delta.x()
-            h = start.height() + delta.y()
-        elif self.resize_corner == "br":
-            w = start.width() + delta.x()
-            h = start.height() + delta.y()
+        keep_ratio = bool(getattr(self, "keep_aspect_ratio", True))
+        aspect_ratio = max(0.01, float(start.width()) / max(1, float(start.height())))
 
-        if w < min_w:
-            if self.resize_corner in ("tl", "bl"):
-                x = start.x() + (start.width() - min_w)
-            w = min_w
-        if h < min_h:
-            if self.resize_corner in ("tl", "tr"):
-                y = start.y() + (start.height() - min_h)
-            h = min_h
+        if not keep_ratio:
+            x = start.x()
+            y = start.y()
+            w = start.width()
+            h = start.height()
+            if self.resize_corner == "tl":
+                x = start.x() + delta.x()
+                y = start.y() + delta.y()
+                w = start.width() - delta.x()
+                h = start.height() - delta.y()
+            elif self.resize_corner == "tr":
+                y = start.y() + delta.y()
+                w = start.width() + delta.x()
+                h = start.height() - delta.y()
+            elif self.resize_corner == "bl":
+                x = start.x() + delta.x()
+                w = start.width() - delta.x()
+                h = start.height() + delta.y()
+            elif self.resize_corner == "br":
+                w = start.width() + delta.x()
+                h = start.height() + delta.y()
+
+            if w < min_w:
+                if self.resize_corner in ("tl", "bl"):
+                    x = start.x() + (start.width() - min_w)
+                w = min_w
+            if h < min_h:
+                if self.resize_corner in ("tl", "tr"):
+                    y = start.y() + (start.height() - min_h)
+                h = min_h
+        else:
+            if self.resize_corner == "br":
+                target_w = max(min_w, start.width() + delta.x())
+                target_h = max(min_h, int(round(target_w / aspect_ratio)))
+                w = target_w
+                h = target_h
+                x = start.x()
+                y = start.y()
+            elif self.resize_corner == "bl":
+                target_w = max(min_w, start.width() - delta.x())
+                target_h = max(min_h, int(round(target_w / aspect_ratio)))
+                w = target_w
+                h = target_h
+                x = start.right() - w
+                y = start.y()
+            elif self.resize_corner == "tr":
+                target_w = max(min_w, start.width() + delta.x())
+                target_h = max(min_h, int(round(target_w / aspect_ratio)))
+                w = target_w
+                h = target_h
+                x = start.x()
+                y = start.bottom() - h
+            elif self.resize_corner == "tl":
+                target_w = max(min_w, start.width() - delta.x())
+                target_h = max(min_h, int(round(target_w / aspect_ratio)))
+                w = target_w
+                h = target_h
+                x = start.right() - w
+                y = start.bottom() - h
 
         self.setGeometry(QRect(int(x), int(y), int(w), int(h)))
         new_geo = QRect(self.geometry())
@@ -5502,6 +5548,7 @@ class MasterController(QMainWindow):
         tray_menu.addAction("관리자 열기", self.show_master_window); tray_menu.addSeparator(); tray_menu.addAction("전체 종료", self.quit_app)
         self.tray_icon.setContextMenu(tray_menu); self.tray_icon.show()
 
+        chk_icon_url = self._ensure_checkbox_check_icon()
         self.setStyleSheet("""
             QMainWindow#masterWindow {
                 background-color: #1b2a3f;
@@ -5695,12 +5742,14 @@ class MasterController(QMainWindow):
                 padding: 0;
             }
             QLabel#statusDot {
-                min-width: 10px;
-                max-width: 10px;
-                min-height: 10px;
-                max-height: 10px;
-                border-radius: 5px;
-                background-color: #8d99ad;
+                min-width: 3px;
+                max-width: 3px;
+                min-height: 16px;
+                max-height: 16px;
+                border-radius: 1px;
+                background-color: #55667e;
+                padding: 0px;
+                margin: 0px;
             }
             QLabel#statusDot[running="true"] {
                 background-color: #58c796;
@@ -5761,9 +5810,12 @@ class MasterController(QMainWindow):
             QPushButton[kind="rowAction"] {
                 min-width: 28px;
                 min-height: 28px;
+                max-width: 28px;
+                max-height: 28px;
                 border-radius: 7px;
-                font-size: 11px;
-                font-weight: 600;
+                padding: 0px;
+                margin: 0px;
+                text-align: center;
                 color: #dbe4f6;
                 background-color: transparent;
                 border: none;
@@ -5850,7 +5902,33 @@ class MasterController(QMainWindow):
             }
             QCheckBox#selectAllCheck,
             QCheckBox#profileCheck {
-                spacing: 4px;
+                spacing: 0px;
+                padding: 0px;
+                margin: 0px;
+            }
+            QCheckBox#selectAllCheck::indicator,
+            QCheckBox#profileCheck::indicator {
+                width: 14px;
+                height: 14px;
+                border-radius: 3px;
+                border: 1px solid #4a668e;
+                background-color: #172437;
+            }
+            QCheckBox#selectAllCheck::indicator:hover,
+            QCheckBox#profileCheck::indicator:hover {
+                border-color: #6a8ec2;
+                background-color: #20334d;
+            }
+            QCheckBox#selectAllCheck::indicator:checked,
+            QCheckBox#profileCheck::indicator:checked {
+                background-color: #4a74e2;
+                border-color: #7fa0f0;
+                image: url(""" + chk_icon_url + """);
+            }
+            QCheckBox#selectAllCheck::indicator:disabled,
+            QCheckBox#profileCheck::indicator:disabled {
+                border-color: #35455c;
+                background-color: #182230;
             }
         """)
 
@@ -6085,8 +6163,7 @@ class MasterController(QMainWindow):
         self._load_set_state()
         self._migrate_profile_run_flags()
         self._refresh_set_ui()
-        if not bool(getattr(self, "_fast_startup_mode", False)):
-            self.load_profiles()
+        self.load_profiles(force_rebuild=True)
         QTimer.singleShot(0, self.restore_last_session)
         app = QApplication.instance()
         if app:
@@ -6267,12 +6344,13 @@ class MasterController(QMainWindow):
         current_sid = self.selected_set_id()
         if not self._set_list_collapsed and sid == current_sid:
             self._set_sidebar_collapsed(True, persist=True)
+            self.load_profiles(force_rebuild=True)
             return
         if self._set_list_collapsed:
             self._set_sidebar_collapsed(False, persist=True)
         self._set_current_set_id(sid, persist=True)
         self.clear_all_highlights()
-        self.load_profiles()
+        self.load_profiles(force_rebuild=True)
 
     def _on_set_name_double_clicked(self, sid):
         sid = str(sid)
@@ -6394,6 +6472,33 @@ class MasterController(QMainWindow):
     def clear_temp_group(self, silent=False):
         return _mtg_clear_temp_group_impl(self, silent=silent)
 
+    def start_marquee_selection(self, global_start_pos):
+        if not hasattr(self, "_marquee_overlay") or self._marquee_overlay is None:
+            self._marquee_overlay = MarqueeSelectionOverlay(self)
+        self._marquee_overlay.start_selection(global_start_pos)
+
+    def finish_marquee_selection(self, selection_rect):
+        if not selection_rect or (selection_rect.width() < 5 and selection_rect.height() < 5):
+            return
+        matched_pids = []
+        for pid, w in self.widgets.items():
+            if not isinstance(w, QWidget) or not w.isVisible():
+                continue
+            if w.geometry().intersects(selection_rect):
+                matched_pids.append(str(pid))
+        if not matched_pids:
+            return
+        for pid in matched_pids:
+            self._temp_group_ids.add(str(pid))
+        if hasattr(self, "_refresh_temp_group_ui"):
+            self._refresh_temp_group_ui()
+        elif hasattr(self, "_sync_temp_group_badges"):
+            self._sync_temp_group_badges()
+        for pid in matched_pids:
+            w = self.widgets.get(str(pid))
+            if w and hasattr(w, "_show_action_hud"):
+                w._show_action_hud(f"임시 그룹 ({len(self._temp_group_ids)}개)")
+
     def _temp_group_shortcut_targets(self, source_pid):
         return _mtg_temp_group_shortcut_targets_impl(self, source_pid)
 
@@ -6457,10 +6562,6 @@ class MasterController(QMainWindow):
     def _on_profile_order_changed(self, ordered_ids):
         _mset_on_profile_order_changed_impl(self, ordered_ids)
 
-    def open_set_manager(self):
-        self._load_set_state()
-        self._refresh_set_ui()
-        self.load_profiles()
 
     def _toggle_gpu_cfg_panel(self, expanded=None):
         if expanded is None:
@@ -6561,9 +6662,9 @@ class MasterController(QMainWindow):
         if kind == "run":
             painter.drawPolygon(
                 QPolygonF([
-                    QPointF(4.2, 3.2),
-                    QPointF(12.0, 8.0),
-                    QPointF(4.2, 12.8),
+                    QPointF(5.0, 3.5),
+                    QPointF(12.5, 8.0),
+                    QPointF(5.0, 12.5),
                 ])
             )
         elif kind == "stop":
@@ -6574,16 +6675,16 @@ class MasterController(QMainWindow):
             inner_r = 1.9
             for i in range(8):
                 angle = math.radians(i * 45.0)
-                x1 = center.x() + math.cos(angle) * 5.0
-                y1 = center.y() + math.sin(angle) * 5.0
-                x2 = center.x() + math.cos(angle) * 6.7
-                y2 = center.y() + math.sin(angle) * 6.7
+                x1 = center.x() + math.cos(angle) * 4.8
+                y1 = center.y() + math.sin(angle) * 4.8
+                x2 = center.x() + math.cos(angle) * 6.6
+                y2 = center.y() + math.sin(angle) * 6.6
                 painter.drawLine(QPointF(x1, y1), QPointF(x2, y2))
             painter.drawEllipse(center, outer_r, outer_r)
             painter.drawEllipse(center, inner_r, inner_r)
         elif kind == "delete":
-            painter.drawLine(QPointF(4.2, 4.2), QPointF(11.8, 11.8))
-            painter.drawLine(QPointF(11.8, 4.2), QPointF(4.2, 11.8))
+            painter.drawLine(QPointF(4.0, 4.0), QPointF(12.0, 12.0))
+            painter.drawLine(QPointF(12.0, 4.0), QPointF(4.0, 12.0))
         elif kind == "copy":
             painter.drawRect(QRectF(3.5, 5.5, 6.5, 6.5))
             painter.drawPolyline([
@@ -6604,6 +6705,28 @@ class MasterController(QMainWindow):
         disabled_color = QColor(color_hex).darker(170).name()
         icon.addPixmap(cls._action_icon_pixmap(kind, disabled_color), QIcon.Mode.Disabled)
         return icon
+
+    @classmethod
+    def _ensure_checkbox_check_icon(cls):
+        cache_dir = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "MyWidgetBox", "cache")
+        try:
+            os.makedirs(cache_dir, exist_ok=True)
+            icon_path = os.path.join(cache_dir, "checkbox_check.png")
+            pix = QPixmap(14, 14)
+            pix.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(pix)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            pen = QPen(QColor("#ffffff"), 2.0)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(pen)
+            painter.drawLine(QPoint(3, 7), QPoint(6, 10))
+            painter.drawLine(QPoint(6, 10), QPoint(11, 4))
+            painter.end()
+            pix.save(icon_path, "PNG")
+            return icon_path.replace("\\", "/")
+        except Exception:
+            return ""
 
     def _set_profile_row_selected(self, pid, selected):
         row = self.profile_rows.get(str(pid))
@@ -6774,11 +6897,21 @@ class MasterController(QMainWindow):
         row_layout.setContentsMargins(0, 0, 0, 0)
         row_layout.setSpacing(6)
 
+        is_applied = self._is_current_set_applied()
+
         btn = QPushButton("＋", row)
         btn.setObjectName("addWidgetBtn")
         btn.clicked.connect(self.add_profile)
-        lbl = QLabel("위젯 추가", row)
+        btn.setEnabled(is_applied)
+
+        lbl = QLabel("위젯 추가" if is_applied else "위젯 추가 (세트 적용 필요)", row)
         lbl.setObjectName("addWidgetLabel")
+        if not is_applied:
+            lbl.setStyleSheet("color: #7b8ea8;")
+            btn.setToolTip("현재 적용된 세트에서만 위젯을 추가할 수 있습니다 (하단의 '세트 적용' 필요)")
+            lbl.setToolTip("현재 적용된 세트에서만 위젯을 추가할 수 있습니다 (하단의 '세트 적용' 필요)")
+        else:
+            btn.setToolTip("새로운 위젯 추가")
 
         row_layout.addWidget(btn, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         row_layout.addWidget(lbl, 1, Qt.AlignmentFlag.AlignVCenter)
@@ -6801,11 +6934,12 @@ class MasterController(QMainWindow):
         row.setProperty("selected", "false")
         row.setMinimumHeight(46)
         row_layout = QHBoxLayout(row)
-        row_layout.setContentsMargins(4, 4, 2, 4)
-        row_layout.setSpacing(8)
+        row_layout.setContentsMargins(6, 4, 4, 4)
+        row_layout.setSpacing(6)
 
         status_dot = QLabel()
         status_dot.setObjectName("statusDot")
+        status_dot.setFixedSize(3, 16)
         status_dot.setProperty("running", "true" if is_running else "false")
 
         lbl = QLabel()
@@ -6827,7 +6961,7 @@ class MasterController(QMainWindow):
             btn.setProperty("kind", "rowAction")
             btn.setText("")
             btn.setFixedSize(28, 28)
-            btn.setIconSize(QSize(13, 13))
+            btn.setIconSize(QSize(16, 16))
             btn.setVisible(False)
 
         btn_run.setIcon(self._build_action_icon("run", "#dbfff3"))
@@ -6849,7 +6983,7 @@ class MasterController(QMainWindow):
 
         checkbox = QCheckBox(row)
         checkbox.setObjectName("profileCheck")
-        checkbox.setFixedSize(18, 18)
+        checkbox.setFixedSize(16, 16)
         checkbox.setChecked(spid in self._temp_group_ids)
         checkbox.toggled.connect(lambda checked, p=spid: self._on_row_checkbox_changed(p, checked))
 
@@ -6871,6 +7005,8 @@ class MasterController(QMainWindow):
         row._status_dot = status_dot
         row._btn_run = btn_run
         row._btn_stop = btn_stop
+        row._btn_set = btn_set
+        row._btn_del = btn_del
         row._action_wrap = action_wrap
         row._pid = spid
         row._full_name = str(name)
@@ -6931,6 +7067,8 @@ class MasterController(QMainWindow):
         status_dot = getattr(row, "_status_dot", None)
         btn_run = getattr(row, "_btn_run", None)
         btn_stop = getattr(row, "_btn_stop", None)
+        btn_set = getattr(row, "_btn_set", None)
+        btn_del = getattr(row, "_btn_del", None)
         cb = getattr(row, "_checkbox", None)
         if not isinstance(label, QLabel) or not isinstance(status_dot, QLabel):
             return False
@@ -6959,8 +7097,28 @@ class MasterController(QMainWindow):
                 dot_style.unpolish(status_dot)
                 dot_style.polish(status_dot)
             status_dot.update()
-        btn_run.setEnabled(not bool(is_running))
-        btn_stop.setEnabled(bool(is_running))
+
+        is_applied = self._is_current_set_applied()
+
+        if not is_applied:
+            btn_run.setEnabled(False)
+            btn_stop.setEnabled(False)
+            if isinstance(btn_set, QPushButton):
+                btn_set.setEnabled(False)
+            if isinstance(btn_del, QPushButton):
+                btn_del.setEnabled(False)
+            if isinstance(cb, QCheckBox):
+                cb.setEnabled(False)
+        else:
+            btn_run.setEnabled(not bool(is_running))
+            btn_stop.setEnabled(bool(is_running))
+            if isinstance(btn_set, QPushButton):
+                btn_set.setEnabled(True)
+            if isinstance(btn_del, QPushButton):
+                btn_del.setEnabled(True)
+            if isinstance(cb, QCheckBox):
+                cb.setEnabled(True)
+
         if row_changed:
             row._refresh_style()
         return True
@@ -7053,11 +7211,33 @@ class MasterController(QMainWindow):
                     checked.append(str(spid))
         return checked
 
+    def _is_current_set_applied(self):
+        selected_sid = str(self.selected_set_id() or "")
+        applied_sid = str(getattr(self, "_applied_set_id", "") or "")
+        if not applied_sid or applied_sid not in self._set_defs:
+            return True
+        return bool(selected_sid == applied_sid)
+
+    def _check_set_applied_for_action(self, action_name="조작"):
+        if not self._is_current_set_applied():
+            QMessageBox.information(
+                self,
+                f"위젯 {action_name} 불가",
+                f"현재 적용(실행) 중인 세트에서만 위젯을 {action_name}할 수 있습니다.\n먼저 하단의 '세트 적용' 버튼을 눌러 세트를 전환해주세요.",
+            )
+            return False
+        return True
+
     def _sync_bulk_action_ui(self):
+        is_applied = self._is_current_set_applied()
+
         checked_count = len(self._checked_profile_ids())
         total_count = len(self.profile_rows)
-        has_checked = checked_count > 0
-        if has_checked:
+        has_checked = (checked_count > 0 and is_applied)
+
+        if not is_applied:
+            self.profile_column_label.setText("위젯 리스트 (세트 적용 필요)")
+        elif checked_count > 0:
             self.profile_column_label.setText(f"위젯 리스트 ({checked_count}개 선택)")
         else:
             self.profile_column_label.setText("위젯 리스트")
@@ -7070,13 +7250,18 @@ class MasterController(QMainWindow):
         ):
             if btn is not None:
                 btn.setEnabled(has_checked)
+                if not is_applied:
+                    btn.setToolTip("현재 적용된 세트에서만 일괄 조작할 수 있습니다 (하단의 '세트 적용' 필요)")
         
         if hasattr(self, "select_all_check"):
+            self.select_all_check.setEnabled(is_applied)
             self.select_all_check.blockSignals(True)
-            self.select_all_check.setChecked(bool(total_count > 0 and checked_count == total_count))
+            self.select_all_check.setChecked(bool(is_applied and total_count > 0 and checked_count == total_count))
             self.select_all_check.blockSignals(False)
 
     def bulk_run_profiles(self):
+        if not self._check_set_applied_for_action("일괄 실행"):
+            return
         checked_ids = self._checked_profile_ids()
         if not checked_ids:
             return
@@ -7089,6 +7274,8 @@ class MasterController(QMainWindow):
         self.load_profiles()
 
     def bulk_stop_profiles(self):
+        if not self._check_set_applied_for_action("일괄 정지"):
+            return
         checked_ids = self._checked_profile_ids()
         if not checked_ids:
             return
@@ -7100,6 +7287,8 @@ class MasterController(QMainWindow):
         self.load_profiles()
 
     def open_bulk_settings(self):
+        if not self._check_set_applied_for_action("일괄 설정"):
+            return
         checked_ids = self._checked_profile_ids()
         if not checked_ids:
             return
@@ -7239,6 +7428,8 @@ class MasterController(QMainWindow):
         self.load_profiles()
 
     def delete_checked_profiles(self):
+        if not self._check_set_applied_for_action("일괄 삭제"):
+            return
         checked_ids = self._checked_profile_ids()
         if not checked_ids:
             return
@@ -7284,6 +7475,8 @@ class MasterController(QMainWindow):
         self.load_profiles(force_rebuild=True)
 
     def open_widget_settings(self, pid):
+        if not self._check_set_applied_for_action("설정"):
+            return
         pid = str(pid)
 
         is_running = pid in self.widgets
@@ -7492,6 +7685,16 @@ class MasterController(QMainWindow):
     def create_spread_widgets(self, origin_pid, spread_config, origin_widget=None):
         if not spread_config:
             return False
+
+        sid = self.selected_set_id()
+        applied_sid = str(getattr(self, "_applied_set_id", "") or "")
+        if applied_sid and sid and sid != applied_sid:
+            QMessageBox.information(
+                self,
+                "스프레드 배치 불가",
+                "현재 적용(실행) 중인 세트에서만 위젯을 추가/배치할 수 있습니다.\n먼저 하단의 '세트 적용' 버튼을 눌러 세트를 전환해주세요.",
+            )
+            return False
         folder_path = str(spread_config.get("folder_path", "") or "").strip()
         item_paths = list(spread_config.get("item_paths", []) or [])
         if not item_paths:
@@ -7525,19 +7728,45 @@ class MasterController(QMainWindow):
         all_pids = self._all_profile_ids()
         created_count = 0
 
+        fit_strategy = spread_config.get("fit_strategy", "auto_aspect")
+        bg_mode = int(spread_config.get("bg_color_mode", 0))
+
+        col_heights = [start_y] * cols
+
         for idx, item_path in enumerate(item_paths):
-            r = idx // cols
             c = idx % cols
             pos_x = start_x + c * (w + margin)
-            pos_y = start_y + r * (h + margin)
             item_name = os.path.basename(item_path)
+
+            item_w = w
+            item_h = h
+            media_fit_mode = 0
+
+            if fit_strategy == "auto_aspect":
+                pos_y = col_heights[c]
+                sz = get_media_native_size(item_path)
+                if sz and len(sz) == 2 and sz[0] > 0 and sz[1] > 0:
+                    iw, ih = sz[0], sz[1]
+                    item_w, item_h = calc_smart_aspect_size(iw, ih, w, h)
+                media_fit_mode = 1
+                col_heights[c] += item_h + margin
+            elif fit_strategy == "crop_fill":
+                r = idx // cols
+                pos_y = start_y + r * (h + margin)
+                media_fit_mode = 1
+            else:
+                r = idx // cols
+                pos_y = start_y + r * (h + margin)
+                media_fit_mode = 0
 
             if idx == 0 and target_widget:
                 target_widget.folder_path = folder_path
                 target_widget.folder_item_paths = [item_path]
                 target_widget._set_watched_folder(folder_path)
+                target_widget.bg_color_mode = bg_mode
+                target_widget.media_fit_mode = media_fit_mode
                 target_widget.move(pos_x, pos_y)
-                target_widget.resize(w, h)
+                target_widget.resize(item_w, item_h)
                 target_widget.update_playlist()
                 target_widget.current_idx = -1
                 target_widget.next_media()
@@ -7552,16 +7781,17 @@ class MasterController(QMainWindow):
             new_settings.setValue("name", item_name)
             new_settings.setValue("x", pos_x)
             new_settings.setValue("y", pos_y)
-            new_settings.setValue("w", w)
-            new_settings.setValue("h", h)
+            new_settings.setValue("w", item_w)
+            new_settings.setValue("h", item_h)
             new_settings.setValue("pos", QPoint(pos_x, pos_y))
-            new_settings.setValue("size", QSize(w, h))
+            new_settings.setValue("size", QSize(item_w, item_h))
             new_settings.setValue("folder_path", folder_path)
             new_settings.setValue("folder_item_paths", [item_path])
+            new_settings.setValue("bg_color_mode", bg_mode)
+            new_settings.setValue("media_fit_mode", media_fit_mode)
             new_settings.setValue("layer_mode", int(DesktopWidget.LAYER_NORMAL))
             new_settings.setValue("layer_schema_version", int(DesktopWidget.LAYER_SCHEMA_VERSION))
             new_settings.setValue("corner_mode", 0)
-            new_settings.setValue("media_fit_mode", 0)
             new_settings.setValue("video_transition_mode", int(DesktopWidget.VIDEO_TRANSITION_SINGLE))
             new_settings.setValue("video_decode_mode", int(DesktopWidget.VIDEO_DECODE_ORIGINAL))
             new_settings.setValue("video_dual_fade_ms", int(DesktopWidget.VIDEO_DUAL_FADE_DEFAULT_MS))
@@ -7805,6 +8035,16 @@ class MasterController(QMainWindow):
                 self._set_gpu_guard_paused(False, usage, reason="gpu_recovered_soft")
 
     def add_profile(self):
+        sid = self.selected_set_id()
+        applied_sid = str(getattr(self, "_applied_set_id", "") or "")
+        if applied_sid and sid and sid != applied_sid:
+            QMessageBox.information(
+                self,
+                "위젯 추가 불가",
+                "현재 적용(실행) 중인 세트에서만 위젯을 추가할 수 있습니다.\n먼저 하단의 '세트 적용' 버튼을 눌러 세트를 전환해주세요.",
+            )
+            return
+
         p_ids = self._all_profile_ids()
         new_id = self._next_profile_id(p_ids)
         p_ids.append(new_id)
@@ -7836,6 +8076,8 @@ class MasterController(QMainWindow):
         self.run_widget(new_id, "New 세팅")
 
     def run_widget(self, pid, name):
+        if not self._check_set_applied_for_action("실행"):
+            return
         spid = str(pid)
         self._set_profile_run_enabled(spid, True)
         if spid not in self.widgets:
@@ -7847,6 +8089,8 @@ class MasterController(QMainWindow):
         self.load_profiles()
 
     def stop_widget(self, pid):
+        if not self._check_set_applied_for_action("중지"):
+            return
         spid = str(pid)
         self._set_profile_run_enabled(spid, False)
         if spid in self._temp_group_ids:
@@ -7884,6 +8128,8 @@ class MasterController(QMainWindow):
             self.apply_set(sid)
 
     def delete_profile(self, pid):
+        if not self._check_set_applied_for_action("삭제"):
+            return
         spid = str(pid)
         confirm = QMessageBox.question(self, "삭제 확인", "이 세팅을 완전히 삭제하시겠습니까?", 
                                      QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
