@@ -22,16 +22,18 @@ def bind_settings_dialog_desktop_widget(desktop_widget_cls):
 class FolderLayoutChoiceDialog(QDialog):
     def __init__(self, parent=None, folder_path=""):
         super().__init__(parent)
+        from mywidgetbox_core import apply_windows_dark_title_bar, render_vector_icon
+
         self.setObjectName("folderLayoutChoiceDialog")
         self.setWindowTitle("미디어 폴더 추가 방식 선택")
-        self.setWindowIcon(QIcon())
+        self.setWindowIcon(render_vector_icon("folder", "#528bf8", 32))
         self.setFixedWidth(460)
         self.choice = None
         self.folder_path = str(folder_path or "").strip()
 
         self.setStyleSheet("""
             QDialog#folderLayoutChoiceDialog {
-                background-color: #1d2a3d;
+                background-color: #162233;
             }
             QLabel {
                 color: #e6eefc;
@@ -118,10 +120,11 @@ class FolderLayoutChoiceDialog(QDialog):
         btn_row = QHBoxLayout()
         btn_row.addStretch(1)
         cancel_btn = QPushButton("취소")
-        cancel_btn.setObjectName("cancelBtn")
         cancel_btn.clicked.connect(self.reject)
         btn_row.addWidget(cancel_btn)
         layout.addLayout(btn_row)
+
+        QTimer.singleShot(0, lambda: apply_windows_dark_title_bar(self))
 
     def _choose_slide(self):
         self.choice = "slide"
@@ -149,15 +152,19 @@ def _classify_media(path):
 
 
 class FolderSlideDialog(QDialog):
-    def __init__(self, parent=None, folder_path="", media_paths=None):
+    def __init__(self, parent=None, folder_path="", media_paths=None, pre_selected_paths=None):
         super().__init__(parent)
+        from mywidgetbox_core import apply_windows_dark_title_bar, render_vector_icon
+
         self.setObjectName("folderSlideDialog")
         self.setWindowTitle("슬라이드 미디어 선택")
-        self.setWindowIcon(QIcon())
-        self.resize(540, 560)
-        self.setFixedWidth(540)
+        self.setWindowIcon(render_vector_icon("media", "#528bf8", 32))
+        self.resize(560, 580)
+        self.setFixedWidth(560)
         self.folder_path = str(folder_path or "").strip()
         self.media_paths = [str(p) for p in (media_paths or []) if p and os.path.isfile(p)]
+        self.pre_selected_paths = list(pre_selected_paths) if pre_selected_paths is not None else None
+        self._pre_set = set(os.path.normcase(os.path.normpath(p)) for p in self.pre_selected_paths) if self.pre_selected_paths is not None else None
         self.result_paths = None
         self._current_filter = "all"
         self._filter_btns = {}
@@ -169,30 +176,30 @@ class FolderSlideDialog(QDialog):
 
         self.setStyleSheet("""
             QDialog#folderSlideDialog {
-                background-color: #1d2a3d;
+                background-color: #162233;
             }
             QLabel {
                 color: #e6eefc;
                 font-size: 12px;
             }
             QLabel#dialogTitle {
-                color: #eef3ff;
+                color: #eef4ff;
                 font-size: 16px;
                 font-weight: 700;
             }
             QLabel#dialogSubtitle {
-                color: #b7cceb;
+                color: #a4bedc;
                 font-size: 12px;
             }
             QLabel#sectionHeader {
-                color: #a7c1eb;
+                color: #92bbf8;
                 font-size: 12px;
                 font-weight: 700;
             }
             QListWidget {
                 color: #edf3ff;
-                background-color: #182537;
-                border: 1px solid #3f567a;
+                background-color: #111a28;
+                border: 1px solid #283a54;
                 border-radius: 8px;
                 padding: 4px;
             }
@@ -202,33 +209,36 @@ class FolderSlideDialog(QDialog):
                 border-radius: 4px;
             }
             QListWidget::item:hover {
-                background-color: #2a3d58;
+                background-color: #1a2a40;
             }
             QPushButton {
-                min-height: 30px;
-                border-radius: 6px;
+                min-height: 32px;
+                border-radius: 8px;
                 padding: 0 12px;
                 color: #e8efff;
-                background-color: #35507a;
-                border: 1px solid #5977a4;
+                background-color: #2b3e5b;
+                border: 1px solid #48648c;
                 font-weight: 600;
                 font-size: 12px;
             }
             QPushButton:hover {
-                background-color: #3f5e8e;
+                background-color: #385075;
+                border-color: #5d7fae;
+                color: #ffffff;
             }
             QPushButton[kind="filterBtn"] {
-                min-height: 26px;
+                min-height: 28px;
                 padding: 0 10px;
                 font-size: 11px;
                 font-weight: 600;
                 border-radius: 6px;
-                background-color: #263852;
-                border: 1px solid #435c80;
+                background-color: #1f3047;
+                border: 1px solid #364e6f;
                 color: #cddbf0;
             }
             QPushButton[kind="filterBtn"]:hover {
-                background-color: #32496a;
+                background-color: #2b4363;
+                color: #ffffff;
             }
             QPushButton[kind="filterBtn"][active="true"] {
                 background-color: #4a74e2;
@@ -236,25 +246,26 @@ class FolderSlideDialog(QDialog):
                 color: #ffffff;
             }
             QPushButton#primaryBtn {
-                background-color: #4f7fc8;
-                border-color: #7aa4e8;
+                background-color: #4872d4;
+                border: 1px solid #7397ea;
                 font-size: 13px;
                 font-weight: 700;
-                min-height: 36px;
-                padding: 0 20px;
+                min-height: 34px;
+                padding: 0 18px;
             }
             QPushButton#primaryBtn:hover {
-                background-color: #5d8dd9;
+                background-color: #5882e6;
             }
             QPushButton#secondaryBtn {
-                min-height: 26px;
+                min-height: 28px;
                 padding: 0 10px;
                 font-size: 11px;
-                background-color: #263852;
-                border: 1px solid #435c80;
+                background-color: #1f3047;
+                border: 1px solid #364e6f;
             }
             QPushButton#secondaryBtn:hover {
-                background-color: #32496a;
+                background-color: #2b4363;
+                color: #ffffff;
             }
             QLabel#statusLabel {
                 color: #8cc3ff;
@@ -267,12 +278,25 @@ class FolderSlideDialog(QDialog):
         layout.setContentsMargins(20, 20, 20, 18)
         layout.setSpacing(12)
 
+        header_row = QHBoxLayout()
+        title_col = QVBoxLayout()
+        title_col.setSpacing(3)
         title = QLabel("슬라이드 재생 미디어 선택")
         title.setObjectName("dialogTitle")
         subtitle = QLabel("위젯에서 순차적으로 재생할 미디어 파일들을 선택하세요.")
         subtitle.setObjectName("dialogSubtitle")
-        layout.addWidget(title)
-        layout.addWidget(subtitle)
+        title_col.addWidget(title)
+        title_col.addWidget(subtitle)
+        header_row.addLayout(title_col, 1)
+
+        self.open_folder_btn = QPushButton("폴더 열기")
+        self.open_folder_btn.setObjectName("secondaryBtn")
+        self.open_folder_btn.setIcon(render_vector_icon("folder", "#cddbf0", 14))
+        self.open_folder_btn.setIconSize(QSize(14, 14))
+        self.open_folder_btn.setToolTip("탐색기에서 해당 폴더를 엽니다.")
+        self.open_folder_btn.clicked.connect(self._open_folder_in_explorer)
+        header_row.addWidget(self.open_folder_btn, 0)
+        layout.addLayout(header_row)
 
         filter_row = QHBoxLayout()
         filter_row.setSpacing(6)
@@ -314,7 +338,11 @@ class FolderSlideDialog(QDialog):
             item.setData(Qt.ItemDataRole.UserRole, path)
             item.setData(Qt.ItemDataRole.UserRole + 1, cat)
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            item.setCheckState(Qt.CheckState.Checked)
+            if self._pre_set is not None:
+                norm_p = os.path.normcase(os.path.normpath(path))
+                item.setCheckState(Qt.CheckState.Checked if norm_p in self._pre_set else Qt.CheckState.Unchecked)
+            else:
+                item.setCheckState(Qt.CheckState.Checked)
             self.list_widget.addItem(item)
         layout.addWidget(self.list_widget, 1)
 
@@ -339,6 +367,15 @@ class FolderSlideDialog(QDialog):
         self.list_widget.itemClicked.connect(self._on_item_clicked)
         self.list_widget.itemChanged.connect(lambda _item: self._refresh_status())
         self._refresh_status()
+
+        QTimer.singleShot(0, lambda: apply_windows_dark_title_bar(self))
+
+    def _open_folder_in_explorer(self):
+        if self.folder_path and os.path.isdir(self.folder_path):
+            try:
+                os.startfile(self.folder_path)
+            except Exception:
+                pass
 
     def _on_item_clicked(self, item):
         state = item.checkState()
@@ -393,10 +430,12 @@ class FolderSlideDialog(QDialog):
 class FolderSpreadDialog(QDialog):
     def __init__(self, parent=None, folder_path="", media_paths=None, current_size=None):
         super().__init__(parent)
+        from mywidgetbox_core import apply_windows_dark_title_bar, render_vector_icon
+
         self.setObjectName("folderSpreadDialog")
         self.setWindowTitle("스프레드(바둑판) 위젯 배치 설정")
-        self.setWindowIcon(QIcon())
-        self.resize(580, 680)
+        self.setWindowIcon(render_vector_icon("widget", "#528bf8", 32))
+        self.resize(580, 700)
         self.setFixedWidth(580)
         self.folder_path = str(folder_path or "").strip()
         self.media_paths = [str(p) for p in (media_paths or []) if p and os.path.isfile(p)]
@@ -424,41 +463,49 @@ class FolderSpreadDialog(QDialog):
 
         self.setStyleSheet("""
             QDialog#folderSpreadDialog {
-                background-color: #1d2a3d;
+                background-color: #162233;
             }
             QLabel {
                 color: #e6eefc;
                 font-size: 12px;
             }
             QLabel#dialogTitle {
-                color: #eef3ff;
+                color: #eef4ff;
                 font-size: 16px;
                 font-weight: 700;
             }
+            QLabel#dialogSubtitle {
+                color: #a4bedc;
+                font-size: 12px;
+            }
             QLabel#sectionHeader {
-                color: #a7c1eb;
+                color: #92bbf8;
                 font-size: 12px;
                 font-weight: 700;
             }
             QFrame#cardFrame {
-                background-color: #23344d;
-                border: 1px solid #3f567a;
-                border-radius: 10px;
+                background-color: #1d2c42;
+                border: 1px solid #2e4466;
+                border-radius: 12px;
                 padding: 10px;
             }
             QSpinBox {
                 min-height: 32px;
-                color: #edf3ff;
-                background-color: #2a3e5c;
-                border: 1px solid #4a678f;
+                color: #ffffff;
+                background-color: #121c2b;
+                border: 1px solid #283a54;
                 border-radius: 8px;
-                padding: 2px 10px;
+                padding: 2px 8px;
                 font-size: 13px;
                 font-weight: 600;
             }
+            QSpinBox:hover {
+                border-color: #3d587d;
+                background-color: #152438;
+            }
             QSpinBox:focus {
-                border: 1px solid #77a3f2;
-                background-color: #31496d;
+                border: 1.5px solid #528bf8;
+                background-color: #17283f;
             }
             QSpinBox::up-button,
             QSpinBox::down-button {
@@ -475,35 +522,53 @@ class FolderSpreadDialog(QDialog):
             }
             QComboBox {
                 min-height: 32px;
-                color: #edf3ff;
-                background-color: #2a3e5c;
-                border: 1px solid #4a678f;
+                color: #eaf1fc;
+                background-color: #24364f;
+                border: 1px solid #3d5578;
                 border-radius: 8px;
-                padding: 2px 24px 2px 10px;
+                padding: 2px 28px 2px 10px;
                 font-size: 12px;
                 font-weight: 600;
             }
+            QComboBox:hover {
+                background-color: #2d4361;
+                border-color: #52739e;
+            }
             QComboBox:focus {
-                border: 1px solid #77a3f2;
-                background-color: #31496d;
+                border: 1.5px solid #528bf8;
             }
             QComboBox::drop-down {
                 subcontrol-origin: padding;
                 subcontrol-position: top right;
-                width: 20px;
-                border: none;
+                width: 24px;
+                border-left: 1px solid #334866;
                 background: transparent;
             }
+            QComboBox::down-arrow {
+                width: 0;
+                height: 0;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-top: 5px solid #9bb5d8;
+                margin-right: 4px;
+            }
+            QComboBox::down-arrow:hover {
+                border-top-color: #ffffff;
+            }
             QComboBox QAbstractItemView {
-                background-color: #23344d;
+                background-color: #21324a;
                 color: #eef4ff;
-                border: 1px solid #4a678f;
+                border: 1px solid #3d587d;
+                border-radius: 6px;
                 selection-background-color: #3f5e8e;
+                selection-color: #ffffff;
+                outline: 0;
+                font-size: 12px;
             }
             QListWidget {
                 color: #edf3ff;
-                background-color: #182537;
-                border: 1px solid #3f567a;
+                background-color: #111a28;
+                border: 1px solid #283a54;
                 border-radius: 8px;
                 padding: 4px;
             }
@@ -513,33 +578,36 @@ class FolderSpreadDialog(QDialog):
                 border-radius: 4px;
             }
             QListWidget::item:hover {
-                background-color: #2a3d58;
+                background-color: #1a2a40;
             }
             QPushButton {
-                min-height: 30px;
-                border-radius: 6px;
+                min-height: 32px;
+                border-radius: 8px;
                 padding: 0 12px;
                 color: #e8efff;
-                background-color: #35507a;
-                border: 1px solid #5977a4;
+                background-color: #2b3e5b;
+                border: 1px solid #48648c;
                 font-weight: 600;
                 font-size: 12px;
             }
             QPushButton:hover {
-                background-color: #3f5e8e;
+                background-color: #385075;
+                border-color: #5d7fae;
+                color: #ffffff;
             }
             QPushButton[kind="filterBtn"] {
-                min-height: 26px;
+                min-height: 28px;
                 padding: 0 10px;
                 font-size: 11px;
                 font-weight: 600;
                 border-radius: 6px;
-                background-color: #263852;
-                border: 1px solid #435c80;
+                background-color: #1f3047;
+                border: 1px solid #364e6f;
                 color: #cddbf0;
             }
             QPushButton[kind="filterBtn"]:hover {
-                background-color: #32496a;
+                background-color: #2b4363;
+                color: #ffffff;
             }
             QPushButton[kind="filterBtn"][active="true"] {
                 background-color: #4a74e2;
@@ -547,25 +615,26 @@ class FolderSpreadDialog(QDialog):
                 color: #ffffff;
             }
             QPushButton#primaryBtn {
-                background-color: #4f7fc8;
-                border-color: #7aa4e8;
+                background-color: #4872d4;
+                border: 1px solid #7397ea;
                 font-size: 13px;
                 font-weight: 700;
-                min-height: 36px;
-                padding: 0 20px;
+                min-height: 34px;
+                padding: 0 18px;
             }
             QPushButton#primaryBtn:hover {
-                background-color: #5d8dd9;
+                background-color: #5882e6;
             }
             QPushButton#secondaryBtn {
-                min-height: 26px;
+                min-height: 28px;
                 padding: 0 10px;
                 font-size: 11px;
-                background-color: #263852;
-                border: 1px solid #435c80;
+                background-color: #1f3047;
+                border: 1px solid #364e6f;
             }
             QPushButton#secondaryBtn:hover {
-                background-color: #32496a;
+                background-color: #2b4363;
+                color: #ffffff;
             }
             QLabel#statusLabel {
                 color: #8cc3ff;
@@ -578,9 +647,25 @@ class FolderSpreadDialog(QDialog):
         layout.setContentsMargins(20, 20, 20, 18)
         layout.setSpacing(12)
 
+        header_row = QHBoxLayout()
+        title_col = QVBoxLayout()
+        title_col.setSpacing(3)
         title = QLabel("스프레드(바둑판) 위젯 배치 설정")
         title.setObjectName("dialogTitle")
-        layout.addWidget(title)
+        subtitle = QLabel("폴더 내 미디어들을 바둑판 형태로 한 번에 배치합니다.")
+        subtitle.setObjectName("dialogSubtitle")
+        title_col.addWidget(title)
+        title_col.addWidget(subtitle)
+        header_row.addLayout(title_col, 1)
+
+        self.open_folder_btn = QPushButton("폴더 열기")
+        self.open_folder_btn.setObjectName("secondaryBtn")
+        self.open_folder_btn.setIcon(render_vector_icon("folder", "#cddbf0", 14))
+        self.open_folder_btn.setIconSize(QSize(14, 14))
+        self.open_folder_btn.setToolTip("탐색기에서 해당 폴더를 엽니다.")
+        self.open_folder_btn.clicked.connect(self._open_folder_in_explorer)
+        header_row.addWidget(self.open_folder_btn, 0)
+        layout.addLayout(header_row)
 
         # 1. 배치 & 크기 설정 카드
         grid_card = QFrame()
@@ -745,6 +830,15 @@ class FolderSpreadDialog(QDialog):
         self.list_widget.itemChanged.connect(lambda _item: self._refresh_status())
         self._refresh_status()
 
+        QTimer.singleShot(0, lambda: apply_windows_dark_title_bar(self))
+
+    def _open_folder_in_explorer(self):
+        if self.folder_path and os.path.isdir(self.folder_path):
+            try:
+                os.startfile(self.folder_path)
+            except Exception:
+                pass
+
     def _on_item_clicked(self, item):
         state = item.checkState()
         item.setCheckState(Qt.CheckState.Unchecked if state == Qt.CheckState.Checked else Qt.CheckState.Checked)
@@ -831,13 +925,14 @@ class SettingsDialog(QDialog):
             self.setWindowTitle(f"위젯 옵션 일괄 설정 ({self.target_count}개 선택됨)")
         else:
             self.setWindowTitle("위젯 상세 설정")
-        self.setWindowIcon(QIcon())
+        from mywidgetbox_core import render_vector_icon
+        self.setWindowIcon(render_vector_icon("settings", "#528bf8", 32))
         self._title_bar_themed = False
-        self.resize(760, 680)
-        self.setFixedWidth(760)
+        self.resize(580, 660)
+        self.setFixedWidth(580)
         self.setStyleSheet("""
             QDialog#settingsDialog {
-                background-color: #1d2a3d;
+                background-color: #162233;
             }
             QFrame#settingsHeader {
                 background-color: transparent;
@@ -845,56 +940,101 @@ class SettingsDialog(QDialog):
                 border-radius: 0px;
             }
             QLabel#settingsTitle {
-                color: #eef3ff;
-                font-size: 18px;
+                color: #eef4ff;
+                font-size: 17px;
                 font-weight: 700;
             }
             QLabel#settingsSubtitle {
-                color: #c2d1ea;
+                color: #a4bedc;
                 font-size: 12px;
             }
-            QLabel#settingsSectionTitle {
-                color: #a7c1eb;
-                font-size: 13px;
+            QFrame#segmentedBar {
+                background-color: #121c2b;
+                border: 1px solid #283a54;
+                border-radius: 10px;
+            }
+            QPushButton[kind="segmentBtn"] {
+                background-color: transparent;
+                border: 1px solid transparent;
+                border-radius: 7px;
+                color: #8da6c7;
+                font-size: 12px;
                 font-weight: 700;
-                letter-spacing: 0.4px;
+                min-height: 34px;
+                padding: 0 10px;
+            }
+            QPushButton[kind="segmentBtn"]:hover {
+                background-color: #1a2a40;
+                color: #dbe7fa;
+            }
+            QPushButton[kind="segmentBtn"][active="true"] {
+                background-color: #2b446a;
+                color: #ffffff;
+                border: 1px solid #456c9e;
+            }
+            QFrame#settingsCard {
+                background-color: #1d2c42;
+                border: 1px solid #2e4466;
+                border-radius: 12px;
+            }
+            QLabel#settingsSectionTitle {
+                color: #92bbf8;
+                font-size: 12px;
+                font-weight: 700;
+                letter-spacing: 0.3px;
             }
             QFrame#settingsSectionLine {
-                background-color: #3f567a;
+                background-color: #31486b;
                 border: none;
                 min-height: 1px;
                 max-height: 1px;
-            }
-            QFrame#settingsCard {
-                background-color: #23344d;
-                border: 1px solid #3f567a;
-                border-radius: 12px;
-            }
-            QFrame#settingsRightPanel {
-                background-color: transparent;
-                border: none;
             }
             QLabel {
                 color: #e6eefc;
                 font-size: 12px;
             }
             QLabel#pathLabel {
-                color: #d0dcf1;
-                padding: 2px 0 6px 0;
+                color: #d8e6fa;
+                background-color: #162436;
+                border: 1px solid #324a6b;
+                border-radius: 7px;
+                padding: 6px 10px;
+                font-size: 11px;
+                font-weight: 500;
             }
-            QSpinBox, QComboBox {
-                min-height: 34px;
-                color: #edf3ff;
-                background-color: #35507a;
-                border: 1px solid #5977a4;
-                border-radius: 9px;
-                padding: 2px 10px;
+            QLabel#hintCaption {
+                color: #8fa7c7;
+                font-size: 11px;
+                padding: 0 2px;
+            }
+            QFrame#unitInputContainer {
+                min-height: 32px;
+                background-color: #121c2b;
+                border: 1px solid #283a54;
+                border-radius: 8px;
+            }
+            QFrame#unitInputContainer:hover {
+                border-color: #3d587d;
+                background-color: #152438;
+            }
+            QFrame#unitInputContainer:focus-within {
+                border: 1.5px solid #528bf8;
+                background-color: #17283f;
+            }
+            QLabel#unitBadgeLabel {
+                color: #7b96b8;
+                font-size: 11px;
+                font-weight: 700;
+                padding-right: 6px;
+            }
+            QSpinBox {
+                min-height: 30px;
+                color: #ffffff;
+                background-color: transparent;
+                border: none;
+                padding: 2px 6px;
                 font-size: 13px;
                 font-weight: 600;
-            }
-            QSpinBox:focus, QComboBox:focus {
-                border: 1px solid #77a3f2;
-                background-color: #3d5d8e;
             }
             QSpinBox::up-button,
             QSpinBox::down-button {
@@ -910,31 +1050,57 @@ class SettingsDialog(QDialog):
                 image: none;
             }
             QComboBox {
-                padding-right: 18px;
+                min-height: 32px;
+                color: #eaf1fc;
+                background-color: #24364f;
+                border: 1px solid #3d5578;
+                border-radius: 8px;
+                padding: 2px 30px 2px 12px;
+                font-size: 12px;
+                font-weight: 600;
+            }
+            QComboBox:hover {
+                background-color: #2d4361;
+                border-color: #52739e;
+            }
+            QComboBox:focus {
+                border: 1.5px solid #528bf8;
             }
             QComboBox::drop-down {
                 subcontrol-origin: padding;
                 subcontrol-position: top right;
-                width: 18px;
-                border: none;
+                width: 26px;
+                border-left: 1px solid #334866;
                 background: transparent;
             }
+            QComboBox::down-arrow {
+                width: 0;
+                height: 0;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-top: 5px solid #9bb5d8;
+                margin-right: 6px;
+            }
+            QComboBox::down-arrow:hover {
+                border-top-color: #ffffff;
+            }
             QComboBox QAbstractItemView {
-                background-color: #23344d;
+                background-color: #21324a;
                 color: #eef4ff;
-                border: none;
+                border: 1px solid #3d587d;
+                border-radius: 6px;
                 selection-background-color: #3f5e8e;
                 selection-color: #ffffff;
                 outline: 0;
-                font-size: 13px;
+                font-size: 12px;
             }
             QComboBox QAbstractItemView::item {
-                min-height: 30px;
-                padding: 5px 8px;
+                min-height: 28px;
+                padding: 4px 8px;
             }
             QSlider::groove:horizontal {
                 height: 6px;
-                background: #435a7d;
+                background: #395073;
                 border-radius: 3px;
             }
             QSlider::handle:horizontal {
@@ -944,52 +1110,66 @@ class SettingsDialog(QDialog):
                 background: #8eb8ff;
             }
             QPushButton {
-                min-height: 34px;
-                border-radius: 9px;
+                min-height: 32px;
+                border-radius: 8px;
                 font-size: 12px;
                 font-weight: 600;
                 color: #e8efff;
-                background-color: #35507a;
-                border: 1px solid #5977a4;
+                background-color: #2b3e5b;
+                border: 1px solid #48648c;
                 padding: 0 12px;
             }
             QPushButton:hover {
-                background-color: #3f5e8e;
+                background-color: #385075;
+                border-color: #5d7fae;
+                color: #ffffff;
             }
             QPushButton:pressed {
-                background-color: #324f79;
+                background-color: #22334c;
+            }
+            QPushButton:disabled {
+                background-color: #172436;
+                border-color: #24354b;
+                color: #506580;
             }
             QPushButton#primaryBtn {
-                background-color: #4f79de;
-                border: 1px solid #7e9eeb;
+                background-color: #4872d4;
+                border: 1px solid #7397ea;
             }
             QPushButton#primaryBtn:hover {
-                background-color: #5d86e6;
+                background-color: #5882e6;
             }
             QPushButton#masterBtn {
-                background-color: #35507a;
-                border: 1px solid #5977a4;
+                background-color: #2b4061;
+                border: 1px solid #46658f;
                 min-height: 30px;
+                font-size: 11px;
             }
             QPushButton#masterBtn:hover {
-                background-color: #3f5e8e;
+                background-color: #38537d;
             }
             QCheckBox {
-                color: #e6eefc;
+                color: #cddbf0;
                 spacing: 7px;
-                min-height: 28px;
+                min-height: 26px;
+                font-size: 12px;
+                font-weight: 600;
+            }
+            QCheckBox:hover {
+                color: #ffffff;
             }
             QToolButton#shortcutToggle {
                 color: #e8efff;
-                background-color: #35507a;
-                border: 1px solid #5977a4;
-                border-radius: 9px;
-                padding: 6px 12px;
+                background-color: #2b4061;
+                border: 1px solid #46658f;
+                border-radius: 8px;
+                padding: 5px 10px;
                 text-align: left;
                 font-weight: 600;
+                font-size: 11px;
             }
             QToolButton#shortcutToggle:hover {
-                background-color: #3f5e8e;
+                background-color: #38537d;
             }
             QToolButton#folderHelpBtn {
                 color: #e8efff;
@@ -998,39 +1178,35 @@ class SettingsDialog(QDialog):
                 padding: 0px;
                 font-weight: 700;
             }
-            QToolButton#folderHelpBtn:hover {
-                background: transparent;
-            }
-            QToolButton#folderHelpBtn:checked {
-                background: transparent;
-            }
             QFrame#shortcutPanel {
-                background-color: #233854;
-                border: 1px solid #5879a9;
+                background-color: #1f3047;
+                border: 1px solid #4a6891;
                 border-radius: 10px;
             }
             QFrame#folderHelpPanel {
-                background-color: #20324b;
-                border: 1px solid #4f6e97;
+                background-color: #1f3047;
+                border: 1px solid #4a6891;
                 border-radius: 10px;
             }
             QLabel#shortcutText {
                 color: #c6d6f3;
-                font-size: 13px;
+                font-size: 12px;
                 line-height: 1.4;
             }
-            QPushButton#fitAspectBtn {
-                color: #d8e8ff;
-                background-color: #2b456c;
-                border: 1px solid #486e9e;
-                border-radius: 6px;
-                min-height: 26px;
-                padding: 2px 10px;
-                font-size: 11px;
+            QPushButton#fitAspectBtn, QPushButton#editSlideListBtn {
+                color: #dbe7fa;
+                background-color: #243852;
+                border: 1px solid #3c587e;
+                border-radius: 8px;
+                min-height: 32px;
+                padding: 0 10px;
+                font-size: 12px;
                 font-weight: 600;
             }
-            QPushButton#fitAspectBtn:hover {
-                background-color: #385a8c;
+            QPushButton#fitAspectBtn:hover, QPushButton#editSlideListBtn:hover {
+                background-color: #35527d;
+                border-color: #5d84b8;
+                color: #ffffff;
             }
         """)
 
@@ -1058,37 +1234,76 @@ class SettingsDialog(QDialog):
         header_layout.addWidget(subtitle_label)
         root.addWidget(header)
 
-        card = QFrame()
-        card.setObjectName("settingsCard")
-        root.addWidget(card, 1)
-        card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(12, 12, 12, 12)
-        card_layout.setSpacing(10)
+        # Modern Segmented Tab Bar (1:1:1 꽉 찬 세그먼트 컨트롤)
+        self.segmented_bar = QFrame()
+        self.segmented_bar.setObjectName("segmentedBar")
+        seg_layout = QHBoxLayout(self.segmented_bar)
+        seg_layout.setContentsMargins(4, 4, 4, 4)
+        seg_layout.setSpacing(4)
 
-        content_row = QHBoxLayout()
-        content_row.setContentsMargins(0, 0, 0, 0)
-        content_row.setSpacing(24)
-        card_layout.addLayout(content_row, 1)
+        from mywidgetbox_core import render_vector_icon
 
-        left_panel = QWidget(card)
-        left_form = QFormLayout(left_panel)
-        left_form.setContentsMargins(0, 0, 0, 0)
-        left_form.setHorizontalSpacing(12)
-        left_form.setVerticalSpacing(8)
-        left_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        self._seg_buttons = []
+        tab_infos = [
+            (" 미디어 & 재생", "media", 0),
+            (" 위젯 & 외형", "widget", 1),
+            (" 연동 & 시스템", "system", 2),
+        ]
 
-        right_panel = QFrame(card)
-        right_panel.setObjectName("settingsRightPanel")
-        right_form = QFormLayout(right_panel)
-        right_form.setContentsMargins(0, 0, 0, 0)
-        right_form.setHorizontalSpacing(12)
-        right_form.setVerticalSpacing(8)
-        right_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
-        self._left_form = left_form
-        self._right_form = right_form
+        self.stack = QStackedWidget()
+        self.stack.setObjectName("settingsStack")
 
-        content_row.addWidget(left_panel, 5)
-        content_row.addWidget(right_panel, 5)
+        for label_text, icon_name, idx in tab_infos:
+            btn = QPushButton(label_text)
+            btn.setProperty("kind", "segmentBtn")
+            btn.setProperty("active", "true" if idx == 0 else "false")
+            btn.setIcon(render_vector_icon(icon_name, "#8da6c7" if idx != 0 else "#ffffff", 16))
+            btn.setIconSize(QSize(16, 16))
+            btn.clicked.connect(lambda _, i=idx: self._switch_tab(i))
+            seg_layout.addWidget(btn, 1)
+            self._seg_buttons.append(btn)
+
+        root.addWidget(self.segmented_bar, 0)
+
+        # Card container for stacked pages
+        stack_card = QFrame()
+        stack_card.setObjectName("settingsCard")
+        stack_card_layout = QVBoxLayout(stack_card)
+        stack_card_layout.setContentsMargins(12, 12, 12, 12)
+        stack_card_layout.setSpacing(0)
+        stack_card_layout.addWidget(self.stack, 1)
+        root.addWidget(stack_card, 1)
+
+        tab_media = QWidget()
+        media_form = QFormLayout(tab_media)
+        media_form.setContentsMargins(4, 4, 4, 4)
+        media_form.setHorizontalSpacing(14)
+        media_form.setVerticalSpacing(10)
+        media_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+
+        tab_widget = QWidget()
+        widget_form = QFormLayout(tab_widget)
+        widget_form.setContentsMargins(4, 4, 4, 4)
+        widget_form.setHorizontalSpacing(14)
+        widget_form.setVerticalSpacing(10)
+        widget_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+
+        tab_system = QWidget()
+        system_form = QFormLayout(tab_system)
+        system_form.setContentsMargins(4, 4, 4, 4)
+        system_form.setHorizontalSpacing(14)
+        system_form.setVerticalSpacing(10)
+        system_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+
+        self.stack.addWidget(tab_media)
+        self.stack.addWidget(tab_widget)
+        self.stack.addWidget(tab_system)
+
+        self._left_form = media_form
+        self._right_form = widget_form
+        self._media_form = media_form
+        self._widget_form = widget_form
+        self._system_form = system_form
 
         s = settings_data if settings_data else {}
         
@@ -1109,8 +1324,20 @@ class SettingsDialog(QDialog):
         self.folder_label.setWordWrap(True)
         self.folder_label.setToolTip(self.folder_path if self.folder_path else "")
         self.folder_hint_label = None
+
         self.folder_btn = QPushButton("폴더 선택")
+        self.folder_btn.setIcon(render_vector_icon("folder", "#d8e7fa", 16))
+        self.folder_btn.setIconSize(QSize(16, 16))
+
         self.file_btn = QPushButton("파일 선택")
+        self.file_btn.setIcon(render_vector_icon("file", "#d8e7fa", 16))
+        self.file_btn.setIconSize(QSize(16, 16))
+
+        self.edit_slide_list_btn = QPushButton("목록 편집")
+        self.edit_slide_list_btn.setObjectName("editSlideListBtn")
+        self.edit_slide_list_btn.setIcon(render_vector_icon("list", "#d8e7fa", 16))
+        self.edit_slide_list_btn.setIconSize(QSize(16, 16))
+
         self.folder_help_btn = QToolButton()
         self.folder_help_btn.setObjectName("folderHelpBtn")
         self.folder_help_btn.setText("")
@@ -1133,12 +1360,14 @@ class SettingsDialog(QDialog):
             self.folder_help_btn.setIconSize(QSize(28, 28))
             self.folder_help_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
             self.folder_help_btn.setFixedSize(36, 36)
+
         self._folder_btn_row_widget = QWidget()
         folder_btn_row = QHBoxLayout(self._folder_btn_row_widget)
         folder_btn_row.setContentsMargins(0, 0, 0, 0)
         folder_btn_row.setSpacing(6)
-        folder_btn_row.addWidget(self.folder_btn, 1)
-        folder_btn_row.addWidget(self.file_btn, 1)
+        folder_btn_row.addWidget(self.folder_btn, 3)
+        folder_btn_row.addWidget(self.file_btn, 3)
+        folder_btn_row.addWidget(self.edit_slide_list_btn, 4)
         folder_btn_row.addWidget(self.folder_help_btn, 0)
 
         self.folder_help_panel = QFrame(self)
@@ -1207,18 +1436,38 @@ class SettingsDialog(QDialog):
         focus_bind_row.addWidget(self.focus_bind_clear_btn)
         focus_bind_row.addStretch(1)
         
+        def _create_unit_input(spinbox, unit_text, width=140):
+            container = QFrame()
+            container.setObjectName("unitInputContainer")
+            container.setFixedWidth(int(width))
+            container_layout = QHBoxLayout(container)
+            container_layout.setContentsMargins(8, 0, 8, 0)
+            container_layout.setSpacing(4)
+            spinbox.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+            spinbox.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            spinbox.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            unit_label = QLabel(unit_text)
+            unit_label.setObjectName("unitBadgeLabel")
+            container_layout.addWidget(spinbox, 1)
+            container_layout.addWidget(unit_label, 0)
+            return container
+
         init_w = int(s.get('w', 200))
         init_h = int(s.get('h', 200))
         self.width_input = QSpinBox(); self.width_input.setRange(50, 5000)
         self.width_input.setValue(init_w)
+        self.width_input_box = _create_unit_input(self.width_input, "px", width=140)
+
         self.height_input = QSpinBox(); self.height_input.setRange(50, 5000)
         self.height_input.setValue(init_h)
+        self.height_input_box = _create_unit_input(self.height_input, "px", width=140)
+
         self.sec_input = QSpinBox(); self.sec_input.setRange(1, 3600)
         self.sec_input.setValue(s.get('interval', 5))
+        self.sec_input_box = _create_unit_input(self.sec_input, "초", width=140)
 
         self.keep_aspect_ratio_cb = QCheckBox("가로세로 비율 고정")
         self.keep_aspect_ratio_cb.setChecked(bool(s.get('keep_aspect_ratio', True)))
-        self.keep_aspect_ratio_cb.setStyleSheet("color: #b7cceb; font-size: 12px; font-weight: 600;")
         self.keep_aspect_ratio_cb.setToolTip("너비나 높이 변경 시 가로세로 비율을 유지하여 자동으로 계산합니다.")
 
         self._syncing_aspect_size = False
@@ -1252,8 +1501,10 @@ class SettingsDialog(QDialog):
                 h = max(1, self.height_input.value())
                 self._current_aspect_ratio = float(w) / float(h)
 
-        self.fit_aspect_btn = QPushButton("📐 원본 비율로 맞춤")
+        self.fit_aspect_btn = QPushButton("원본 비율 맞춤")
         self.fit_aspect_btn.setObjectName("fitAspectBtn")
+        self.fit_aspect_btn.setIcon(render_vector_icon("ratio", "#d8e7fa", 16))
+        self.fit_aspect_btn.setIconSize(QSize(16, 16))
         self.fit_aspect_btn.setToolTip("현재 선택된 이미지의 실제 원본 해상도(가로세로 비율)에 맞춰 높이를 자동 조절합니다.")
         self.fit_aspect_btn.clicked.connect(self._on_fit_aspect_clicked)
 
@@ -1275,12 +1526,17 @@ class SettingsDialog(QDialog):
         self.opacity_spinbox = QSpinBox()
         self.opacity_spinbox.setRange(10, 100)
         self.opacity_spinbox.setValue(curr_op)
+        self.opacity_spinbox_box = _create_unit_input(self.opacity_spinbox, "%", width=96)
         self.opacity_slider.setToolTip("100% = 완전 표시, 10% = 거의 투명")
         self.opacity_spinbox.setToolTip("100% = 완전 표시, 10% = 거의 투명")
-        for _sb in (self.width_input, self.height_input, self.sec_input, self.opacity_spinbox):
-            _sb.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
-            _sb.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            _sb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        self.opacity_row_widget = QWidget()
+        opacity_row = QHBoxLayout(self.opacity_row_widget)
+        opacity_row.setContentsMargins(0, 0, 0, 0)
+        opacity_row.setSpacing(10)
+        opacity_row.addWidget(self.opacity_spinbox_box, 0)
+        opacity_row.addWidget(self.opacity_slider, 1)
+
         self.opacity_slider.valueChanged.connect(self.opacity_spinbox.setValue)
         self.opacity_spinbox.valueChanged.connect(self.opacity_slider.setValue)
         
@@ -1336,10 +1592,10 @@ class SettingsDialog(QDialog):
         self.video_transition_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.video_transition_combo.setMinimumHeight(36)
         self.video_transition_hint = QLabel(
-            "싱글: 가볍지만 영상 전환 시 깜빡일 수 있습니다.\n"
-            "듀얼: 영상→영상 전환이 매끄럽지만 메모리 사용량이 증가합니다."
+            "• 싱글: 가볍지만 영상 전환 시 깜빡임 가능\n"
+            "• 듀얼: 영상 간 전환이 매끄러움 (메모리 사용)"
         )
-        self.video_transition_hint.setObjectName("pathLabel")
+        self.video_transition_hint.setObjectName("hintCaption")
         self.video_transition_hint.setWordWrap(True)
         self.video_decode_combo = DownwardComboBox()
         self.video_decode_combo.addItems([
@@ -1358,9 +1614,9 @@ class SettingsDialog(QDialog):
         self.video_decode_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.video_decode_combo.setMinimumHeight(36)
         self.video_decode_hint = QLabel(
-            "재생 시 원본 대신 저해상도 프록시를 자동 생성/사용해 GPU/메모리 사용량을 줄입니다."
+            "재생 시 저해상도 프록시를 생성하여 GPU/메모리 부담을 줄입니다."
         )
-        self.video_decode_hint.setObjectName("pathLabel")
+        self.video_decode_hint.setObjectName("hintCaption")
         self.video_decode_hint.setWordWrap(True)
         self.video_cache_usage_label = QLabel("캐시 사용량: 계산 중...")
         self.video_cache_usage_label.setObjectName("pathLabel")
@@ -1377,18 +1633,16 @@ class SettingsDialog(QDialog):
         self.video_dual_fade_ms_spin = QSpinBox()
         self.video_dual_fade_ms_spin.setRange(0, 300)
         self.video_dual_fade_ms_spin.setSingleStep(10)
-        self.video_dual_fade_ms_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
-        self.video_dual_fade_ms_spin.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.video_dual_fade_ms_spin.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.video_dual_fade_ms_spin.setValue(
             DesktopWidget.coerce_video_dual_fade_ms(
                 s.get('video_dual_fade_ms', DesktopWidget.VIDEO_DUAL_FADE_DEFAULT_MS)
             )
         )
+        self.video_dual_fade_box = _create_unit_input(self.video_dual_fade_ms_spin, "ms")
         self.video_dual_fade_hint = QLabel(
-            "듀얼 전환 시 짧은 페이드 길이입니다. 값이 클수록 더 부드럽게 보일 수 있습니다."
+            "듀얼 전환 시 페이드 시간(ms)입니다."
         )
-        self.video_dual_fade_hint.setObjectName("pathLabel")
+        self.video_dual_fade_hint.setObjectName("hintCaption")
         self.video_dual_fade_hint.setWordWrap(True)
 
         self.layer_combo = DownwardComboBox()
@@ -1460,7 +1714,7 @@ class SettingsDialog(QDialog):
         def _add_section_header(form_layout, title_text):
             row_widget = QWidget()
             row_layout = QHBoxLayout(row_widget)
-            row_layout.setContentsMargins(0, 8, 0, 2)
+            row_layout.setContentsMargins(0, 4, 0, 2)
             row_layout.setSpacing(8)
             title = QLabel(str(title_text))
             title.setObjectName("settingsSectionTitle")
@@ -1472,60 +1726,68 @@ class SettingsDialog(QDialog):
             row_layout.addWidget(line, 1)
             form_layout.addRow(row_widget)
 
-        _add_section_header(left_form, "실행 / 연동")
-        left_form.addRow("미디어 선택:", self._folder_btn_row_widget)
-        left_form.addRow("", self.folder_label)
+        # Tab 1: 📁 미디어 & 재생
+        _add_section_header(media_form, "미디어 소스")
+        media_form.addRow("미디어 경로:", self.folder_label)
+        media_form.addRow("미디어 선택:", self._folder_btn_row_widget)
         if self.folder_hint_label is not None:
-            left_form.addRow("", self.folder_hint_label)
-        left_form.addRow("실행 파일:", self.exec_btn)
-        left_form.addRow("", self.exec_label)
-        left_form.addRow("포커싱 대상:", self.focus_binding_label)
-        left_form.addRow("", self._focus_bind_row_widget)
+            media_form.addRow("", self.folder_hint_label)
 
-        _add_section_header(left_form, "위젯")
-        left_form.addRow("너비(px):", self.width_input)
-        left_form.addRow("높이(px):", self.height_input)
-        left_form.addRow("", self.ratio_row_widget)
-        left_form.addRow("불투명도(%):", self.opacity_spinbox)
-        left_form.addRow("", self.opacity_slider)
-        left_form.addRow("레이어:", self.layer_combo)
-        left_form.addRow("클릭 잠금:", self.lock_cb)
+        _add_section_header(media_form, "재생 및 비율")
+        media_form.addRow("전환 간격:", self.sec_input_box)
+        media_form.addRow("미디어 맞춤:", self.media_mode_combo)
+        media_form.addRow("비율 자동 맞춤:", self.slide_auto_aspect_cb)
 
-        _add_section_header(left_form, "외형")
-        left_form.addRow("배경색:", self.bg_combo)
-        left_form.addRow("모서리:", self.corner_combo)
+        _add_section_header(media_form, "동영상 설정")
+        media_form.addRow("영상 전환:", self.video_transition_combo)
+        media_form.addRow("", self.video_transition_hint)
+        media_form.addRow("듀얼 페이드:", self.video_dual_fade_box)
+        media_form.addRow("", self.video_dual_fade_hint)
+        media_form.addRow("영상 디코드:", self.video_decode_combo)
+        media_form.addRow("", self.video_decode_hint)
+        self._video_dual_fade_label = media_form.labelForField(self.video_dual_fade_box)
+        self._video_dual_fade_hint_label = media_form.labelForField(self.video_dual_fade_hint)
 
-        _add_section_header(right_form, "재생 / 전환")
-        right_form.addRow("전환 간격(초):", self.sec_input)
-        right_form.addRow("미디어 맞춤:", self.media_mode_combo)
-        right_form.addRow("비율 자동 맞춤:", self.slide_auto_aspect_cb)
-        right_form.addRow("영상 전환:", self.video_transition_combo)
-        right_form.addRow("", self.video_transition_hint)
-        right_form.addRow("듀얼 페이드:", self.video_dual_fade_ms_spin)
-        right_form.addRow("", self.video_dual_fade_hint)
+        # Tab 2: 📐 위젯 & 외형
+        _add_section_header(widget_form, "크기 및 종횡비")
+        widget_form.addRow("너비:", self.width_input_box)
+        widget_form.addRow("높이:", self.height_input_box)
+        widget_form.addRow("", self.ratio_row_widget)
 
-        _add_section_header(right_form, "영상 품질 / 캐시")
-        right_form.addRow("영상 디코드:", self.video_decode_combo)
-        right_form.addRow("", self.video_decode_hint)
-        right_form.addRow("영상 캐시:", self.video_cache_usage_label)
-        right_form.addRow("", self.video_cache_action_row_widget)
+        _add_section_header(widget_form, "표시 및 레이어")
+        widget_form.addRow("불투명도:", self.opacity_row_widget)
+        widget_form.addRow("레이어:", self.layer_combo)
+        widget_form.addRow("클릭 잠금:", self.lock_cb)
 
-        _add_section_header(right_form, "오디오 / 성능")
-        right_form.addRow("음소거:", self.mute_checkbox)
-        right_form.addRow("성능 보호:", self.gpu_guard_checkbox)
-        self._video_dual_fade_label = right_form.labelForField(self.video_dual_fade_ms_spin)
-        self._video_dual_fade_hint_label = right_form.labelForField(self.video_dual_fade_hint)
+        _add_section_header(widget_form, "테마 스타일")
+        widget_form.addRow("배경색:", self.bg_combo)
+        widget_form.addRow("모서리:", self.corner_combo)
+
+        # Tab 3: ⚡ 연동 & 시스템
+        _add_section_header(system_form, "프로그램 실행 연동")
+        system_form.addRow("실행 파일:", self.exec_btn)
+        system_form.addRow("실행 경로:", self.exec_label)
+        system_form.addRow("포커싱 대상:", self.focus_binding_label)
+        system_form.addRow("", self._focus_bind_row_widget)
+
+        _add_section_header(system_form, "오디오 및 성능")
+        system_form.addRow("음소거:", self.mute_checkbox)
+        system_form.addRow("성능 보호:", self.gpu_guard_checkbox)
+
+        _add_section_header(system_form, "저장 공간 관리")
+        system_form.addRow("영상 캐시:", self.video_cache_usage_label)
+        system_form.addRow("", self.video_cache_action_row_widget)
         
         btns = QHBoxLayout(); apply = QPushButton("저장"); cancel = QPushButton("취소")
-        btns.setSpacing(12)
+        btns.setSpacing(10)
         btns.setContentsMargins(0, 0, 0, 0)
         apply.setObjectName("primaryBtn")
-        apply.setFixedSize(86, 30)
-        cancel.setFixedSize(86, 30)
-        self.master_btn.setFixedSize(146, 30)
+        apply.setFixedSize(86, 32)
+        cancel.setFixedSize(86, 32)
+        self.master_btn.setFixedSize(146, 32)
 
         action_row = QHBoxLayout()
-        action_row.setContentsMargins(0, 0, 0, 0)
+        action_row.setContentsMargins(4, 6, 4, 2)
         action_row.setSpacing(10)
         action_row.addWidget(self.shortcut_toggle, 0, Qt.AlignmentFlag.AlignLeft)
         action_row.addWidget(self.master_btn, 0, Qt.AlignmentFlag.AlignLeft)
@@ -1533,10 +1795,11 @@ class SettingsDialog(QDialog):
         btns.addWidget(cancel)
         btns.addWidget(apply)
         action_row.addLayout(btns)
-        card_layout.addLayout(action_row)
+        root.addLayout(action_row)
         
         self.folder_btn.clicked.connect(self.select_folder)
         self.file_btn.clicked.connect(self.select_file)
+        self.edit_slide_list_btn.clicked.connect(self._on_edit_slide_list_clicked)
         self.folder_help_btn.toggled.connect(self._set_folder_help_panel_visible)
         self.exec_btn.clicked.connect(self.select_exec)
         self.focus_bind_btn.clicked.connect(self._start_focus_capture)
@@ -1548,6 +1811,7 @@ class SettingsDialog(QDialog):
 
         if self.bulk_mode:
             self._folder_btn_row_widget.setEnabled(False)
+            self.edit_slide_list_btn.setEnabled(False)
             self.exec_btn.setEnabled(False)
             self._focus_bind_row_widget.setEnabled(False)
             self.folder_label.setText("일괄 설정 모드에서는 미디어/실행파일 설정이 제외됩니다.")
@@ -1557,10 +1821,35 @@ class SettingsDialog(QDialog):
             self.master_btn.setVisible(False)
 
         self._set_folder_help_panel_visible(False)
+        self._sync_edit_slide_btn_state()
         QTimer.singleShot(0, self._apply_title_bar_theme)
         QTimer.singleShot(0, self._sync_video_transition_dependent_ui)
         QTimer.singleShot(0, self._refresh_video_proxy_cache_usage)
         QTimer.singleShot(0, self._sync_dialog_height)
+
+    def _sync_edit_slide_btn_state(self):
+        if self.bulk_mode:
+            self.edit_slide_list_btn.setEnabled(False)
+            return
+        has_folder = bool(self.folder_path and os.path.isdir(self.folder_path))
+        self.edit_slide_list_btn.setEnabled(has_folder)
+        if has_folder:
+            self.edit_slide_list_btn.setToolTip("슬라이드에 포함/제외할 파일을 선택합니다.")
+        else:
+            self.edit_slide_list_btn.setToolTip("폴더를 선택하면 슬라이드 목록을 편집할 수 있습니다.")
+
+    def _switch_tab(self, index):
+        idx = max(0, min(int(index), len(self._seg_buttons) - 1))
+        self.stack.setCurrentIndex(idx)
+        from mywidgetbox_core import render_vector_icon
+        icons = ["media", "widget", "system"]
+        for i, btn in enumerate(self._seg_buttons):
+            is_active = (i == idx)
+            btn.setProperty("active", "true" if is_active else "false")
+            if i < len(icons):
+                btn.setIcon(render_vector_icon(icons[i], "#ffffff" if is_active else "#8da6c7", 16))
+            btn.style().unpolish(btn)
+            btn.style().polish(btn)
 
     def _set_shortcut_panel_visible(self, expanded):
         expanded = bool(expanded)
@@ -1657,10 +1946,9 @@ class SettingsDialog(QDialog):
             int(self.video_transition_combo.currentIndex())
             == int(DesktopWidget.VIDEO_TRANSITION_DUAL)
         )
-        form_layout = getattr(self, "_right_form", None)
-        self._set_form_row_visible(form_layout, self.video_dual_fade_ms_spin, bool(is_dual))
+        form_layout = getattr(self, "_media_form", None)
+        self._set_form_row_visible(form_layout, self.video_dual_fade_box, bool(is_dual))
         self._set_form_row_visible(form_layout, self.video_dual_fade_hint, bool(is_dual))
-        # Defer resize until combo popup settles to reduce repaint artifacts.
         QTimer.singleShot(0, self._sync_dialog_height)
 
     @staticmethod
@@ -1945,22 +2233,82 @@ class SettingsDialog(QDialog):
             chosen_paths = list(slide_dialog.result_paths or [])
             if len(chosen_paths) == len(media_paths):
                 self.folder_item_paths = []
-                label_text = folder_path
             else:
                 self.folder_item_paths = chosen_paths
-                if len(chosen_paths) == 1:
-                    label_text = f"{folder_path} ({os.path.basename(chosen_paths[0])})"
-                else:
-                    label_text = f"{folder_path} (슬라이드 {len(chosen_paths)}개)"
-            self.folder_label.setText(label_text)
-            self.folder_label.setToolTip(folder_path)
+            self._update_folder_label_text()
             return
 
         self.pending_spread_config = None
         self.folder_path = folder_path
         self.folder_item_paths = []
-        self.folder_label.setText(folder_path)
-        self.folder_label.setToolTip(folder_path)
+        self._update_folder_label_text()
+
+    def _update_folder_label_text(self):
+        self._sync_edit_slide_btn_state()
+        if not self.folder_path:
+            self.folder_label.setText("미지정")
+            self.folder_label.setToolTip("")
+            return
+
+        if self.pending_spread_config:
+            count = len(self.pending_spread_config.get("item_paths", []) or [])
+            self.folder_label.setText(f"{self.folder_path} (스프레드 {count}개)")
+        elif self.folder_item_paths:
+            count = len(self.folder_item_paths)
+            if count == 1:
+                self.folder_label.setText(f"{self.folder_path} ({os.path.basename(self.folder_item_paths[0])})")
+            else:
+                self.folder_label.setText(f"{self.folder_path} (슬라이드 {count}개)")
+        else:
+            self.folder_label.setText(self.folder_path)
+        self.folder_label.setToolTip(self.folder_path)
+
+    def _on_edit_slide_list_clicked(self):
+        target_folder = self.folder_path
+        if not target_folder or not os.path.isdir(target_folder):
+            if self.folder_item_paths:
+                for p in self.folder_item_paths:
+                    if p and os.path.isfile(p):
+                        target_folder = os.path.dirname(os.path.abspath(p))
+                        break
+        if not target_folder or not os.path.isdir(target_folder):
+            QMessageBox.information(
+                self,
+                "폴더 없음",
+                "슬라이드 목록을 수정할 폴더가 설정되지 않았습니다.\n먼저 '폴더 선택'으로 폴더를 지정해주세요."
+            )
+            return
+
+        media_paths = self._scan_media_paths_for_folder(target_folder)
+        if not media_paths:
+            QMessageBox.information(
+                self,
+                "미디어 없음",
+                "해당 폴더에 지원되는 이미지, GIF, 영상 미디어 파일이 없습니다."
+            )
+            return
+
+        current_selected = list(self.folder_item_paths) if self.folder_item_paths else list(media_paths)
+        slide_dialog = FolderSlideDialog(
+            self,
+            target_folder,
+            media_paths,
+            pre_selected_paths=current_selected
+        )
+        if slide_dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        chosen_paths = list(slide_dialog.result_paths or [])
+        if not chosen_paths:
+            return
+
+        self.pending_spread_config = None
+        self.folder_path = target_folder
+        if len(chosen_paths) == len(media_paths):
+            self.folder_item_paths = []
+        else:
+            self.folder_item_paths = chosen_paths
+        self._update_folder_label_text()
 
     def _apply_media_aspect_to_inputs(self, media_path):
         if not media_path or not os.path.isfile(media_path):

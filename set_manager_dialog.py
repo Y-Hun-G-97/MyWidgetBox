@@ -16,13 +16,14 @@ class SetManagerDialog(QDialog):
         self._title_bar_themed = False
         self.setObjectName("setManagerDialog")
         self.setWindowTitle("세트 관리")
-        self.setWindowIcon(QIcon())
+        from mywidgetbox_core import render_vector_icon
+        self.setWindowIcon(render_vector_icon("widget", "#528bf8", 32))
         self.setFixedSize(360, 198)
         self.setStyleSheet("""
-            QDialog#setManagerDialog { background-color: #1f2f46; }
+            QDialog#setManagerDialog { background-color: #162233; }
             QFrame#setCard {
-                background-color: #23344d;
-                border: 1px solid #3f567a;
+                background-color: #1d2c42;
+                border: 1px solid #2e4466;
                 border-radius: 12px;
             }
             QLabel#setTitle {
@@ -97,6 +98,10 @@ class SetManagerDialog(QDialog):
         self.copy_btn.clicked.connect(self._copy_set)
         self.delete_btn.clicked.connect(self._delete_set)
         close_btn.clicked.connect(self.accept)
+
+        from PyQt6.QtCore import QTimer
+        from mywidgetbox_core import apply_windows_dark_title_bar
+        QTimer.singleShot(0, lambda: apply_windows_dark_title_bar(self))
 
         self._refresh_info()
 

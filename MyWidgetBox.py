@@ -32,6 +32,9 @@ from mywidgetbox_core import (
     _get_win32ui,
     calc_smart_aspect_size,
     get_media_native_size,
+    apply_windows_dark_title_bar,
+    render_vector_icon,
+    ask_dark_confirm,
 )
 from desktop_icons import (
     DesktopIconCloneOverlay,
@@ -318,6 +321,8 @@ class DesktopWidget(QMainWindow):
         self.setAttribute(Qt.WidgetAttribute.WA_NativeWindow) 
         self.keep_aspect_ratio = _as_bool(self.settings.value("keep_aspect_ratio", True), True)
         self.auto_fit_slide_media = _as_bool(self.settings.value("auto_fit_slide_media", False), False)
+        self.base_slide_w = int(self.settings.value("w", 200))
+        self.base_slide_h = int(self.settings.value("h", 200))
 
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
@@ -5511,10 +5516,14 @@ class MasterController(QMainWindow):
         self.setWindowTitle("위젯 컨트롤러")
         self._fast_startup_mode = bool(self._fast_startup_enabled())
         self.app_icon = self._resolve_app_icon()
-
-        self.setWindowIcon(QIcon())
+        from mywidgetbox_core import apply_windows_dark_title_bar, render_vector_icon
+        if self.app_icon and not self.app_icon.isNull():
+            self.setWindowIcon(self.app_icon)
+        else:
+            self.setWindowIcon(render_vector_icon("widget", "#528bf8", 32))
         self.setFixedSize(476, 680)
         self.setObjectName("masterWindow")
+        QTimer.singleShot(0, lambda: apply_windows_dark_title_bar(self))
         self.master_settings = QSettings("MyHomeApp", "MasterV3")
         try:
             master_sync_ms = int(os.environ.get("MYCANVAS_MASTER_SYNC_MS", "650") or "650")
@@ -6091,26 +6100,36 @@ class MasterController(QMainWindow):
         bulk_toolbar.setContentsMargins(0, 0, 0, 2)
         bulk_toolbar.setSpacing(4)
 
-        self.bulk_run_btn = QPushButton("▶ 실행")
+        from mywidgetbox_core import render_vector_icon
+
+        self.bulk_run_btn = QPushButton("실행")
         self.bulk_run_btn.setObjectName("bulkRunBtn")
+        self.bulk_run_btn.setIcon(render_vector_icon("run", "#58c796", 13))
+        self.bulk_run_btn.setIconSize(QSize(13, 13))
         self.bulk_run_btn.setToolTip("선택한 위젯들을 일괄 실행합니다")
         self.bulk_run_btn.clicked.connect(self.bulk_run_profiles)
         self.bulk_run_btn.setEnabled(False)
 
-        self.bulk_stop_btn = QPushButton("⏹ 정지")
+        self.bulk_stop_btn = QPushButton("정지")
         self.bulk_stop_btn.setObjectName("bulkStopBtn")
+        self.bulk_stop_btn.setIcon(render_vector_icon("stop", "#cddbf0", 13))
+        self.bulk_stop_btn.setIconSize(QSize(13, 13))
         self.bulk_stop_btn.setToolTip("선택한 위젯들을 일괄 정지합니다")
         self.bulk_stop_btn.clicked.connect(self.bulk_stop_profiles)
         self.bulk_stop_btn.setEnabled(False)
 
-        self.bulk_settings_btn = QPushButton("⚙ 설정")
+        self.bulk_settings_btn = QPushButton("설정")
         self.bulk_settings_btn.setObjectName("bulkActionBtn")
+        self.bulk_settings_btn.setIcon(render_vector_icon("settings", "#cddbf0", 13))
+        self.bulk_settings_btn.setIconSize(QSize(13, 13))
         self.bulk_settings_btn.setToolTip("선택한 위젯들의 옵션을 일괄 변경합니다 (실행/연동 제외)")
         self.bulk_settings_btn.clicked.connect(self.open_bulk_settings)
         self.bulk_settings_btn.setEnabled(False)
 
-        self.bulk_delete_btn = QPushButton("🗑 삭제")
+        self.bulk_delete_btn = QPushButton("삭제")
         self.bulk_delete_btn.setObjectName("bulkDeleteBtn")
+        self.bulk_delete_btn.setIcon(render_vector_icon("trash", "#f87171", 13))
+        self.bulk_delete_btn.setIconSize(QSize(13, 13))
         self.bulk_delete_btn.setToolTip("선택한 위젯들을 일괄 삭제합니다")
         self.bulk_delete_btn.clicked.connect(self.delete_checked_profiles)
         self.bulk_delete_btn.setEnabled(False)
@@ -6783,86 +6802,93 @@ class MasterController(QMainWindow):
     def _themed_input_dialog_style():
         return """
             QDialog {
-                background-color: #23344d;
+                background-color: #162233;
             }
             QLabel {
                 color: #e6eefc;
                 font-size: 12px;
+                font-weight: 600;
             }
             QLineEdit {
-                min-height: 30px;
-                color: #edf3ff;
-                background-color: #1a2740;
-                border: 1px solid #4a6288;
+                min-height: 32px;
+                color: #ffffff;
+                background-color: #121c2b;
+                border: 1px solid #283a54;
                 border-radius: 8px;
-                padding: 2px 8px;
+                padding: 2px 10px;
+                font-size: 13px;
+                font-weight: 600;
             }
             QLineEdit:focus {
-                border: 1px solid #77a3f2;
+                border: 1.5px solid #528bf8;
+                background-color: #17283f;
             }
             QComboBox {
                 min-height: 32px;
-                color: #edf3ff;
-                background-color: #1a2740;
-                border: 1px solid #4a6288;
+                color: #eaf1fc;
+                background-color: #24364f;
+                border: 1px solid #3d5578;
                 border-radius: 8px;
-                padding: 2px 8px;
+                padding: 2px 28px 2px 10px;
+                font-size: 12px;
+                font-weight: 600;
             }
-            QComboBox::drop-down {
-                subcontrol-origin: padding;
-                subcontrol-position: top right;
-                width: 0px;
-                border: none;
-                background: transparent;
+            QComboBox:hover {
+                background-color: #2d4361;
             }
-            QComboBox::down-arrow {
-                image: none;
-                width: 0px;
-                height: 0px;
-                margin: 0px;
+            QComboBox:focus {
+                border: 1.5px solid #528bf8;
             }
             QComboBox QAbstractItemView {
-                background-color: #23344d;
+                background-color: #21324a;
                 color: #eef4ff;
-                border: none;
+                border: 1px solid #3d587d;
+                border-radius: 6px;
                 selection-background-color: #3f5e8e;
                 selection-color: #ffffff;
                 outline: 0;
-                font-size: 13px;
+                font-size: 12px;
             }
             QPushButton {
-                min-height: 30px;
+                min-height: 32px;
                 border-radius: 8px;
-                padding: 0 12px;
+                padding: 0 14px;
                 color: #e8efff;
-                background-color: #35507a;
-                border: 1px solid #5977a4;
+                background-color: #2b3e5b;
+                border: 1px solid #48648c;
                 font-weight: 600;
+                font-size: 12px;
             }
             QPushButton:hover {
-                background-color: #3f5e8e;
+                background-color: #385075;
+                border-color: #5d7fae;
+                color: #ffffff;
             }
         """
 
     def _prompt_text_dialog(self, title, label, default_text=""):
+        from mywidgetbox_core import apply_windows_dark_title_bar, render_vector_icon
         dialog = QInputDialog(self)
         dialog.setWindowTitle(str(title))
-        dialog.setMinimumSize(250, 190)
-        dialog.resize(250, 190)
+        dialog.setWindowIcon(render_vector_icon("widget", "#528bf8", 32))
+        dialog.setMinimumSize(280, 190)
+        dialog.resize(280, 190)
         dialog.setInputMode(QInputDialog.InputMode.TextInput)
         dialog.setLabelText(str(label))
         dialog.setTextValue(str(default_text))
         dialog.setOkButtonText("확인")
         dialog.setCancelButtonText("취소")
         dialog.setStyleSheet(self._themed_input_dialog_style())
-        QTimer.singleShot(0, lambda d=dialog: self._apply_window_title_bar_theme(d))
+        QTimer.singleShot(0, lambda d=dialog: apply_windows_dark_title_bar(d))
         if dialog.exec():
             return dialog.textValue().strip(), True
         return "", False
 
     def _prompt_choice_dialog(self, title, label, choices):
+        from mywidgetbox_core import apply_windows_dark_title_bar, render_vector_icon
         dialog = QInputDialog(self)
         dialog.setWindowTitle(str(title))
+        dialog.setWindowIcon(render_vector_icon("widget", "#528bf8", 32))
         dialog.setMinimumSize(360, 220)
         dialog.resize(360, 220)
         dialog.setLabelText(str(label))
@@ -6872,7 +6898,7 @@ class MasterController(QMainWindow):
         dialog.setOkButtonText("확인")
         dialog.setCancelButtonText("취소")
         dialog.setStyleSheet(self._themed_input_dialog_style())
-        QTimer.singleShot(0, lambda d=dialog: self._apply_window_title_bar_theme(d))
+        QTimer.singleShot(0, lambda d=dialog: apply_windows_dark_title_bar(d))
         if dialog.exec():
             return dialog.textValue(), True
         return "", False
@@ -6961,13 +6987,17 @@ class MasterController(QMainWindow):
             btn.setProperty("kind", "rowAction")
             btn.setText("")
             btn.setFixedSize(28, 28)
-            btn.setIconSize(QSize(16, 16))
+            btn.setIconSize(QSize(14, 14))
             btn.setVisible(False)
 
-        btn_run.setIcon(self._build_action_icon("run", "#dbfff3"))
-        btn_stop.setIcon(self._build_action_icon("stop", "#ffe9ef"))
-        btn_set.setIcon(self._build_action_icon("settings", "#e3edff"))
-        btn_del.setIcon(self._build_action_icon("delete", "#ffe4e9"))
+        btn_run.setIcon(render_vector_icon("run", "#58c796", 14))
+        btn_run.setToolTip("위젯 실행")
+        btn_stop.setIcon(render_vector_icon("stop", "#f87171", 14))
+        btn_stop.setToolTip("위젯 정지")
+        btn_set.setIcon(render_vector_icon("settings", "#93c5fd", 14))
+        btn_set.setToolTip("위젯 상세 설정")
+        btn_del.setIcon(render_vector_icon("trash", "#f87171", 14))
+        btn_del.setToolTip("위젯 삭제")
         btn_run.setEnabled(not is_running)
         btn_stop.setEnabled(is_running)
 
@@ -7434,13 +7464,15 @@ class MasterController(QMainWindow):
         if not checked_ids:
             return
 
-        confirm = QMessageBox.question(
+        from mywidgetbox_core import ask_dark_confirm
+        if not ask_dark_confirm(
             self,
-            "일괄 삭제 확인",
-            f"선택한 {len(checked_ids)}개의 위젯 세팅을 완전히 삭제하시겠습니까?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-        if confirm != QMessageBox.StandardButton.Yes:
+            "위젯 일괄 삭제",
+            f"선택한 {len(checked_ids)}개의 위젯을 완전히 삭제하시겠습니까?",
+            yes_text="삭제",
+            no_text="취소",
+            is_danger=True,
+        ):
             return
 
         sid = self.selected_set_id()
@@ -7506,6 +7538,8 @@ class MasterController(QMainWindow):
                 'interval': w.interval_ms // 1000,
                 'is_muted': w.is_muted,
                 'gpu_guard_enabled': getattr(w, 'gpu_guard_enabled', False),
+                'keep_aspect_ratio': getattr(w, 'keep_aspect_ratio', True),
+                'auto_fit_slide_media': getattr(w, 'auto_fit_slide_media', False),
             }
         else:
 
@@ -7523,6 +7557,8 @@ class MasterController(QMainWindow):
                 'focus_binding_host': None,
                 'w': int(s_obj.value("w", 200)),
                 'h': int(s_obj.value("h", 200)),
+                'keep_aspect_ratio': _as_bool(s_obj.value("keep_aspect_ratio", True), True),
+                'auto_fit_slide_media': _as_bool(s_obj.value("auto_fit_slide_media", False), False),
                 'layer_mode': DesktopWidget.coerce_layer_mode(
                     int(s_obj.value("layer_mode", DesktopWidget.LAYER_NORMAL)),
                     int(s_obj.value("layer_schema_version", 0)),
@@ -7584,11 +7620,14 @@ class MasterController(QMainWindow):
             new_lock = dialog.lock_cb.isChecked()
             new_mute = dialog.mute_checkbox.isChecked()
             new_gpu_guard = dialog.gpu_guard_checkbox.isChecked()
-
+            new_keep_aspect = bool(getattr(dialog, "keep_aspect_ratio_cb", None) and dialog.keep_aspect_ratio_cb.isChecked())
+            new_slide_auto_aspect = bool(getattr(dialog, "slide_auto_aspect_cb", None) and dialog.slide_auto_aspect_cb.isChecked())
 
             s_obj.setValue("layer_mode", new_layer)
             s_obj.setValue("layer_schema_version", int(DesktopWidget.LAYER_SCHEMA_VERSION))
             s_obj.setValue("is_locked", bool(new_lock))
+            s_obj.setValue("keep_aspect_ratio", bool(new_keep_aspect))
+            s_obj.setValue("auto_fit_slide_media", bool(new_slide_auto_aspect))
             s_obj.setValue("folder_path", new_folder)
             s_obj.setValue("folder_item_paths", new_folder_item_paths)
             s_obj.setValue("exec_path", new_exec)
@@ -7614,7 +7653,10 @@ class MasterController(QMainWindow):
 
             if is_running:
                 w = self.widgets[pid]
-                
+                w.keep_aspect_ratio = bool(new_keep_aspect)
+                w.auto_fit_slide_media = bool(new_slide_auto_aspect)
+                w.base_slide_w = new_w
+                w.base_slide_h = new_h
 
                 if w.width() != new_w or w.height() != new_h:
                     w.resize(new_w, new_h)
@@ -8131,9 +8173,10 @@ class MasterController(QMainWindow):
         if not self._check_set_applied_for_action("삭제"):
             return
         spid = str(pid)
-        confirm = QMessageBox.question(self, "삭제 확인", "이 세팅을 완전히 삭제하시겠습니까?", 
-                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        if confirm == QMessageBox.StandardButton.Yes:
+        from mywidgetbox_core import ask_dark_confirm
+        if not ask_dark_confirm(self, "위젯 삭제", "이 위젯을 완전히 삭제하시겠습니까?", yes_text="삭제", no_text="취소", is_danger=True):
+            return
+        if True:
             if spid in self._temp_group_ids:
                 self._temp_group_ids.remove(spid)
             if spid in self.widgets:
@@ -8191,49 +8234,19 @@ class MasterController(QMainWindow):
         if pid in (None, ""):
             return
         current_name = QSettings("MyHomeApp", f"Profile_{pid}").value("name", "New 세팅")
+        from mywidgetbox_core import apply_windows_dark_title_bar, render_vector_icon
         dialog = QInputDialog(self)
         dialog.setWindowTitle("이름 변경")
-        dialog.setMinimumSize(250, 190)
-        dialog.resize(250, 190)
+        dialog.setWindowIcon(render_vector_icon("widget", "#528bf8", 32))
+        dialog.setMinimumSize(280, 190)
+        dialog.resize(280, 190)
         dialog.setLabelText("세팅 이름을 입력하세요:")
         dialog.setInputMode(QInputDialog.InputMode.TextInput)
         dialog.setTextValue(str(current_name))
         dialog.setOkButtonText("저장")
         dialog.setCancelButtonText("취소")
-        dialog.setStyleSheet("""
-            QInputDialog {
-                background-color: #23344d;
-            }
-            QLabel {
-                color: #e6eefc;
-                font-size: 12px;
-            }
-            QLineEdit {
-                min-height: 30px;
-                min-width: 0px;
-                color: #edf3ff;
-                background-color: #1a2740;
-                border: 1px solid #4a6288;
-                border-radius: 8px;
-                padding: 2px 8px;
-            }
-            QLineEdit:focus {
-                border: 1px solid #77a3f2;
-            }
-            QPushButton {
-                min-height: 30px;
-                border-radius: 8px;
-                padding: 0 12px;
-                color: #e8efff;
-                background-color: #35507a;
-                border: 1px solid #5977a4;
-                font-weight: 600;
-            }
-            QPushButton:hover {
-                background-color: #3f5e8e;
-            }
-        """)
-        QTimer.singleShot(0, lambda d=dialog: self._apply_window_title_bar_theme(d))
+        dialog.setStyleSheet(self._themed_input_dialog_style())
+        QTimer.singleShot(0, lambda d=dialog: apply_windows_dark_title_bar(d))
 
         if dialog.exec():
             new_name = dialog.textValue().strip()

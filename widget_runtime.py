@@ -190,7 +190,11 @@ def build_settings_dialog_data(widget):
 
 
 def apply_settings_dialog_result(widget, dialog, old_folder, old_exec):
-    widget.resize(dialog.width_input.value(), dialog.height_input.value())
+    w_val = dialog.width_input.value()
+    h_val = dialog.height_input.value()
+    widget.base_slide_w = w_val
+    widget.base_slide_h = h_val
+    widget.resize(w_val, h_val)
     widget.keep_aspect_ratio = bool(getattr(dialog, "keep_aspect_ratio_cb", None) and dialog.keep_aspect_ratio_cb.isChecked())
     widget.auto_fit_slide_media = bool(getattr(dialog, "slide_auto_aspect_cb", None) and dialog.slide_auto_aspect_cb.isChecked())
     widget.is_muted = dialog.mute_checkbox.isChecked()
@@ -250,9 +254,9 @@ def _apply_slide_auto_aspect_if_enabled(widget, media_path):
         sz = get_media_native_size(media_path)
         if sz and len(sz) == 2 and sz[0] > 0 and sz[1] > 0:
             iw, ih = sz[0], sz[1]
-            curr_w = widget.width()
-            curr_h = widget.height()
-            target_w, target_h = calc_smart_aspect_size(iw, ih, curr_w, curr_h)
+            base_w = getattr(widget, "base_slide_w", widget.width())
+            base_h = getattr(widget, "base_slide_h", widget.height())
+            target_w, target_h = calc_smart_aspect_size(iw, ih, base_w, base_h)
             if widget.width() != target_w or widget.height() != target_h:
                 widget.resize(target_w, target_h)
                 if hasattr(widget, "apply_mask_and_style"):

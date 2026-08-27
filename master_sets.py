@@ -496,54 +496,23 @@ def delete_set(controller, set_id):
             }
         """)
         choice_box.setDefaultButton(absorb_btn)
+        from mywidgetbox_core import apply_windows_dark_title_bar, ask_dark_confirm
+        QTimer.singleShot(0, lambda: apply_windows_dark_title_bar(choice_box))
         choice_box.exec()
         clicked = choice_box.clickedButton()
         if clicked is cancel_btn:
             return False
         delete_profiles = clicked is purge_btn
     else:
-        confirm_box = QMessageBox(controller)
-        confirm_box.setWindowTitle("세트 삭제")
-        confirm_box.setIcon(QMessageBox.Icon.Question)
-        confirm_box.setText(f"'{set_name}' 세트를 삭제하시겠습니까?")
-        confirm_box.setStyleSheet("""
-            QMessageBox {
-                background-color: #1e2d42;
-            }
-            QMessageBox QLabel {
-                color: #e6eefc;
-                font-size: 13px;
-            }
-            QMessageBox QPushButton {
-                min-height: 32px;
-                min-width: 90px;
-                border-radius: 8px;
-                padding: 4px 14px;
-                color: #e8efff;
-                background-color: #35507a;
-                border: 1px solid #5977a4;
-                font-weight: 600;
-                font-size: 12px;
-            }
-            QMessageBox QPushButton:hover {
-                background-color: #446599;
-            }
-        """)
-        yes_btn = confirm_box.addButton("예", QMessageBox.ButtonRole.YesRole)
-        no_btn = confirm_box.addButton("아니오", QMessageBox.ButtonRole.NoRole)
-        yes_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #7a3945;
-                border: 1px solid #9e4e5c;
-                color: #ffe4e9;
-            }
-            QPushButton:hover {
-                background-color: #8f4453;
-            }
-        """)
-        confirm_box.setDefaultButton(no_btn)
-        confirm_box.exec()
-        if confirm_box.clickedButton() is not yes_btn:
+        from mywidgetbox_core import ask_dark_confirm
+        if not ask_dark_confirm(
+            controller,
+            "세트 삭제",
+            f"'{set_name}' 세트를 완전히 삭제하시겠습니까?",
+            yes_text="삭제",
+            no_text="취소",
+            is_danger=True,
+        ):
             return False
 
     if delete_profiles and removed_profiles:
