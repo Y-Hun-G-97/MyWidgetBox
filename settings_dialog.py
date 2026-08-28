@@ -756,6 +756,18 @@ class FolderSpreadDialog(QDialog):
         self.fit_combo.setCurrentIndex(0)
         grid_layout.addWidget(self.fit_combo, 3, 1, 1, 3)
 
+        grid_layout.addWidget(QLabel("전개 방향:"), 4, 0)
+        self.direction_combo = DownwardComboBox()
+        self.direction_combo.addItems([
+            "↘ 우하단 전개 (좌상단 시작, 기본)",
+            "↙ 좌하단 전개 (우상단 시작, 우상단 배치 추천)",
+            "↗ 우상단 전개 (좌하단 시작, 작업표시줄 위 추천)",
+            "↖ 좌상단 전개 (우하단 시작, 시계 구석 추천)",
+        ])
+        self.direction_combo.setCurrentIndex(0)
+        grid_layout.addWidget(self.direction_combo, 4, 1, 1, 3)
+
+
         layout.addWidget(grid_card)
 
         # 2. 미디어 목록 선택 카드
@@ -911,8 +923,80 @@ class FolderSpreadDialog(QDialog):
             "margin": int(self.margin_input.value()),
             "fit_strategy": fit_strategy,
             "bg_color_mode": bg_mode,
+            "spread_direction": ["top-left", "top-right", "bottom-left", "bottom-right"][self.direction_combo.currentIndex()] if hasattr(self, "direction_combo") else "top-left",
+
         }
         self.accept()
+
+
+
+class GrowthAnchorPicker(QWidget):
+    anchorChanged = pyqtSignal(str)
+
+    ANCHOR_NAMES = {
+        "top-left": "좌상단 고정 (오른쪽/아래로 확장 - 기본)",
+        "top-center": "상단중앙 고정 (좌우균등/아래로 확장)",
+        "top-right": "우상단 고정 (왼쪽/아래로 확장 - 우상단 구석 추천)",
+        "left-center": "좌측중앙 고정 (오른쪽/상하균등 확장)",
+        "center": "중앙 고정 (사방으로 균등 확장)",
+        "right-center": "우측중앙 고정 (왼쪽/상하균등 확장)",
+        "bottom-left": "좌하단 고정 (오른쪽/위로 확장 - 작업표시줄 위 추천)",
+        "bottom-center": "하단중앙 고정 (좌우균등/위로 확장)",
+        "bottom-right": "우하단 고정 (왼쪽/위로 확장 - 시계 구석 추천)",
+    }
+
+    ANCHOR_GRID = [
+        [("top-left", "↖"), ("top-center", "↑"), ("top-right", "↗")],
+        [("left-center", "←"), ("center", "•"), ("right-center", "→")],
+        [("bottom-left", "↙"), ("bottom-center", "↓"), ("bottom-right", "↘")],
+    ]
+
+    def __init__(self, parent=None, current_anchor="top-left"):
+        super().__init__(parent)
+        self._current_anchor = current_anchor if current_anchor in self.ANCHOR_NAMES else "top-left"
+        self._buttons = {}
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        grid_frame = QFrame()
+        grid_frame.setObjectName("anchorGridFrame")
+        grid_layout = QGridLayout(grid_frame)
+        grid_layout.setContentsMargins(6, 6, 6, 6)
+        grid_layout.setSpacing(4)
+
+        for r, row in enumerate(self.ANCHOR_GRID):
+            for c, (key, symbol) in enumerate(row):
+                btn = QPushButton(symbol)
+                btn.setObjectName("anchorBtn")
+                btn.setFixedSize(34, 30)
+                btn.setProperty("active", "true" if key == self._current_anchor else "false")
+                btn.setToolTip(self.ANCHOR_NAMES.get(key, ""))
+                btn.clicked.connect(lambda _, k=key: self.set_anchor(k))
+                grid_layout.addWidget(btn, r, c)
+                self._buttons[key] = btn
+
+        layout.addWidget(grid_frame, 0, Qt.AlignmentFlag.AlignLeft)
+
+        self.hint_label = QLabel(self.ANCHOR_NAMES.get(self._current_anchor, ""))
+        self.hint_label.setObjectName("hintCaption")
+        self.hint_label.setStyleSheet("color: #8da8cb; font-size: 11px; font-weight: 500;")
+        layout.addWidget(self.hint_label)
+
+    def current_anchor(self):
+        return self._current_anchor
+
+    def set_anchor(self, key):
+        if key not in self.ANCHOR_NAMES:
+            key = "top-left"
+        self._current_anchor = key
+        for k, btn in self._buttons.items():
+            btn.setProperty("active", "true" if k == key else "false")
+            btn.style().unpolish(btn)
+            btn.style().polish(btn)
+        self.hint_label.setText(self.ANCHOR_NAMES.get(key, ""))
+        self.anchorChanged.emit(key)
 
 
 class SettingsDialog(QDialog):
@@ -931,7 +1015,33 @@ class SettingsDialog(QDialog):
         self.resize(580, 660)
         self.setFixedWidth(580)
         self.setStyleSheet("""
-            QDialog#settingsDialog {
+            
+            QFrame#anchorGridFrame {
+                background-color: #121c2b;
+                border: 1px solid #283a54;
+                border-radius: 8px;
+            }
+            QPushButton#anchorBtn {
+                background-color: #1a2a3e;
+                border: 1px solid #334a6c;
+                border-radius: 6px;
+                color: #9cb8dd;
+                font-size: 13px;
+                font-weight: 700;
+                min-height: 28px;
+                padding: 0;
+            }
+            QPushButton#anchorBtn:hover {
+                background-color: #263d5c;
+                border-color: #528bf8;
+                color: #ffffff;
+            }
+            QPushButton#anchorBtn[active="true"] {
+                background-color: #3b68d4;
+                border: 1.5px solid #6fa0ff;
+                color: #ffffff;
+            }
+QDialog#settingsDialog {
                 background-color: #162233;
             }
             QFrame#settingsHeader {
@@ -1468,6 +1578,9 @@ class SettingsDialog(QDialog):
 
         self.keep_aspect_ratio_cb = QCheckBox("가로세로 비율 고정")
         self.keep_aspect_ratio_cb.setChecked(bool(s.get('keep_aspect_ratio', True)))
+        init_anchor = str(s.get('growth_anchor', 'top-left') or 'top-left')
+        self.anchor_picker = GrowthAnchorPicker(self, current_anchor=init_anchor)
+
         self.keep_aspect_ratio_cb.setToolTip("너비나 높이 변경 시 가로세로 비율을 유지하여 자동으로 계산합니다.")
 
         self._syncing_aspect_size = False
@@ -1753,6 +1866,8 @@ class SettingsDialog(QDialog):
         widget_form.addRow("너비:", self.width_input_box)
         widget_form.addRow("높이:", self.height_input_box)
         widget_form.addRow("", self.ratio_row_widget)
+        widget_form.addRow("확장 기준점:", self.anchor_picker)
+
 
         _add_section_header(widget_form, "표시 및 레이어")
         widget_form.addRow("불투명도:", self.opacity_row_widget)

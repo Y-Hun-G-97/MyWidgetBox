@@ -149,6 +149,7 @@ def save_all_settings(widget, sync=None):
     settings.setValue("is_locked", bool(getattr(widget, "is_locked", False)))
     settings.setValue("keep_aspect_ratio", bool(getattr(widget, "keep_aspect_ratio", True)))
     settings.setValue("auto_fit_slide_media", bool(getattr(widget, "auto_fit_slide_media", False)))
+    settings.setValue("growth_anchor", str(getattr(widget, "growth_anchor", "top-left") or "top-left"))
     settings.setValue("opacity_pct", widget.current_opacity_pct)
     settings.setValue("w", widget.width())
     settings.setValue("h", widget.height())
@@ -168,6 +169,7 @@ def build_settings_dialog_data(widget):
         "h": widget.height(),
         "keep_aspect_ratio": bool(getattr(widget, "keep_aspect_ratio", True)),
         "auto_fit_slide_media": bool(getattr(widget, "auto_fit_slide_media", False)),
+        "growth_anchor": str(getattr(widget, "growth_anchor", "top-left") or "top-left"),
         "is_muted": widget.is_muted,
         "gpu_guard_enabled": widget.gpu_guard_enabled,
         "folder_path": widget.folder_path,
@@ -189,12 +191,57 @@ def build_settings_dialog_data(widget):
     }
 
 
+
+def resize_widget_with_anchor(widget, new_w, new_h, anchor=None):
+    if anchor is None:
+        anchor = str(getattr(widget, "growth_anchor", "top-left") or "top-left")
+
+    old_w = int(widget.width())
+    old_h = int(widget.height())
+    new_w = max(24, int(new_w))
+    new_h = max(24, int(new_h))
+
+    dw = new_w - old_w
+    dh = new_h - old_h
+
+    if dw == 0 and dh == 0:
+        return
+
+    old_pos = widget.pos()
+    old_x, old_y = old_pos.x(), old_pos.y()
+
+    dx = 0
+    dy = 0
+
+    # Horizontal delta
+    if anchor in ("top-center", "bottom-center", "center"):
+        dx = -int(round(dw / 2.0))
+    elif anchor in ("top-right", "right-center", "bottom-right"):
+        dx = -dw
+
+    # Vertical delta
+    if anchor in ("left-center", "center", "right-center"):
+        dy = -int(round(dh / 2.0))
+    elif anchor in ("bottom-left", "bottom-center", "bottom-right"):
+        dy = -dh
+
+    widget.resize(new_w, new_h)
+    if dx != 0 or dy != 0:
+        new_x = old_x + dx
+        new_y = old_y + dy
+        widget.move(new_x, new_y)
+        if hasattr(widget, "_save_position"):
+            widget._save_position()
+
+
 def apply_settings_dialog_result(widget, dialog, old_folder, old_exec):
     w_val = dialog.width_input.value()
     h_val = dialog.height_input.value()
     widget.base_slide_w = w_val
     widget.base_slide_h = h_val
-    widget.resize(w_val, h_val)
+    anchor_val = dialog.anchor_picker.current_anchor() if hasattr(dialog, "anchor_picker") else "top-left"
+    widget.growth_anchor = anchor_val
+    resize_widget_with_anchor(widget, w_val, h_val, anchor=anchor_val)
     widget.keep_aspect_ratio = bool(getattr(dialog, "keep_aspect_ratio_cb", None) and dialog.keep_aspect_ratio_cb.isChecked())
     widget.auto_fit_slide_media = bool(getattr(dialog, "slide_auto_aspect_cb", None) and dialog.slide_auto_aspect_cb.isChecked())
     widget.is_muted = dialog.mute_checkbox.isChecked()
@@ -258,7 +305,7 @@ def _apply_slide_auto_aspect_if_enabled(widget, media_path):
             base_h = getattr(widget, "base_slide_h", widget.height())
             target_w, target_h = calc_smart_aspect_size(iw, ih, base_w, base_h)
             if widget.width() != target_w or widget.height() != target_h:
-                widget.resize(target_w, target_h)
+                resize_widget_with_anchor(widget, target_w, target_h)
                 if hasattr(widget, "apply_mask_and_style"):
                     widget.apply_mask_and_style()
     except Exception:

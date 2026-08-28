@@ -3867,6 +3867,7 @@ class DesktopWidget(QMainWindow):
         self.is_locked = _as_bool(self.settings.value("is_locked", False), False)
         self.gpu_guard_enabled = _as_bool(self.settings.value("gpu_guard_enabled", False), False)
         self.quarantined_media = self._as_path_set(self.settings.value("quarantined_media", []))
+        self.growth_anchor = str(self.settings.value("growth_anchor", "top-left") or "top-left")
         w = int(self.settings.value("w", 200))
         h = int(self.settings.value("h", 200))
         self.resize(w, h)
@@ -7942,13 +7943,17 @@ class MasterController(QMainWindow):
         created_count = 0
 
         fit_strategy = spread_config.get("fit_strategy", "auto_aspect")
+        spread_direction = str(spread_config.get("spread_direction", "top-left") or "top-left")
+        dir_x_sign = -1 if "right" in spread_direction else 1
+        dir_y_sign = -1 if "bottom" in spread_direction else 1
+
         bg_mode = int(spread_config.get("bg_color_mode", 0))
 
         col_heights = [start_y] * cols
 
         for idx, item_path in enumerate(item_paths):
             c = idx % cols
-            pos_x = start_x + c * (w + margin)
+            r = idx // cols
             item_name = os.path.basename(item_path)
 
             item_w = w
@@ -7956,20 +7961,29 @@ class MasterController(QMainWindow):
             media_fit_mode = 0
 
             if fit_strategy == "auto_aspect":
-                pos_y = col_heights[c]
                 sz = get_media_native_size(item_path)
                 if sz and len(sz) == 2 and sz[0] > 0 and sz[1] > 0:
                     iw, ih = sz[0], sz[1]
                     item_w, item_h = calc_smart_aspect_size(iw, ih, w, h)
                 media_fit_mode = 1
-                col_heights[c] += item_h + margin
+
+                pos_x = start_x + (c * (w + margin) * dir_x_sign)
+                if dir_x_sign < 0:
+                    pos_x -= (item_w - w)
+
+                if dir_y_sign < 0:
+                    pos_y = col_heights[c] - item_h
+                    col_heights[c] -= (item_h + margin)
+                else:
+                    pos_y = col_heights[c]
+                    col_heights[c] += (item_h + margin)
             elif fit_strategy == "crop_fill":
-                r = idx // cols
-                pos_y = start_y + r * (h + margin)
+                pos_x = start_x + (c * (w + margin) * dir_x_sign)
+                pos_y = start_y + (r * (h + margin) * dir_y_sign)
                 media_fit_mode = 1
             else:
-                r = idx // cols
-                pos_y = start_y + r * (h + margin)
+                pos_x = start_x + (c * (w + margin) * dir_x_sign)
+                pos_y = start_y + (r * (h + margin) * dir_y_sign)
                 media_fit_mode = 0
 
             if idx == 0 and target_widget:
@@ -7978,6 +7992,7 @@ class MasterController(QMainWindow):
                 target_widget._set_watched_folder(folder_path)
                 target_widget.bg_color_mode = bg_mode
                 target_widget.media_fit_mode = media_fit_mode
+                target_widget.growth_anchor = spread_direction
                 target_widget.move(pos_x, pos_y)
                 target_widget.resize(item_w, item_h)
                 target_widget.update_playlist()

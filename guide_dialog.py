@@ -337,9 +337,9 @@ class GuideDialog(QDialog):
         clayout = QVBoxLayout(card)
         clayout.setSpacing(8)
 
-        sec1 = QLabel("⊞ 스프레드 사용 방법 (예: 루뺘 폴더 10개 선택)")
+        sec1 = QLabel("⊞ 스프레드 사용 방법 & 전개 방향 (예: 루뺘 폴더)")
         sec1.setObjectName("guideSectionTitle")
-        body1 = QLabel("1. 세트 내 <b>[ 새로운 위젯 추가 ]</b>를 누르고 <b>폴더 열기</b>를 선택합니다.<br>2. 이미지가 담긴 폴더(예: <code>루뺘 폴더</code>)를 선택합니다.<br>3. 팝업에서 <b>[ ⊞ 스프레드 방식 ]</b>을 선택하면 위와 같은 스프레드 설정 창이 열립니다.<br>4. 행(Rows)과 열(Cols), 위젯 크기 및 간격을 조절한 뒤 <b>[ 위젯 생성 ]</b>을 누르면 선택한 미디어들이 화면에 완벽한 바둑판 형태로 자동 배치됩니다.")
+        body1 = QLabel("1. 세트 내 <b>[ 새로운 위젯 추가 ]</b>를 누르고 <b>폴더 열기</b>를 선택합니다.<br>2. 이미지가 담긴 폴더(예: <code>루뺘 폴더</code>)를 선택합니다.<br>3. 팝업에서 <b>[ ⊞ 스프레드 방식 ]</b>을 선택하면 위와 같은 스프레드 설정 창이 열립니다.<br>4. 행/열, 위젯 크기, 간격 및 <b>[ 전개 방향 (우상단 시작 시 좌하단 전개 등) ]</b>을 정한 뒤 <b>[ 위젯 생성 ]</b>을 누르면 선택한 미디어들이 화면에 완벽한 바둑판 형태로 자동 배치됩니다.")
         body1.setObjectName("guideBodyText")
         body1.setWordWrap(True)
 
@@ -347,7 +347,7 @@ class GuideDialog(QDialog):
         clayout.addWidget(body1)
         layout.addWidget(card)
 
-        layout.addWidget(self._create_tip_box("스프레드 팁", "미디어가 너무 많을 때는 목록에서 원하는 이미지만 10개 내외로 선택하여 깔끔하게 배치할 수 있습니다."))
+        layout.addWidget(self._create_tip_box("스프레드 팁", "모니터 우상단이나 우하단 모서리에 바둑판을 짤 때는 '전개 방향'을 ↙좌하단 또는 ↖좌상단으로 선택하면 화면 밖으로 밀려나지 않고 깔끔하게 배치됩니다."))
         layout.addStretch(1)
         self.stack.addWidget(page)
 
@@ -454,36 +454,43 @@ class GuideDialog(QDialog):
         clayout = QVBoxLayout(card)
         clayout.setSpacing(10)
 
-        sec1 = QLabel("⌨️ 핵심 단축키 요약")
+        sec1 = QLabel("📍 위젯 크기 확장 기준점 (Growth Anchor 9방향)")
         sec1.setObjectName("guideSectionTitle")
+        body1 = QLabel("위젯 설정의 <b>[ 확장 기준점 ]</b> 3x3 그리드에서 원하는 꼭짓점(우상단, 우하단, 중앙 등)을 선택할 수 있습니다.<br>• <b>우상단 고정(↗)</b>: 우상단 모서리가 고정되어 크기가 늘어날 때 <b>왼쪽/아래로 확장</b>됩니다.<br>• <b>우하단 고정(↘)</b>: 시계 구석에서 크기 변경 시 <b>왼쪽/위로 확장</b>됩니다.<br>• <b>중앙 고정(•)</b>: 화면 가운데서 크기 변경 시 <b>사방으로 균등하게 확장</b>됩니다.")
+        body1.setObjectName("guideBodyText")
+        body1.setWordWrap(True)
 
+        sec2 = QLabel("⌨️ 핵심 단축키 요약")
+        sec2.setObjectName("guideSectionTitle")
         keys_text = QLabel("""
 • <b>Alt + 클릭 (바탕화면 위젯)</b>: 위젯 이동 잠금 / 잠금 해제 토글 (체크된 임시 그룹 위젯 일괄 잠금)<br>
-• <b>Ctrl + 마우스 휠 (위젯 위)</b>: 위젯 크기(Scale) 즉시 확대 / 축소<br>
+• <b>Ctrl + 마우스 휠 (위젯 위)</b>: 위젯 투명도 5% 단위 즉시 조절<br>
 • <b>위젯 카드 더블클릭 (컨트롤러)</b>: 위젯 이름 즉시 변경 다이얼로그 호출<br>
 • <b>위젯 카드 클릭 (컨트롤러)</b>: 바탕화면 해당 위젯에 네온 테두리 하이라이트 점멸
         """)
         keys_text.setObjectName("guideBodyText")
         keys_text.setWordWrap(True)
 
-        sec2 = QLabel("🛡️ 마우스 투과 (클릭 무시) 모드")
-        sec2.setObjectName("guideSectionTitle")
-        body2 = QLabel("위젯 상세 설정에서 <b>마우스 투과</b>를 켜면 위젯이 바탕화면 배경처럼 작동하여 뒤의 아이콘이나 창을 가리지 않고 클릭할 수 있습니다. (설정 해제는 컨트롤러의 설정 버튼에서 언제든 가능합니다)")
-        body2.setObjectName("guideBodyText")
-        body2.setWordWrap(True)
-
-        sec3 = QLabel("⚡ GPU 부하 모니터링 & 자동 절전")
+        sec3 = QLabel("🛡️ 마우스 투과 (클릭 무시) 모드")
         sec3.setObjectName("guideSectionTitle")
-        body3 = QLabel("상단 우측의 <b>[ GPU ]</b> 버튼을 눌러 고사양 게임 실행 시 위젯 애니메이션/영상을 자동으로 일시 정지시켜 프레임 드랍을 원천 차단할 수 있습니다.")
+        body3 = QLabel("위젯 상세 설정에서 <b>마우스 투과</b>를 켜면 위젯이 바탕화면 배경처럼 작동하여 뒤의 아이콘이나 창을 가리지 않고 클릭할 수 있습니다. (설정 해제는 컨트롤러의 설정 버튼에서 언제든 가능합니다)")
         body3.setObjectName("guideBodyText")
         body3.setWordWrap(True)
 
+        sec4 = QLabel("⚡ GPU 부하 모니터링 & 자동 절전")
+        sec4.setObjectName("guideSectionTitle")
+        body4 = QLabel("상단 우측의 <b>[ GPU ]</b> 버튼을 눌러 고사양 게임 실행 시 위젯 애니메이션/영상을 자동으로 일시 정지시켜 프레임 드랍을 원천 차단할 수 있습니다.")
+        body4.setObjectName("guideBodyText")
+        body4.setWordWrap(True)
+
         clayout.addWidget(sec1)
-        clayout.addWidget(keys_text)
+        clayout.addWidget(body1)
         clayout.addWidget(sec2)
-        clayout.addWidget(body2)
+        clayout.addWidget(keys_text)
         clayout.addWidget(sec3)
         clayout.addWidget(body3)
+        clayout.addWidget(sec4)
+        clayout.addWidget(body4)
         layout.addWidget(card)
 
         layout.addStretch(1)
