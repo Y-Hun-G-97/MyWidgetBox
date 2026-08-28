@@ -59,4 +59,11 @@ $distIconPath = Join-Path $root "dist\MyWidgetBox\icon.ico"
 Copy-Item -LiteralPath $iconSourcePath -Destination $distIconPath -Force
 Write-Host "[build] copied icon sidecar: $distIconPath"
 
+$assetsSourcePath = Join-Path $root "assets"
+$distAssetsPath = Join-Path $root "dist\MyWidgetBox\assets"
+if (Test-Path -LiteralPath $assetsSourcePath) {
+    Copy-Item -LiteralPath $assetsSourcePath -Destination $distAssetsPath -Recurse -Force
+    Write-Host "[build] copied assets: $distAssetsPath"
+}
+
 Write-Host "[build] done: $exePath"

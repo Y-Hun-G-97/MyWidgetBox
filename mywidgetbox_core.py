@@ -496,6 +496,14 @@ def render_vector_icon(name, color="#a4bedc", size=16):
         ])
         painter.drawPolyline(poly)
 
+    elif name in ("chevron_right", "arrow_right"):
+        poly = QPolygonF([
+            QPointF(s * 0.38, pad),
+            QPointF(s * 0.65, s * 0.50),
+            QPointF(s * 0.38, s - pad),
+        ])
+        painter.drawPolyline(poly)
+
     else:
         painter.setBrush(QBrush(c))
         painter.drawEllipse(QRectF(pad, pad, s - 2 * pad, s - 2 * pad))

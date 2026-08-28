@@ -93,12 +93,47 @@ class DownwardComboBox(QComboBox):
         popup.move(self.mapToGlobal(QPoint(0, self.height() + 3)))
 
 
+class TreeBranchLine(QWidget):
+    """
+    부모-자식 계층을 시각적으로 이어주는 들여쓰기 트리 브랜치 가이드 라인 위젯
+    (is_last: 마지막 자식일 때는 L자형, 중간 자식일 때는 ├자형)
+    """
+    def __init__(self, is_last=False, parent=None):
+        super().__init__(parent)
+        self._is_last = bool(is_last)
+        self.setFixedWidth(22)
+
+    def set_is_last(self, is_last):
+        self._is_last = bool(is_last)
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        pen = QPen(QColor("#3d567c"), 1.5)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+
+        mid_x = 10
+        mid_y = int(self.height() / 2)
+
+        # Vertical line from top
+        painter.drawLine(mid_x, 0, mid_x, mid_y if self._is_last else self.height())
+        # Horizontal branch to the right
+        painter.drawLine(mid_x, mid_y, self.width(), mid_y)
+        painter.end()
+
+
 class ProfileRowWidget(QFrame):
+    clicked = pyqtSignal(str)
+    doubleClicked = pyqtSignal(str)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._hovered = False
         self._selected = False
         self._action_buttons = []
+        self._pid = ""
         self.setMouseTracking(True)
 
     def set_action_buttons(self, buttons):
@@ -137,6 +172,12 @@ class ProfileRowWidget(QFrame):
             style.polish(self)
         self.update()
 
+    def mouseDoubleClickEvent(self, event):
+        super().mouseDoubleClickEvent(event)
+        if event.button() == Qt.MouseButton.LeftButton:
+            if self._pid:
+                self.doubleClicked.emit(self._pid)
+
     def mouseReleaseEvent(self, event):
         super().mouseReleaseEvent(event)
         if event.button() == Qt.MouseButton.LeftButton:
@@ -149,6 +190,8 @@ class ProfileRowWidget(QFrame):
                 return
             if cb:
                 cb.setChecked(not cb.isChecked())
+            if self._pid:
+                self.clicked.emit(self._pid)
 
 
 class ProfileListWidget(QListWidget):
