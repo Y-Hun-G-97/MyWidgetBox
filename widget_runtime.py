@@ -294,6 +294,8 @@ from PyQt6.QtGui import QPixmap
 def _apply_slide_auto_aspect_if_enabled(widget, media_path):
     if not getattr(widget, "auto_fit_slide_media", False):
         return
+    if bool(getattr(widget, "is_moving", False)) or bool(getattr(widget, "is_resizing", False)) or getattr(widget, "start_pos", None) is not None:
+        return
     if not media_path or not os.path.isfile(media_path):
         return
     try:
@@ -707,13 +709,17 @@ def _drag_start_threshold(widget):
 
 
 def mouse_move_event(widget, e):
-    if (
-        widget.start_pos is not None
-        or bool(getattr(widget, "is_moving", False))
-        or bool(getattr(widget, "is_resizing", False))
-    ) and not _is_left_button_down(e):
-        widget.cancel_active_interaction()
+    if not _is_left_button_down(e):
+        if (
+            widget.start_pos is not None
+            or bool(getattr(widget, "is_moving", False))
+            or bool(getattr(widget, "is_resizing", False))
+        ):
+            widget.cancel_active_interaction()
+        else:
+            widget._refresh_resize_ui()
         return
+
     if bool(getattr(widget, "is_locked", False)):
         if widget.start_pos is not None or widget.is_moving or widget.is_resizing:
             widget.cancel_active_interaction()
@@ -773,15 +779,8 @@ def mouse_release_event(widget, e):
         else:
             has_manual_focus = bool(getattr(widget, "_exec_manual_focus_enabled", False))
             has_exec_target = bool(widget.exec_path and os.path.exists(widget.exec_path))
-            if not has_exec_target and not has_manual_focus:
-                widget.start_pos = None
-                widget.is_moving = False
-                widget._set_drag_topmost(False)
-                widget._reset_axis_snap()
-                widget._hide_size_hud()
-                widget._refresh_resize_ui()
-                return
-            widget._launch_or_focus_exec(widget.exec_path)
+            if has_exec_target or has_manual_focus:
+                widget._launch_or_focus_exec(widget.exec_path)
     widget._set_drag_topmost(False)
     widget.start_pos = None
     widget.is_moving = False
