@@ -251,6 +251,108 @@ def apply_windows_dark_title_bar(window):
         return False
 
 
+def ask_dark_input(parent, title, prompt, default_text="", ok_text="저장", cancel_text="취소"):
+    """
+    일관된 다크 테마 스타일을 갖춘 텍스트 입력 모달을 띄우고 (text, True/False)를 반환합니다.
+    """
+    from PyQt6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton
+    from PyQt6.QtCore import Qt, QTimer
+    from PyQt6.QtGui import QIcon
+
+    dlg = QDialog(parent)
+    dlg.setWindowTitle(str(title or "입력"))
+    dlg.setWindowIcon(QIcon())
+    dlg.setFixedWidth(360)
+    dlg.setStyleSheet("""
+        QDialog {
+            background-color: #1a273b;
+        }
+        QLabel#inputTitle {
+            color: #eef3ff;
+            font-size: 14px;
+            font-weight: 700;
+        }
+        QLineEdit#darkInputField {
+            color: #ffffff;
+            background-color: #121c2c;
+            border: 1px solid #354b6e;
+            border-radius: 6px;
+            padding: 7px 10px;
+            font-size: 13px;
+            selection-background-color: #4a74e2;
+        }
+        QLineEdit#darkInputField:focus {
+            border: 1px solid #5a8ef0;
+            background-color: #152236;
+        }
+        QPushButton {
+            min-height: 32px;
+            min-width: 80px;
+            border-radius: 6px;
+            font-size: 12px;
+            font-weight: 700;
+            padding: 4px 14px;
+        }
+        QPushButton#cancelBtn {
+            color: #dbe7fb;
+            background-color: #2b3e5b;
+            border: 1px solid #48648c;
+        }
+        QPushButton#cancelBtn:hover {
+            background-color: #364e72;
+            border-color: #6385b5;
+            color: #ffffff;
+        }
+        QPushButton#saveBtn {
+            color: #ffffff;
+            background-color: #4a74e2;
+            border: 1px solid #7296f0;
+        }
+        QPushButton#saveBtn:hover {
+            background-color: #5d86f0;
+        }
+    """)
+
+    layout = QVBoxLayout(dlg)
+    layout.setContentsMargins(20, 20, 20, 18)
+    layout.setSpacing(14)
+
+    prompt_label = QLabel(str(prompt or "입력하세요:"))
+    prompt_label.setObjectName("inputTitle")
+    layout.addWidget(prompt_label)
+
+    line_edit = QLineEdit(str(default_text or ""), dlg)
+    line_edit.setObjectName("darkInputField")
+    line_edit.selectAll()
+    layout.addWidget(line_edit)
+
+    btn_row = QHBoxLayout()
+    btn_row.setSpacing(10)
+    btn_row.addStretch(1)
+
+    cancel_btn = QPushButton(str(cancel_text or "취소"))
+    cancel_btn.setObjectName("cancelBtn")
+
+    save_btn = QPushButton(str(ok_text or "저장"))
+    save_btn.setObjectName("saveBtn")
+    save_btn.setDefault(True)
+
+    btn_row.addWidget(cancel_btn)
+    btn_row.addWidget(save_btn)
+    layout.addLayout(btn_row)
+
+    cancel_btn.clicked.connect(dlg.reject)
+    save_btn.clicked.connect(dlg.accept)
+    line_edit.returnPressed.connect(dlg.accept)
+
+    apply_windows_dark_title_bar(dlg)
+    QTimer.singleShot(0, lambda: apply_windows_dark_title_bar(dlg))
+
+    if dlg.exec() == QDialog.DialogCode.Accepted:
+        return line_edit.text().strip(), True
+    return "", False
+
+
 def ask_dark_confirm(parent, title, message, yes_text="삭제", no_text="취소", is_danger=True):
     """
     완벽한 다크 테마와 일관된 버튼 레이아웃을 갖춘 확인 모달을 띄우고 True/False를 반환합니다.
@@ -488,13 +590,27 @@ def render_vector_icon(name, color="#a4bedc", size=16):
         painter.drawEllipse(rect)
         painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "?")
 
-    elif name in ("chevron", "chevron_down", "arrow_down"):
+    elif name in ("chevron", "chevron_down", "arrow_down", "down"):
         poly = QPolygonF([
             QPointF(pad, s * 0.38),
             QPointF(s * 0.50, s * 0.65),
             QPointF(s - pad, s * 0.38),
         ])
         painter.drawPolyline(poly)
+
+    elif name in ("chevron_up", "arrow_up", "up"):
+        poly = QPolygonF([
+            QPointF(pad, s * 0.65),
+            QPointF(s * 0.50, s * 0.38),
+            QPointF(s - pad, s * 0.65),
+        ])
+        painter.drawPolyline(poly)
+
+    elif name in ("screen", "monitor", "display"):
+        rect = QRectF(pad, pad * 1.2, s - 2 * pad, (s - 2 * pad) * 0.70)
+        painter.drawRoundedRect(rect, s * 0.08, s * 0.08)
+        painter.drawLine(QPointF(s * 0.50, pad * 1.2 + (s - 2 * pad) * 0.70), QPointF(s * 0.50, s - pad * 1.2))
+        painter.drawLine(QPointF(s * 0.32, s - pad * 1.2), QPointF(s * 0.68, s - pad * 1.2))
 
     elif name in ("chevron_right", "arrow_right"):
         poly = QPolygonF([

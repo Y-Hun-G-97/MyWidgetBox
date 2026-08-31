@@ -78,6 +78,7 @@ from widget_runtime import (
     drag_leave_event as _drag_leave_event_impl,
     drag_move_event as _drag_move_event_impl,
     drop_event as _drop_event_impl,
+    fit_to_screen as _fit_to_screen_impl,
     flush_settings_sync as _flush_settings_sync_impl,
     handle_move as _handle_move_impl,
     handle_post_show as _handle_post_show_impl,
@@ -97,6 +98,7 @@ from widget_runtime import (
     save_all_settings as _save_all_settings_impl,
     schedule_settings_sync as _schedule_settings_sync_impl,
     set_watched_folder as _set_watched_folder_impl,
+    snap_fill_available_space as _snap_fill_available_space_impl,
     update_playlist as _update_playlist_impl,
     update_static_pixmap_size as _update_static_pixmap_size_impl,
     wheel_event as _wheel_event_impl,
@@ -3633,15 +3635,38 @@ class DesktopWidget(QMainWindow):
 
     def _find_axis_snap_target(self, axis, raw_value):
         best_target = None
-        best_dist = self._axis_snap_threshold + 1
+        best_dist = 999999
+        screen_snap_threshold = 10
+        other_snap_threshold = getattr(self, "_axis_snap_threshold", 4)
         own_span = self.width() if axis == "x" else self.height()
+
+        # 1. 모니터 화면 테두리 경계 (작업표시줄 제외 가용 영역) 약한 자석
+        screen = QApplication.screenAt(self.geometry().center())
+        if not screen:
+            screen = QApplication.primaryScreen()
+        if screen:
+            geo = screen.availableGeometry()
+            if axis == "x":
+                screen_candidates = (
+                    geo.left(),                 # 화면 좌측 가장자리
+                    geo.right() + 1 - own_span, # 화면 우측 가장자리
+                )
+            else:
+                screen_candidates = (
+                    geo.top(),                  # 화면 상단 가장자리
+                    geo.bottom() + 1 - own_span,# 화면 하단 가장자리 (작업표시줄 바로 위)
+                )
+            for target in screen_candidates:
+                dist = abs(raw_value - target)
+                if dist <= screen_snap_threshold and dist < best_dist:
+                    best_target = target
+                    best_dist = dist
+
+        # 2. 다른 위젯들과의 스냅
         for w in self._other_widgets():
             other_lead = w.x() if axis == "x" else w.y()
             other_trail = (w.x() + w.width()) if axis == "x" else (w.y() + w.height())
 
-            # Snap candidates for this widget's top-left coordinate:
-            # - own lead to other lead/trail
-            # - own trail to other lead/trail
             candidates = (
                 other_lead,                    # left-left / top-top
                 other_trail,                   # left-right / top-bottom
@@ -3650,7 +3675,7 @@ class DesktopWidget(QMainWindow):
             )
             for target in candidates:
                 dist = abs(raw_value - target)
-                if dist <= self._axis_snap_threshold and dist < best_dist:
+                if dist <= other_snap_threshold and dist < best_dist:
                     best_target = target
                     best_dist = dist
         return best_target
@@ -5331,10 +5356,18 @@ class DesktopWidget(QMainWindow):
         _refresh_playlist_from_folder_change_impl(self)
 
     def open_settings(self):
+        if hasattr(self, "manager") and self.manager:
+            if hasattr(self.manager, "is_temp_group_member") and self.manager.is_temp_group_member(self.profile_id):
+                if len(getattr(self.manager, "_temp_group_ids", set())) >= 2:
+                    if hasattr(self.manager, "open_bulk_settings"):
+                        self.manager.open_bulk_settings()
+                        return
+
         old_folder = self.folder_path
         old_exec = str(self.exec_path or "")
 
-        dialog = SettingsDialog(self, _build_settings_dialog_data_impl(self))
+        sdata = _build_settings_dialog_data_impl(self)
+        dialog = SettingsDialog(self, sdata, widget_name=str(sdata.get("name", "")))
 
         if dialog.exec():
             spread_data = getattr(dialog, "pending_spread_config", None)
@@ -5443,6 +5476,12 @@ class DesktopWidget(QMainWindow):
 
     def contextMenuEvent(self, e):
         _context_menu_event_impl(self, e)
+
+    def fit_to_screen(self, include_taskbar=False):
+        _fit_to_screen_impl(self, include_taskbar=include_taskbar)
+
+    def snap_fill_available_space(self):
+        _snap_fill_available_space_impl(self)
 
     def open_master_controller(self):
         _open_master_controller_impl(self)
@@ -6781,22 +6820,8 @@ class MasterController(QMainWindow):
         """
 
     def _prompt_text_dialog(self, title, label, default_text=""):
-        from mywidgetbox_core import apply_windows_dark_title_bar, render_vector_icon
-        dialog = QInputDialog(self)
-        dialog.setWindowTitle(str(title))
-        dialog.setWindowIcon(render_vector_icon("widget", "#528bf8", 32))
-        dialog.setMinimumSize(280, 190)
-        dialog.resize(280, 190)
-        dialog.setInputMode(QInputDialog.InputMode.TextInput)
-        dialog.setLabelText(str(label))
-        dialog.setTextValue(str(default_text))
-        dialog.setOkButtonText("확인")
-        dialog.setCancelButtonText("취소")
-        dialog.setStyleSheet(self._themed_input_dialog_style())
-        QTimer.singleShot(0, lambda d=dialog: apply_windows_dark_title_bar(d))
-        if dialog.exec():
-            return dialog.textValue().strip(), True
-        return "", False
+        from mywidgetbox_core import ask_dark_input
+        return ask_dark_input(self, title, label, default_text=default_text)
 
     def _prompt_choice_dialog(self, title, label, choices):
         from mywidgetbox_core import apply_windows_dark_title_bar, render_vector_icon
@@ -7152,6 +7177,10 @@ class MasterController(QMainWindow):
             # 세트 이름
             title_lbl = QLabel(name, header)
             title_lbl.setObjectName("setGroupTitle")
+            title_lbl.setToolTip("더블클릭하여 세트 이름 변경")
+
+            # 세트 헤더 더블클릭 시 세트 이름 즉시 변경
+            header.mouseDoubleClickEvent = lambda e, s=sid_str: self.rename_set(s) if e.button() == Qt.MouseButton.LeftButton else None
 
             # 위젯 개수 뱃지
             count_badge = QLabel(f"{len(pids)}개", header)
@@ -7319,23 +7348,36 @@ class MasterController(QMainWindow):
                         }
                     """)
 
+                    btn_up = QPushButton(row)
+                    btn_down = QPushButton(row)
                     btn_run = QPushButton(row)
                     btn_stop = QPushButton(row)
                     btn_set = QPushButton(row)
                     btn_del = QPushButton(row)
 
-                    for b in (btn_run, btn_stop, btn_set, btn_del):
+                    for b in (btn_up, btn_down, btn_run, btn_stop, btn_set, btn_del):
                         b.setProperty("kind", "rowAction")
-                        b.setFixedSize(26, 26)
-                        b.setIconSize(QSize(13, 13))
+                        b.setFixedSize(24, 24)
+                        b.setIconSize(QSize(12, 12))
 
-                    btn_run.setIcon(render_vector_icon("run", "#58c796", 13))
+                    btn_up.setIcon(render_vector_icon("chevron_up", "#9cb5d8", 12))
+                    btn_up.setToolTip("위로 이동 (로딩 순서 올림)")
+                    btn_down.setIcon(render_vector_icon("chevron_down", "#9cb5d8", 12))
+                    btn_down.setToolTip("아래로 이동 (로딩 순서 내림)")
+
+                    btn_up.setEnabled(idx > 0)
+                    btn_down.setEnabled(idx < len(pids) - 1)
+
+                    btn_up.clicked.connect(lambda _, p=spid, s=sid_str: self.move_profile_up(p, s))
+                    btn_down.clicked.connect(lambda _, p=spid, s=sid_str: self.move_profile_down(p, s))
+
+                    btn_run.setIcon(render_vector_icon("run", "#58c796", 12))
                     btn_run.setToolTip("위젯 실행")
-                    btn_stop.setIcon(render_vector_icon("stop", "#f87171", 13))
+                    btn_stop.setIcon(render_vector_icon("stop", "#f87171", 12))
                     btn_stop.setToolTip("위젯 정지")
-                    btn_set.setIcon(render_vector_icon("settings", "#93c5fd", 13))
+                    btn_set.setIcon(render_vector_icon("settings", "#93c5fd", 12))
                     btn_set.setToolTip("위젯 상세 설정")
-                    btn_del.setIcon(render_vector_icon("trash", "#f87171", 13))
+                    btn_del.setIcon(render_vector_icon("trash", "#f87171", 12))
                     btn_del.setToolTip("위젯 삭제")
 
                     btn_run.setEnabled(not is_running)
@@ -7351,6 +7393,8 @@ class MasterController(QMainWindow):
                     row_layout.addWidget(status_dot, 0, Qt.AlignmentFlag.AlignVCenter)
                     row_layout.addWidget(name_lbl, 1, Qt.AlignmentFlag.AlignVCenter)
                     row_layout.addWidget(badge_lbl, 0, Qt.AlignmentFlag.AlignVCenter)
+                    row_layout.addWidget(btn_up, 0, Qt.AlignmentFlag.AlignVCenter)
+                    row_layout.addWidget(btn_down, 0, Qt.AlignmentFlag.AlignVCenter)
                     row_layout.addWidget(btn_run, 0, Qt.AlignmentFlag.AlignVCenter)
                     row_layout.addWidget(btn_stop, 0, Qt.AlignmentFlag.AlignVCenter)
                     row_layout.addWidget(btn_set, 0, Qt.AlignmentFlag.AlignVCenter)
@@ -7373,10 +7417,7 @@ class MasterController(QMainWindow):
                 add_btn.setObjectName("addTreeWidgetBtn")
                 add_btn.setIcon(render_vector_icon("plus", "#8da8cb", 12))
                 add_btn.setIconSize(QSize(12, 12))
-                def _on_add_in_set(s=sid_str):
-                    self._set_current_set_id(s, persist=True)
-                    self.add_profile()
-                add_btn.clicked.connect(_on_add_in_set)
+                add_btn.clicked.connect(lambda _, s=sid_str: self.add_profile(target_set_id=s))
 
                 add_row_layout.addStretch(1)
                 add_row_layout.addWidget(add_btn, 0, Qt.AlignmentFlag.AlignCenter)
@@ -7474,6 +7515,50 @@ class MasterController(QMainWindow):
                 self.run_widget(spid, name)
         self.update_active_status()
         self.load_profiles()
+
+    def move_profile_up(self, pid, sid=None):
+        spid = str(pid)
+        if not sid:
+            sid = self._set_of_profile(spid)
+        sid = str(sid)
+        if sid not in self._set_defs:
+            return
+
+        pids = [str(p) for p in self._as_list(self._set_defs[sid].get("profiles", []))]
+        if spid not in pids:
+            return
+
+        idx = pids.index(spid)
+        if idx <= 0:
+            return
+
+        pids[idx], pids[idx - 1] = pids[idx - 1], pids[idx]
+        self._set_defs[sid]["profiles"] = pids
+        self.master_settings.setValue(self._set_key(sid, "profiles"), pids)
+        self.master_settings.sync()
+        self.load_profiles(force_rebuild=True)
+
+    def move_profile_down(self, pid, sid=None):
+        spid = str(pid)
+        if not sid:
+            sid = self._set_of_profile(spid)
+        sid = str(sid)
+        if sid not in self._set_defs:
+            return
+
+        pids = [str(p) for p in self._as_list(self._set_defs[sid].get("profiles", []))]
+        if spid not in pids:
+            return
+
+        idx = pids.index(spid)
+        if idx < 0 or idx >= len(pids) - 1:
+            return
+
+        pids[idx], pids[idx + 1] = pids[idx + 1], pids[idx]
+        self._set_defs[sid]["profiles"] = pids
+        self.master_settings.setValue(self._set_key(sid, "profiles"), pids)
+        self.master_settings.sync()
+        self.load_profiles(force_rebuild=True)
 
     def bulk_stop_profiles(self):
         if not self._check_set_applied_for_action("일괄 정지"):
@@ -7683,8 +7768,13 @@ class MasterController(QMainWindow):
             return
         pid = str(pid)
 
+        if pid in self._temp_group_ids and len(self._temp_group_ids) >= 2:
+            self.open_bulk_settings()
+            return
+
         is_running = pid in self.widgets
         s_obj = QSettings("MyHomeApp", f"Profile_{pid}")
+        widget_display_name = str(s_obj.value("name", f"위젯 {pid}"))
         stored_prev_exec = str(s_obj.value("exec_path", "") or "")
 
         if is_running:
@@ -7757,7 +7847,7 @@ class MasterController(QMainWindow):
                 'gpu_guard_enabled': _as_bool(s_obj.value("gpu_guard_enabled", False), False),
             }
 
-        dialog = SettingsDialog(self, current_data)
+        dialog = SettingsDialog(self, current_data, widget_name=widget_display_name)
         
 
         if is_running:
@@ -7901,14 +7991,12 @@ class MasterController(QMainWindow):
             return False
 
         sid = self.selected_set_id()
+        if sid not in self._set_defs and self._set_order:
+            sid = self._set_order[0]
         applied_sid = str(getattr(self, "_applied_set_id", "") or "")
         if applied_sid and sid and sid != applied_sid:
-            QMessageBox.information(
-                self,
-                "스프레드 배치 불가",
-                "현재 적용(실행) 중인 세트에서만 위젯을 추가/배치할 수 있습니다.\n먼저 하단의 '세트 적용' 버튼을 눌러 세트를 전환해주세요.",
-            )
-            return False
+            self._set_current_set_id(sid, persist=True)
+            self.apply_set(sid)
         folder_path = str(spread_config.get("folder_path", "") or "").strip()
         item_paths = list(spread_config.get("item_paths", []) or [])
         if not item_paths:
@@ -7948,6 +8036,7 @@ class MasterController(QMainWindow):
         dir_y_sign = -1 if "bottom" in spread_direction else 1
 
         bg_mode = int(spread_config.get("bg_color_mode", 0))
+        corner_mode = int(spread_config.get("corner_mode", 0))
 
         col_heights = [start_y] * cols
 
@@ -7987,18 +8076,24 @@ class MasterController(QMainWindow):
                 media_fit_mode = 0
 
             if idx == 0 and target_widget:
+                target_widget.profile_name = item_name
                 target_widget.folder_path = folder_path
                 target_widget.folder_item_paths = [item_path]
                 target_widget._set_watched_folder(folder_path)
                 target_widget.bg_color_mode = bg_mode
+                target_widget.corner_mode = corner_mode
                 target_widget.media_fit_mode = media_fit_mode
                 target_widget.growth_anchor = spread_direction
                 target_widget.move(pos_x, pos_y)
                 target_widget.resize(item_w, item_h)
+                if hasattr(target_widget, "apply_mask_and_style"):
+                    target_widget.apply_mask_and_style()
                 target_widget.update_playlist()
                 target_widget.current_idx = -1
                 target_widget.next_media()
                 target_widget.save_all_settings()
+                QSettings("MyHomeApp", f"Profile_{target_widget.profile_id}").setValue("name", item_name)
+                QSettings("MyHomeApp", f"Profile_{target_widget.profile_id}").setValue("corner_mode", corner_mode)
                 created_count += 1
                 continue
 
@@ -8019,7 +8114,7 @@ class MasterController(QMainWindow):
             new_settings.setValue("media_fit_mode", media_fit_mode)
             new_settings.setValue("layer_mode", int(DesktopWidget.LAYER_NORMAL))
             new_settings.setValue("layer_schema_version", int(DesktopWidget.LAYER_SCHEMA_VERSION))
-            new_settings.setValue("corner_mode", 0)
+            new_settings.setValue("corner_mode", corner_mode)
             new_settings.setValue("video_transition_mode", int(DesktopWidget.VIDEO_TRANSITION_SINGLE))
             new_settings.setValue("video_decode_mode", int(DesktopWidget.VIDEO_DECODE_ORIGINAL))
             new_settings.setValue("video_dual_fade_ms", int(DesktopWidget.VIDEO_DUAL_FADE_DEFAULT_MS))
@@ -8262,16 +8357,14 @@ class MasterController(QMainWindow):
                 self._gpu_below_high_streak = 0
                 self._set_gpu_guard_paused(False, usage, reason="gpu_recovered_soft")
 
-    def add_profile(self):
-        sid = self.selected_set_id()
-        applied_sid = str(getattr(self, "_applied_set_id", "") or "")
-        if applied_sid and sid and sid != applied_sid:
-            QMessageBox.information(
-                self,
-                "위젯 추가 불가",
-                "현재 적용(실행) 중인 세트에서만 위젯을 추가할 수 있습니다.\n먼저 하단의 '세트 적용' 버튼을 눌러 세트를 전환해주세요.",
-            )
-            return
+    def add_profile(self, target_set_id=None):
+        if target_set_id not in (None, False, ""):
+            sid = str(target_set_id)
+        else:
+            sid = str(getattr(self, "_applied_set_id", "") or self.selected_set_id() or "")
+
+        if sid not in self._set_defs and self._set_order:
+            sid = self._set_order[0]
 
         p_ids = self._all_profile_ids()
         new_id = self._next_profile_id(p_ids)
@@ -8281,6 +8374,7 @@ class MasterController(QMainWindow):
         new_settings.setValue("name", "New 세팅")
         new_settings.setValue("w", 200)
         new_settings.setValue("h", 200)
+        new_settings.setValue("growth_anchor", "top-left")
         new_settings.setValue("layer_mode", int(DesktopWidget.LAYER_NORMAL))
         new_settings.setValue("layer_schema_version", int(DesktopWidget.LAYER_SCHEMA_VERSION))
         new_settings.setValue("corner_mode", 0)
@@ -8292,16 +8386,19 @@ class MasterController(QMainWindow):
         new_settings.sync()
 
         self.master_settings.setValue("profile_ids", p_ids)
-        sid = self.selected_set_id()
-        if sid not in self._set_defs and self._set_order:
-            sid = self._set_order[0]
         if sid in self._set_defs:
             profiles = list(self._set_defs[sid].get("profiles", []))
             profiles = [new_id] + [pid for pid in profiles if pid != new_id]
             self._set_defs[sid]["profiles"] = profiles
             self.master_settings.setValue(self._set_key(sid, "profiles"), profiles)
         self.master_settings.sync()
-        self.run_widget(new_id, "New 세팅")
+
+        applied_sid = str(getattr(self, "_applied_set_id", "") or "")
+        if applied_sid != sid:
+            self._set_current_set_id(sid, persist=True)
+            self.apply_set(sid)
+        else:
+            self.run_widget(new_id, "New 세팅")
 
     def run_widget(self, pid, name):
         spid = str(pid)
@@ -8417,30 +8514,54 @@ class MasterController(QMainWindow):
         if app:
             app.quit()
 
-    def rename_profile(self, item):
-        pid = item.data(Qt.ItemDataRole.UserRole)
+    def rename_profile(self, item_or_pid):
+        if hasattr(item_or_pid, "data"):
+            pid = item_or_pid.data(Qt.ItemDataRole.UserRole)
+        else:
+            pid = str(item_or_pid)
         if pid in (None, ""):
             return
         current_name = QSettings("MyHomeApp", f"Profile_{pid}").value("name", "New 세팅")
-        from mywidgetbox_core import apply_windows_dark_title_bar, render_vector_icon
-        dialog = QInputDialog(self)
-        dialog.setWindowTitle("이름 변경")
-        dialog.setWindowIcon(render_vector_icon("widget", "#528bf8", 32))
-        dialog.setMinimumSize(280, 190)
-        dialog.resize(280, 190)
-        dialog.setLabelText("세팅 이름을 입력하세요:")
-        dialog.setInputMode(QInputDialog.InputMode.TextInput)
-        dialog.setTextValue(str(current_name))
-        dialog.setOkButtonText("저장")
-        dialog.setCancelButtonText("취소")
-        dialog.setStyleSheet(self._themed_input_dialog_style())
-        QTimer.singleShot(0, lambda d=dialog: apply_windows_dark_title_bar(d))
+        from mywidgetbox_core import ask_dark_input
+        new_name, ok = ask_dark_input(
+            self,
+            title="위젯 이름 변경",
+            prompt="위젯 이름을 입력하세요:",
+            default_text=str(current_name),
+            ok_text="저장",
+            cancel_text="취소",
+        )
+        if ok and new_name:
+            QSettings("MyHomeApp", f"Profile_{pid}").setValue("name", new_name)
+            self.load_profiles()
 
-        if dialog.exec():
-            new_name = dialog.textValue().strip()
+    def rename_set(self, set_id, name=None):
+        sid = str(set_id)
+        if sid not in self._set_defs:
+            return
+        if name is not None:
+            new_name = str(name).strip()
             if new_name:
-                QSettings("MyHomeApp", f"Profile_{pid}").setValue("name", new_name)
+                self._set_defs[sid]["name"] = new_name
+                self.master_settings.setValue(self._set_key(sid, "name"), new_name)
+                self.master_settings.sync()
                 self.load_profiles()
+            return
+        current_name = self._set_defs[sid].get("name", f"세트{sid}")
+        from mywidgetbox_core import ask_dark_input
+        new_name, ok = ask_dark_input(
+            self,
+            title="세트 이름 변경",
+            prompt="세트 이름을 입력하세요:",
+            default_text=str(current_name),
+            ok_text="저장",
+            cancel_text="취소",
+        )
+        if ok and new_name:
+            self._set_defs[sid]["name"] = new_name
+            self.master_settings.setValue(self._set_key(sid, "name"), new_name)
+            self.master_settings.sync()
+            self.load_profiles()
 
     def _schedule_master_settings_sync(self, delay_ms=None):
         _mc_schedule_master_settings_sync_impl(self, delay_ms=delay_ms)

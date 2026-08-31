@@ -435,8 +435,8 @@ class FolderSpreadDialog(QDialog):
         self.setObjectName("folderSpreadDialog")
         self.setWindowTitle("스프레드(바둑판) 위젯 배치 설정")
         self.setWindowIcon(render_vector_icon("widget", "#528bf8", 32))
-        self.resize(580, 700)
-        self.setFixedWidth(580)
+        self.resize(600, 710)
+        self.setFixedWidth(600)
         self.folder_path = str(folder_path or "").strip()
         self.media_paths = [str(p) for p in (media_paths or []) if p and os.path.isfile(p)]
         self.result_data = None
@@ -746,21 +746,27 @@ class FolderSpreadDialog(QDialog):
         self.bg_combo.setCurrentIndex(0)
         grid_layout.addWidget(self.bg_combo, 2, 3)
 
-        grid_layout.addWidget(QLabel("비율/맞춤:"), 3, 0)
+        grid_layout.addWidget(QLabel("모서리 모양:"), 3, 0)
+        self.corner_combo = DownwardComboBox()
+        self.corner_combo.addItems(["곡선 (둥근)", "직각 (사각)", "원형 (최대)"])
+        self.corner_combo.setCurrentIndex(0)
+        grid_layout.addWidget(self.corner_combo, 3, 1)
+
+        grid_layout.addWidget(QLabel("비율/맞춤:"), 3, 2)
         self.fit_combo = DownwardComboBox()
         self.fit_combo.addItems([
-            "이미지 원본 비율 자동 맞춤 (여백 없음, 권장)",
-            "위젯 영역 꽉 채우기 (크롭, 여백 없음)",
-            "지정 크기 고정 (원본 전체 보기)",
+            "원본 비율 맞춤",
+            "영역 꽉 채우기",
+            "지정 크기 고정",
         ])
         self.fit_combo.setCurrentIndex(0)
-        grid_layout.addWidget(self.fit_combo, 3, 1, 1, 3)
+        grid_layout.addWidget(self.fit_combo, 3, 3)
 
         grid_layout.addWidget(QLabel("전개 방향:"), 4, 0)
         self.direction_combo = DownwardComboBox()
         self.direction_combo.addItems([
             "↘ 우하단 전개 (좌상단 시작, 기본)",
-            "↙ 좌하단 전개 (우상단 시작, 우상단 배치 추천)",
+            "↙ 좌하단 전개 (우상단 시작, 우상단 구석 추천)",
             "↗ 우상단 전개 (좌하단 시작, 작업표시줄 위 추천)",
             "↖ 좌상단 전개 (우하단 시작, 시계 구석 추천)",
         ])
@@ -923,8 +929,8 @@ class FolderSpreadDialog(QDialog):
             "margin": int(self.margin_input.value()),
             "fit_strategy": fit_strategy,
             "bg_color_mode": bg_mode,
+            "corner_mode": self.corner_combo.currentIndex() if hasattr(self, "corner_combo") else 0,
             "spread_direction": ["top-left", "top-right", "bottom-left", "bottom-right"][self.direction_combo.currentIndex()] if hasattr(self, "direction_combo") else "top-left",
-
         }
         self.accept()
 
@@ -1000,15 +1006,19 @@ class GrowthAnchorPicker(QWidget):
 
 
 class SettingsDialog(QDialog):
-    def __init__(self, parent=None, settings_data=None, bulk_mode=False, target_count=1):
+    def __init__(self, parent=None, settings_data=None, bulk_mode=False, target_count=1, widget_name=""):
         super().__init__(parent)
         self.bulk_mode = bool(bulk_mode)
         self.target_count = max(1, int(target_count))
+        self.widget_name = str(widget_name or (settings_data.get("name", "") if isinstance(settings_data, dict) else "") or "").strip()
         self.setObjectName("settingsDialog")
         if self.bulk_mode:
-            self.setWindowTitle(f"위젯 옵션 일괄 설정 ({self.target_count}개 선택됨)")
+            self.setWindowTitle(f"위젯 상세 설정 - {self.target_count}개 그룹")
         else:
-            self.setWindowTitle("위젯 상세 설정")
+            if self.widget_name:
+                self.setWindowTitle(f"위젯 상세 설정 - {self.widget_name}")
+            else:
+                self.setWindowTitle("위젯 상세 설정")
         from mywidgetbox_core import render_vector_icon
         self.setWindowIcon(render_vector_icon("settings", "#528bf8", 32))
         self._title_bar_themed = False
@@ -1303,7 +1313,7 @@ QDialog#settingsDialog {
                 font-size: 12px;
                 line-height: 1.4;
             }
-            QPushButton#fitAspectBtn, QPushButton#editSlideListBtn {
+            QPushButton#fitAspectBtn, QPushButton#fitScreenBtn, QPushButton#editSlideListBtn {
                 color: #dbe7fa;
                 background-color: #243852;
                 border: 1px solid #3c587e;
@@ -1313,7 +1323,7 @@ QDialog#settingsDialog {
                 font-size: 12px;
                 font-weight: 600;
             }
-            QPushButton#fitAspectBtn:hover, QPushButton#editSlideListBtn:hover {
+            QPushButton#fitAspectBtn:hover, QPushButton#fitScreenBtn:hover, QPushButton#editSlideListBtn:hover {
                 background-color: #35527d;
                 border-color: #5d84b8;
                 color: #ffffff;
@@ -1327,21 +1337,42 @@ QDialog#settingsDialog {
 
         header = QFrame()
         header.setObjectName("settingsHeader")
-        header_layout = QVBoxLayout(header)
-        header_layout.setContentsMargins(12, 10, 12, 10)
-        header_layout.setSpacing(3)
-        if self.bulk_mode:
-            title_text = f"위젯 옵션 일괄 설정 ({self.target_count}개 선택됨)"
-            subtitle_text = "선택한 위젯들에 공통으로 적용할 옵션을 설정합니다 (실행/연동 옵션 제외)"
-        else:
-            title_text = "위젯 상세 설정"
-            subtitle_text = "현재 위젯의 재생/표시/상호작용 설정을 변경합니다"
-        title_label = QLabel(title_text)
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(4, 4, 4, 4)
+        header_layout.setSpacing(10)
+
+        title_label = QLabel("위젯 상세 설정")
         title_label.setObjectName("settingsTitle")
-        subtitle_label = QLabel(subtitle_text)
-        subtitle_label.setObjectName("settingsSubtitle")
-        header_layout.addWidget(title_label)
-        header_layout.addWidget(subtitle_label)
+        header_layout.addWidget(title_label, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        target_badge = QLabel()
+        target_badge.setObjectName("targetBadge")
+        if self.bulk_mode:
+            target_badge.setText(f"{self.target_count}개 그룹")
+            target_badge.setProperty("group", "true")
+        else:
+            display_name = self.widget_name if self.widget_name else "개별 위젯"
+            target_badge.setText(display_name)
+            target_badge.setProperty("group", "false")
+
+        target_badge.setStyleSheet("""
+            QLabel#targetBadge {
+                color: #70a2ff;
+                background-color: #101e33;
+                border: 1px solid #2d4f82;
+                border-radius: 6px;
+                padding: 3px 10px;
+                font-size: 13px;
+                font-weight: 700;
+            }
+            QLabel#targetBadge[group="true"] {
+                color: #4ade80;
+                background-color: #0d281e;
+                border: 1px solid #16563c;
+            }
+        """)
+        header_layout.addWidget(target_badge, 0, Qt.AlignmentFlag.AlignVCenter)
+        header_layout.addStretch(1)
         root.addWidget(header)
 
         # Modern Segmented Tab Bar (1:1:1 꽉 찬 세그먼트 컨트롤)
@@ -1621,12 +1652,20 @@ QDialog#settingsDialog {
         self.fit_aspect_btn.setToolTip("현재 선택된 이미지의 실제 원본 해상도(가로세로 비율)에 맞춰 높이를 자동 조절합니다.")
         self.fit_aspect_btn.clicked.connect(self._on_fit_aspect_clicked)
 
+        self.fit_screen_btn = QPushButton("화면 맞춤")
+        self.fit_screen_btn.setObjectName("fitScreenBtn")
+        self.fit_screen_btn.setIcon(render_vector_icon("screen", "#d8e7fa", 16))
+        self.fit_screen_btn.setIconSize(QSize(16, 16))
+        self.fit_screen_btn.setToolTip("현재 모니터 해상도 및 작업표시줄 영역에 맞춰 비율을 유지하며 화면에 꽉 차게 맞춥니다.")
+        self.fit_screen_btn.clicked.connect(self._on_fit_screen_clicked)
+
         self.ratio_row_widget = QWidget()
         ratio_row = QHBoxLayout(self.ratio_row_widget)
         ratio_row.setContentsMargins(0, 0, 0, 0)
-        ratio_row.setSpacing(8)
+        ratio_row.setSpacing(6)
         ratio_row.addWidget(self.keep_aspect_ratio_cb, 0)
         ratio_row.addWidget(self.fit_aspect_btn, 0)
+        ratio_row.addWidget(self.fit_screen_btn, 0)
         ratio_row.addStretch(1)
 
 
@@ -2462,6 +2501,61 @@ QDialog#settingsDialog {
 
         if not self._apply_media_aspect_to_inputs(target_path):
             QMessageBox.information(self, "비율 확인 불가", "미디어 파일의 해상도 비율을 확인할 수 없습니다.")
+
+    def _on_fit_screen_clicked(self):
+        self._fit_to_screen_geometry(include_taskbar=False)
+
+    def _fit_to_screen_geometry(self, include_taskbar=False):
+        screen = None
+        if self.parent() and hasattr(self.parent(), "geometry"):
+            screen = QApplication.screenAt(self.parent().geometry().center())
+        if not screen:
+            screen = QApplication.primaryScreen()
+
+        if not screen:
+            QMessageBox.information(self, "화면 감지 불가", "현재 화면 정보를 가져올 수 없습니다.")
+            return
+
+        if include_taskbar:
+            geo = screen.geometry()
+        else:
+            geo = screen.availableGeometry()
+
+        sw = max(100, int(geo.width()))
+        sh = max(100, int(geo.height()))
+
+        target_path = None
+        if self.folder_item_paths:
+            for p in self.folder_item_paths:
+                if p and os.path.isfile(p):
+                    target_path = p
+                    break
+        if not target_path and self.folder_path and os.path.isdir(self.folder_path):
+            scanned = self._scan_media_paths_for_folder(self.folder_path)
+            if scanned:
+                target_path = scanned[0]
+
+        iw, ih = 0, 0
+        if target_path and os.path.isfile(target_path):
+            sz = get_media_native_size(target_path)
+            if sz and len(sz) == 2 and sz[0] > 0 and sz[1] > 0:
+                iw, ih = sz[0], sz[1]
+
+        if iw <= 0 or ih <= 0:
+            iw = max(1, self.width_input.value())
+            ih = max(1, self.height_input.value())
+
+        scale = min(float(sw) / float(iw), float(sh) / float(ih))
+        target_w = max(50, min(5000, int(round(iw * scale))))
+        target_h = max(50, min(5000, int(round(ih * scale))))
+
+        self._syncing_aspect_size = True
+        try:
+            self.width_input.setValue(target_w)
+            self.height_input.setValue(target_h)
+            self._current_aspect_ratio = float(target_w) / max(1.0, float(target_h))
+        finally:
+            self._syncing_aspect_size = False
 
     def select_file(self):
         filter_str = "미디어 파일 (*.png *.jpg *.jpeg *.bmp *.webp *.gif *.mp4 *.mov *.avi *.mkv *.webm *.m4v);;모든 파일 (*)"

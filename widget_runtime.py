@@ -1,6 +1,6 @@
 import os
 
-from PyQt6.QtCore import QTimer, Qt
+from PyQt6.QtCore import QSettings, QTimer, Qt
 from PyQt6.QtGui import QPixmap
 from PyQt6.QtMultimedia import QMediaPlayer
 from PyQt6.QtWidgets import QApplication, QMenu
@@ -164,7 +164,14 @@ def save_all_settings(widget, sync=None):
         schedule_settings_sync(widget)
 
 def build_settings_dialog_data(widget):
+    p_name = str(getattr(widget, "profile_name", "") or "")
+    if not p_name and hasattr(widget, "profile_id"):
+        try:
+            p_name = str(QSettings("MyHomeApp", f"Profile_{widget.profile_id}").value("name", f"위젯 {widget.profile_id}"))
+        except Exception:
+            p_name = f"위젯 {widget.profile_id}"
     return {
+        "name": p_name,
         "w": widget.width(),
         "h": widget.height(),
         "keep_aspect_ratio": bool(getattr(widget, "keep_aspect_ratio", True)),
@@ -843,12 +850,158 @@ def drop_event(widget, event):
         event.ignore()
 
 
+def fit_to_screen(widget, include_taskbar=False):
+    screen = QApplication.screenAt(widget.geometry().center())
+    if not screen:
+        screen = QApplication.primaryScreen()
+    if not screen:
+        return
+
+    if include_taskbar:
+        geo = screen.geometry()
+    else:
+        geo = screen.availableGeometry()
+
+    sw = max(100, int(geo.width()))
+    sh = max(100, int(geo.height()))
+
+    iw, ih = 0, 0
+    p = widget.get_current_media_path() if hasattr(widget, "get_current_media_path") else ""
+    if p and os.path.isfile(p):
+        from mywidgetbox_core import get_media_native_size
+        sz = get_media_native_size(p)
+        if sz and len(sz) == 2 and sz[0] > 0 and sz[1] > 0:
+            iw, ih = sz[0], sz[1]
+
+    if iw <= 0 or ih <= 0:
+        iw = max(1, widget.width())
+        ih = max(1, widget.height())
+
+    scale = min(float(sw) / float(iw), float(sh) / float(ih))
+    target_w = max(50, min(5000, int(round(iw * scale))))
+    target_h = max(50, min(5000, int(round(ih * scale))))
+
+    pos_x = geo.left() + (sw - target_w) // 2
+    pos_y = geo.top() + (sh - target_h) // 2
+
+    cur_geo = widget.geometry()
+    is_already_fit = (
+        abs(cur_geo.width() - target_w) <= 2
+        and abs(cur_geo.height() - target_h) <= 2
+        and abs(cur_geo.x() - pos_x) <= 2
+        and abs(cur_geo.y() - pos_y) <= 2
+    )
+
+    if is_already_fit and hasattr(widget, "_prev_restore_geo") and widget._prev_restore_geo:
+        prev = widget._prev_restore_geo
+        widget._prev_restore_geo = None
+        widget.setGeometry(prev)
+    else:
+        widget._prev_restore_geo = cur_geo
+        widget.setGeometry(pos_x, pos_y, target_w, target_h)
+
+    widget.save_all_settings()
+    widget.apply_mask_and_style()
+    if hasattr(widget, "_show_size_hud"):
+        widget._show_size_hud()
+
+
+def snap_fill_available_space(widget):
+    screen = QApplication.screenAt(widget.geometry().center())
+    if not screen:
+        screen = QApplication.primaryScreen()
+    if not screen:
+        return
+
+    screen_geo = screen.availableGeometry()
+    cur_geo = widget.geometry()
+    wx, wy, ww, wh = cur_geo.x(), cur_geo.y(), cur_geo.width(), cur_geo.height()
+
+    other_geos = []
+    if hasattr(widget, "manager") and widget.manager and hasattr(widget.manager, "widgets"):
+        for pid, w_obj in widget.manager.widgets.items():
+            if w_obj != widget and hasattr(w_obj, "isVisible") and w_obj.isVisible():
+                other_geos.append(w_obj.geometry())
+
+    max_right = screen_geo.right() + 1
+    for og in other_geos:
+        if max(wy, og.top()) < min(wy + wh, og.bottom() + 1):
+            if og.left() >= wx + ww - 2:
+                if og.left() < max_right:
+                    max_right = og.left()
+
+    max_bottom = screen_geo.bottom() + 1
+    for og in other_geos:
+        if max(wx, og.left()) < min(wx + ww, og.right() + 1):
+            if og.top() >= wy + wh - 2:
+                if og.top() < max_bottom:
+                    max_bottom = og.top()
+
+    avail_w = max(50, max_right - wx)
+    avail_h = max(50, max_bottom - wy)
+
+    iw, ih = 0, 0
+    p = widget.get_current_media_path() if hasattr(widget, "get_current_media_path") else ""
+    if p and os.path.isfile(p):
+        from mywidgetbox_core import get_media_native_size
+        sz = get_media_native_size(p)
+        if sz and len(sz) == 2 and sz[0] > 0 and sz[1] > 0:
+            iw, ih = sz[0], sz[1]
+
+    if iw <= 0 or ih <= 0:
+        iw = max(1, ww)
+        ih = max(1, wh)
+
+    scale = min(float(avail_w) / float(iw), float(avail_h) / float(ih))
+    new_w = max(50, min(5000, int(round(iw * scale))))
+    new_h = max(50, min(5000, int(round(ih * scale))))
+
+    widget.resize(new_w, new_h)
+    widget.save_all_settings()
+    widget.apply_mask_and_style()
+    if hasattr(widget, "_show_size_hud"):
+        widget._show_size_hud()
+
+
 def context_menu_event(widget, e):
+    from mywidgetbox_core import render_vector_icon
     menu = QMenu(widget)
-    menu.setStyleSheet("QMenu { background-color: #333; color: white; border: 1px solid #555; } QMenu::item:selected { background-color: #555; }")
-    action_settings = menu.addAction("위젯 설정")
+    menu.setStyleSheet("""
+        QMenu {
+            background-color: #162438;
+            color: #edf3ff;
+            border: 1px solid #334d73;
+            border-radius: 8px;
+            padding: 4px;
+        }
+        QMenu::item {
+            padding: 6px 14px 6px 10px;
+            border-radius: 5px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        QMenu::item:selected {
+            background-color: #2b456a;
+            color: #ffffff;
+        }
+        QMenu::separator {
+            height: 1px;
+            background: #2a3d59;
+            margin: 4px 6px;
+        }
+    """)
+
+    act_fit = menu.addAction(render_vector_icon("screen", "#7da5dc", 14), "화면 크기 맞춤")
+    act_fit.triggered.connect(lambda: fit_to_screen(widget, include_taskbar=False))
+
+    act_snap = menu.addAction(render_vector_icon("widget", "#92bbf8", 14), "인접 빈 공간 밀착 채우기")
+    act_snap.triggered.connect(lambda: snap_fill_available_space(widget))
+
+    menu.addSeparator()
+
+    action_settings = menu.addAction(render_vector_icon("settings", "#93c5fd", 14), "위젯 상세 설정")
     action_settings.triggered.connect(widget.open_settings)
-    action_master = menu.addAction("위젯 컨트롤러")
+    action_master = menu.addAction(render_vector_icon("list", "#cddbf0", 14), "위젯 컨트롤러")
     action_master.triggered.connect(widget.open_master_controller)
     menu.exec(e.globalPos())
 
