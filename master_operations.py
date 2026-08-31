@@ -370,6 +370,30 @@ def adjust_temp_group_opacity(controller, source_pid, delta_pct):
         widget.save_all_settings()
 
 
+def adjust_temp_group_layer(controller, source_pid, step):
+    try:
+        step_val = int(step)
+    except Exception:
+        step_val = 0
+    if step_val == 0:
+        return
+    targets = temp_group_shortcut_targets(controller, source_pid)
+    if not targets:
+        return
+    layer_names = {0: "배경 (최하단)", 1: "일반 (기본)", 2: "최상위 (항상 위)"}
+    for widget in targets:
+        cur_layer = int(getattr(widget, "layer_mode", 1))
+        new_layer = max(0, min(2, cur_layer + step_val))
+        if new_layer == cur_layer:
+            continue
+        widget.layer_mode = new_layer
+        widget.apply_window_settings(new_layer, widget.is_locked)
+        widget.save_all_settings()
+        if hasattr(widget, "_show_action_hud"):
+            name = layer_names.get(new_layer, str(new_layer))
+            widget._show_action_hud(f"레이어: {name}")
+
+
 def set_temp_group_lock(controller, source_pid, lock):
     targets = temp_group_shortcut_targets(controller, source_pid)
     if not targets:

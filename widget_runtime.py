@@ -813,6 +813,27 @@ def wheel_event(widget, e):
                     widget.save_all_settings()
         return
 
+    if e.modifiers() & Qt.KeyboardModifier.AltModifier:
+        wheel_delta = e.angleDelta().y()
+        steps = int(wheel_delta / 120) if wheel_delta else 0
+        if steps == 0 and wheel_delta != 0:
+            steps = 1 if wheel_delta > 0 else -1
+        if steps != 0:
+            if hasattr(widget, "manager") and widget.manager and hasattr(widget.manager, "adjust_temp_group_layer"):
+                widget.manager.adjust_temp_group_layer(widget.profile_id, steps)
+            else:
+                cur_layer = int(getattr(widget, "layer_mode", 1))
+                new_layer = max(0, min(2, cur_layer + steps))
+                if new_layer != cur_layer:
+                    widget.layer_mode = new_layer
+                    widget.apply_window_settings(new_layer, widget.is_locked)
+                    widget.save_all_settings()
+                    if hasattr(widget, "_show_action_hud"):
+                        layer_names = {0: "배경 (최하단)", 1: "일반 (기본)", 2: "최상위 (항상 위)"}
+                        name = layer_names.get(new_layer, str(new_layer))
+                        widget._show_action_hud(f"레이어: {name}")
+        return
+
     if not widget.playlist:
         return
 

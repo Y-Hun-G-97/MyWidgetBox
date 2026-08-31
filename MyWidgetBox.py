@@ -181,6 +181,7 @@ from master_operations import (
     temp_group_move_targets as _mtg_temp_group_move_targets_impl,
     temp_group_shortcut_targets as _mtg_temp_group_shortcut_targets_impl,
     toggle_temp_group_member as _mtg_toggle_temp_group_member_impl,
+    adjust_temp_group_layer as _mtg_adjust_temp_group_layer_impl,
     adjust_temp_group_opacity as _mtg_adjust_temp_group_opacity_impl,
     clear_temp_group as _mtg_clear_temp_group_impl,
 )
@@ -6509,6 +6510,9 @@ class MasterController(QMainWindow):
 
     def adjust_temp_group_opacity(self, source_pid, delta_pct):
         _mtg_adjust_temp_group_opacity_impl(self, source_pid, delta_pct)
+
+    def adjust_temp_group_layer(self, source_pid, step):
+        _mtg_adjust_temp_group_layer_impl(self, source_pid, step)
 
     def set_temp_group_lock(self, source_pid, lock):
         return _mtg_set_temp_group_lock_impl(self, source_pid, lock)
