@@ -10,9 +10,12 @@ from PyQt6.QtWidgets import (
 )
 
 class SetManagerDialog(QDialog):
-    def __init__(self, master, parent=None):
+    def __init__(self, master, target_sid=None, parent=None):
         super().__init__(parent if parent is not None else master)
         self.master = master
+        self.target_sid = str(target_sid) if target_sid else str(master.selected_set_id() or "")
+        if not self.target_sid and getattr(master, "_set_order", None):
+            self.target_sid = str(master._set_order[0])
         self._title_bar_themed = False
         self.setObjectName("setManagerDialog")
         self.setWindowTitle("세트 관리")
@@ -115,18 +118,18 @@ class SetManagerDialog(QDialog):
         super().showEvent(event)
 
     def _refresh_info(self):
-        sid = self.master.selected_set_id()
+        sid = str(self.target_sid) if self.target_sid else str(self.master.selected_set_id() or "")
         data = self.master._set_defs.get(sid, {})
         name = str(data.get("name", f"세트{sid}" if sid else "세트"))
         count = len(data.get("profiles", []))
-        self.info_label.setText(f"현재 세트: {name}  |  위젯 {count}개")
+        self.info_label.setText(f"대상 세트: {name}  |  위젯 {count}개")
         self.delete_btn.setEnabled(len(self.master._set_order) > 1)
 
     def _copy_set(self):
         items = self.master.get_set_items()
         if not items:
             return
-        target_sid = self.master.selected_set_id()
+        target_sid = str(self.target_sid) if self.target_sid else str(self.master.selected_set_id() or "")
         choices = [(str(sid), str(name)) for sid, name, _ in items if str(sid) != str(target_sid)]
         labels = [f"{name} ({sid})" for sid, name in choices]
         if not labels:
@@ -145,11 +148,10 @@ class SetManagerDialog(QDialog):
             self.accept()
 
     def _delete_set(self):
-        sid = self.master.selected_set_id()
+        sid = str(self.target_sid) if self.target_sid else str(self.master.selected_set_id() or "")
         if not sid:
             return
-        if self.master.delete_set(sid):
-            self._refresh_info()
+        if self.master.delete_set(sid, parent=self):
             self.accept()
 
 

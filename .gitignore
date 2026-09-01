@@ -1,5 +1,4 @@
 build/
 dist/
-*.md
 *.pyc
 __pycache__/

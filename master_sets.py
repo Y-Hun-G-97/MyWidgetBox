@@ -431,26 +431,28 @@ def rename_set(controller, set_id, new_name):
     return True
 
 
-def delete_set(controller, set_id):
+def delete_set(controller, set_id, parent=None):
     sid = str(set_id)
     if sid not in controller._set_defs:
         return False
+    parent_window = parent if parent is not None else controller
     if len(controller._set_order) <= 1:
-        QMessageBox.information(controller, "세트 삭제", "최소 1개의 세트는 유지되어야 합니다.")
+        QMessageBox.information(parent_window, "세트 삭제", "최소 1개의 세트는 유지되어야 합니다.")
         return False
 
     set_name = str(controller._set_defs[sid].get("name", f"세트{sid}"))
     removed_profiles = [str(pid) for pid in controller._set_defs[sid].get("profiles", [])]
     remaining_set_ids = [str(x) for x in controller._set_order if str(x) != sid]
     if not remaining_set_ids:
-        QMessageBox.information(controller, "세트 삭제", "최소 1개의 세트는 유지되어야 합니다.")
+        QMessageBox.information(parent_window, "세트 삭제", "최소 1개의 세트는 유지되어야 합니다.")
         return False
     absorb_target_sid = str(remaining_set_ids[0])
     absorb_target_name = str(controller._set_defs.get(absorb_target_sid, {}).get("name", f"세트{absorb_target_sid}"))
 
     delete_profiles = False
     if removed_profiles:
-        choice_box = QMessageBox(controller)
+        choice_box = QMessageBox(parent_window)
+        choice_box.setWindowModality(Qt.WindowModality.ApplicationModal)
         choice_box.setWindowTitle("세트 삭제")
         choice_box.setIcon(QMessageBox.Icon.Warning)
         choice_box.setText(f"'{set_name}' 세트를 삭제합니다.")
@@ -498,6 +500,9 @@ def delete_set(controller, set_id):
         choice_box.setDefaultButton(absorb_btn)
         from mywidgetbox_core import apply_windows_dark_title_bar, ask_dark_confirm
         QTimer.singleShot(0, lambda: apply_windows_dark_title_bar(choice_box))
+        choice_box.show()
+        choice_box.raise_()
+        choice_box.activateWindow()
         choice_box.exec()
         clicked = choice_box.clickedButton()
         if clicked is cancel_btn:
@@ -506,7 +511,7 @@ def delete_set(controller, set_id):
     else:
         from mywidgetbox_core import ask_dark_confirm
         if not ask_dark_confirm(
-            controller,
+            parent_window,
             "세트 삭제",
             f"'{set_name}' 세트를 완전히 삭제하시겠습니까?",
             yes_text="삭제",
@@ -560,7 +565,7 @@ def delete_set(controller, set_id):
         controller._refresh_set_ui()
         controller._sync_temp_group_badges()
         controller.update_active_status()
-        controller.load_profiles()
+        controller.load_profiles(force_rebuild=True)
     return True
 
 

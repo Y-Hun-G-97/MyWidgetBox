@@ -796,12 +796,48 @@ def mouse_release_event(widget, e):
     widget._refresh_resize_ui()
 
 
+def _is_alt_pressed(e):
+    if bool(e.modifiers() & Qt.KeyboardModifier.AltModifier):
+        return True
+    try:
+        import win32api, win32con
+        if bool(win32api.GetAsyncKeyState(win32con.VK_MENU) & 0x8000):
+            return True
+        if bool(win32api.GetAsyncKeyState(win32con.VK_LMENU) & 0x8000):
+            return True
+        if bool(win32api.GetAsyncKeyState(win32con.VK_RMENU) & 0x8000):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _is_ctrl_pressed(e):
+    if bool(e.modifiers() & Qt.KeyboardModifier.ControlModifier):
+        return True
+    try:
+        import win32api, win32con
+        if bool(win32api.GetAsyncKeyState(win32con.VK_CONTROL) & 0x8000):
+            return True
+        if bool(win32api.GetAsyncKeyState(win32con.VK_LCONTROL) & 0x8000):
+            return True
+        if bool(win32api.GetAsyncKeyState(win32con.VK_RCONTROL) & 0x8000):
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def wheel_event(widget, e):
-    if e.modifiers() & Qt.KeyboardModifier.ControlModifier:
-        wheel_delta = e.angleDelta().y()
-        steps = int(wheel_delta / 120) if wheel_delta else 0
-        if steps == 0 and wheel_delta != 0:
-            steps = 1 if wheel_delta > 0 else -1
+    wheel_delta = e.angleDelta().y()
+    if wheel_delta == 0:
+        wheel_delta = e.angleDelta().x()
+
+    steps = int(wheel_delta / 120) if wheel_delta else 0
+    if steps == 0 and wheel_delta != 0:
+        steps = 1 if wheel_delta > 0 else -1
+
+    if _is_ctrl_pressed(e):
         if steps != 0:
             if hasattr(widget, "manager") and widget.manager and hasattr(widget.manager, "adjust_temp_group_opacity"):
                 widget.manager.adjust_temp_group_opacity(widget.profile_id, steps * 5)
@@ -813,25 +849,21 @@ def wheel_event(widget, e):
                     widget.save_all_settings()
         return
 
-    if e.modifiers() & Qt.KeyboardModifier.AltModifier:
-        wheel_delta = e.angleDelta().y()
-        steps = int(wheel_delta / 120) if wheel_delta else 0
-        if steps == 0 and wheel_delta != 0:
-            steps = 1 if wheel_delta > 0 else -1
+    if _is_alt_pressed(e):
         if steps != 0:
             if hasattr(widget, "manager") and widget.manager and hasattr(widget.manager, "adjust_temp_group_layer"):
                 widget.manager.adjust_temp_group_layer(widget.profile_id, steps)
             else:
                 cur_layer = int(getattr(widget, "layer_mode", 1))
                 new_layer = max(0, min(2, cur_layer + steps))
+                layer_names = {0: "배경 (최하단)", 1: "일반 (기본)", 2: "최상위 (항상 위)"}
                 if new_layer != cur_layer:
                     widget.layer_mode = new_layer
                     widget.apply_window_settings(new_layer, widget.is_locked)
                     widget.save_all_settings()
-                    if hasattr(widget, "_show_action_hud"):
-                        layer_names = {0: "배경 (최하단)", 1: "일반 (기본)", 2: "최상위 (항상 위)"}
-                        name = layer_names.get(new_layer, str(new_layer))
-                        widget._show_action_hud(f"레이어: {name}")
+                if hasattr(widget, "_show_action_hud"):
+                    name = layer_names.get(new_layer, str(new_layer))
+                    widget._show_action_hud(f"레이어: {name}")
         return
 
     if not widget.playlist:
@@ -878,10 +910,8 @@ def fit_to_screen(widget, include_taskbar=False):
     if not screen:
         return
 
-    if include_taskbar:
-        geo = screen.geometry()
-    else:
-        geo = screen.availableGeometry()
+    from mywidgetbox_core import get_screen_work_area
+    geo = get_screen_work_area(screen, force_full=include_taskbar)
 
     sw = max(100, int(geo.width()))
     sh = max(100, int(geo.height()))
@@ -894,16 +924,24 @@ def fit_to_screen(widget, include_taskbar=False):
         if sz and len(sz) == 2 and sz[0] > 0 and sz[1] > 0:
             iw, ih = sz[0], sz[1]
 
-    if iw <= 0 or ih <= 0:
-        iw = max(1, widget.width())
-        ih = max(1, widget.height())
+    keep_aspect = bool(getattr(widget, "keep_aspect_ratio", True))
+    if keep_aspect:
+        if iw <= 0 or ih <= 0:
+            iw = max(1, widget.width())
+            ih = max(1, widget.height())
 
-    scale = min(float(sw) / float(iw), float(sh) / float(ih))
-    target_w = max(50, min(5000, int(round(iw * scale))))
-    target_h = max(50, min(5000, int(round(ih * scale))))
+        scale = min(float(sw) / float(iw), float(sh) / float(ih))
+        target_w = max(50, min(5000, int(round(iw * scale))))
+        target_h = max(50, min(5000, int(round(ih * scale))))
 
-    pos_x = geo.left() + (sw - target_w) // 2
-    pos_y = geo.top() + (sh - target_h) // 2
+        pos_x = geo.left() + (sw - target_w) // 2
+        pos_y = geo.top() + (sh - target_h) // 2
+    else:
+        # 비율 맞춤 해제: 종횡비 무시하고 화면 전체를 100% 꽉 채움
+        target_w = sw
+        target_h = sh
+        pos_x = geo.left()
+        pos_y = geo.top()
 
     cur_geo = widget.geometry()
     is_already_fit = (
@@ -934,7 +972,8 @@ def snap_fill_available_space(widget):
     if not screen:
         return
 
-    screen_geo = screen.availableGeometry()
+    from mywidgetbox_core import get_screen_work_area
+    screen_geo = get_screen_work_area(screen)
     cur_geo = widget.geometry()
     wx, wy, ww, wh = cur_geo.x(), cur_geo.y(), cur_geo.width(), cur_geo.height()
 
@@ -961,21 +1000,27 @@ def snap_fill_available_space(widget):
     avail_w = max(50, max_right - wx)
     avail_h = max(50, max_bottom - wy)
 
-    iw, ih = 0, 0
-    p = widget.get_current_media_path() if hasattr(widget, "get_current_media_path") else ""
-    if p and os.path.isfile(p):
-        from mywidgetbox_core import get_media_native_size
-        sz = get_media_native_size(p)
-        if sz and len(sz) == 2 and sz[0] > 0 and sz[1] > 0:
-            iw, ih = sz[0], sz[1]
+    keep_aspect = bool(getattr(widget, "keep_aspect_ratio", True))
+    if keep_aspect:
+        iw, ih = 0, 0
+        p = widget.get_current_media_path() if hasattr(widget, "get_current_media_path") else ""
+        if p and os.path.isfile(p):
+            from mywidgetbox_core import get_media_native_size
+            sz = get_media_native_size(p)
+            if sz and len(sz) == 2 and sz[0] > 0 and sz[1] > 0:
+                iw, ih = sz[0], sz[1]
 
-    if iw <= 0 or ih <= 0:
-        iw = max(1, ww)
-        ih = max(1, wh)
+        if iw <= 0 or ih <= 0:
+            iw = max(1, ww)
+            ih = max(1, wh)
 
-    scale = min(float(avail_w) / float(iw), float(avail_h) / float(ih))
-    new_w = max(50, min(5000, int(round(iw * scale))))
-    new_h = max(50, min(5000, int(round(ih * scale))))
+        scale = min(float(avail_w) / float(iw), float(avail_h) / float(ih))
+        new_w = max(50, min(5000, int(round(iw * scale))))
+        new_h = max(50, min(5000, int(round(ih * scale))))
+    else:
+        # 비율 맞춤 해제: 인접한 빈 공간 전체(너비 & 높이)를 100% 꽉 채움
+        new_w = max(50, min(5000, avail_w))
+        new_h = max(50, min(5000, avail_h))
 
     widget.resize(new_w, new_h)
     widget.save_all_settings()

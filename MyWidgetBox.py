@@ -53,6 +53,7 @@ from media_runtime import (
     runtime_binary_dirs,
 )
 from mywidgetbox_ui_primitives import (
+    ElidedLabel,
     MarqueeSelectionOverlay,
     OverlayWidget,
     ProfileListWidget,
@@ -5563,10 +5564,13 @@ class MasterController(QMainWindow):
             self.setWindowIcon(self.app_icon)
         else:
             self.setWindowIcon(render_vector_icon("widget", "#528bf8", 32))
-        self.setFixedSize(476, 680)
         self.setObjectName("masterWindow")
+        self.setMinimumSize(440, 520)
         QTimer.singleShot(0, lambda: apply_windows_dark_title_bar(self))
         self.master_settings = QSettings("MyHomeApp", "MasterV3")
+        w_saved = int(self.master_settings.value("window_width", 490))
+        h_saved = int(self.master_settings.value("window_height", 680))
+        self.resize(max(440, min(3000, w_saved)), max(520, min(3000, h_saved)))
         try:
             master_sync_ms = int(os.environ.get("MYCANVAS_MASTER_SYNC_MS", "650") or "650")
         except Exception:
@@ -5642,10 +5646,17 @@ class MasterController(QMainWindow):
                 color: #b8c9e6;
                 font-size: 10px;
             }
-            QCheckBox#startupToggle {
+            QCheckBox#startupToggle,
+            QCheckBox#fullscreenPauseToggle {
                 color: #e4ecfb;
+                font-size: 11px;
+                font-weight: 600;
                 spacing: 6px;
                 min-height: 22px;
+            }
+            QCheckBox#startupToggle:hover,
+            QCheckBox#fullscreenPauseToggle:hover {
+                color: #ffffff;
             }
             QToolButton#gpuCfgBtn {
                 min-width: 50px;
@@ -6115,6 +6126,11 @@ class MasterController(QMainWindow):
         self.gpu_resume_slider.setSingleStep(1)
         gpu_cfg_panel_layout.addWidget(self.gpu_resume_slider)
 
+        sep_line = QFrame()
+        sep_line.setFrameShape(QFrame.Shape.HLine)
+        sep_line.setStyleSheet("background-color: #283a54; min-height: 1px; max-height: 1px; border: none; margin: 4px 0;")
+        gpu_cfg_panel_layout.addWidget(sep_line)
+
         self.startup_shortcut_cb = QCheckBox("시작프로그램 등록")
         self.startup_shortcut_cb.setObjectName("startupToggle")
         gpu_cfg_panel_layout.addWidget(self.startup_shortcut_cb)
@@ -6123,6 +6139,18 @@ class MasterController(QMainWindow):
         self.startup_shortcut_hint_lbl.setObjectName("gpuCfgHint")
         self.startup_shortcut_hint_lbl.setWordWrap(True)
         gpu_cfg_panel_layout.addWidget(self.startup_shortcut_hint_lbl)
+
+        self.pause_on_fullscreen_cb = QCheckBox("다른 앱 전체화면 시 미디어 일시정지")
+        self.pause_on_fullscreen_cb.setObjectName("fullscreenPauseToggle")
+        self.pause_on_fullscreen_cb.setToolTip(
+            "게임이나 전체화면 동영상/앱 실행 중일 때 바탕화면 위젯의 GIF 및 영상 재생을 자동으로 일시정지합니다."
+        )
+        gpu_cfg_panel_layout.addWidget(self.pause_on_fullscreen_cb)
+
+        self.fullscreen_pause_hint_lbl = QLabel("전체화면 게임/영상 실행 시 GIF·영상 정지 (창 복귀 시 자동 재개)")
+        self.fullscreen_pause_hint_lbl.setObjectName("gpuCfgHint")
+        self.fullscreen_pause_hint_lbl.setWordWrap(True)
+        gpu_cfg_panel_layout.addWidget(self.fullscreen_pause_hint_lbl)
         self.gpu_cfg_panel.installEventFilter(self)
 
         # Accordion Tree Scroll Area
@@ -6198,6 +6226,10 @@ class MasterController(QMainWindow):
         self.gpu_resume_slider.valueChanged.connect(self._on_gpu_threshold_inputs_changed)
         self.startup_shortcut_cb.toggled.connect(self._on_startup_shortcut_toggled)
         self._sync_startup_shortcut_toggle()
+        self._pause_on_fullscreen = _as_bool(self.master_settings.value("pause_on_fullscreen", True), True)
+        self._fullscreen_paused = False
+        self.pause_on_fullscreen_cb.setChecked(self._pause_on_fullscreen)
+        self.pause_on_fullscreen_cb.toggled.connect(self._on_pause_on_fullscreen_toggled)
         self._gpu_guard_timer = QTimer(self)
         self._gpu_guard_timer.setInterval(1000)
         self._gpu_guard_timer.timeout.connect(self._poll_gpu_guard)
@@ -6344,9 +6376,10 @@ class MasterController(QMainWindow):
             self._set_current_set_id(str(sid), persist=True)
             self.load_profiles(force_rebuild=True)
 
-    def open_set_manager(self):
+    def open_set_manager(self, set_id=None):
         self._load_set_state()
-        dialog = SetManagerDialog(self, self)
+        sid = str(set_id) if set_id not in (None, "") else self.selected_set_id()
+        dialog = SetManagerDialog(self, target_sid=sid)
         dialog.exec()
         self._refresh_set_ui()
         self.load_profiles()
@@ -6532,8 +6565,8 @@ class MasterController(QMainWindow):
     def rename_set(self, set_id, new_name):
         return _mset_rename_set_impl(self, set_id, new_name)
 
-    def delete_set(self, set_id):
-        return _mset_delete_set_impl(self, set_id)
+    def delete_set(self, set_id, parent=None):
+        return _mset_delete_set_impl(self, set_id, parent=parent)
 
     def _on_profile_order_changed(self, ordered_ids):
         _mset_on_profile_order_changed_impl(self, ordered_ids)
@@ -6720,6 +6753,12 @@ class MasterController(QMainWindow):
 
     def _apply_title_bar_theme(self):
         self._apply_window_title_bar_theme(self)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "master_settings") and self.master_settings:
+            self.master_settings.setValue("window_width", int(self.width()))
+            self.master_settings.setValue("window_height", int(self.height()))
 
     @staticmethod
     def _apply_window_title_bar_theme(window):
@@ -7141,7 +7180,7 @@ class MasterController(QMainWindow):
         if not self._set_expanded_states:
             self._set_expanded_states = {str(sid): (str(sid) == applied_sid) for sid in self._set_order}
 
-        for sid in self._set_order:
+        for s_idx, sid in enumerate(self._set_order):
             sid_str = str(sid)
             data = self._set_defs.get(sid_str, {})
             name = str(data.get("name", f"세트{sid_str}"))
@@ -7163,7 +7202,7 @@ class MasterController(QMainWindow):
             header.setProperty("expanded", "true" if is_expanded else "false")
             header_layout = QHBoxLayout(header)
             header_layout.setContentsMargins(10, 8, 10, 8)
-            header_layout.setSpacing(8)
+            header_layout.setSpacing(6)
 
             # 접기/펼치기 버튼
             toggle_btn = QPushButton(header)
@@ -7178,10 +7217,10 @@ class MasterController(QMainWindow):
             folder_icon_lbl = QLabel(header)
             folder_icon_lbl.setPixmap(render_vector_icon("folder", "#528bf8" if is_applied else "#8da8cb", 16).pixmap(16, 16))
 
-            # 세트 이름
-            title_lbl = QLabel(name, header)
+            # 세트 이름 (긴 이름 자동 말줄임표 ... 적용)
+            title_lbl = ElidedLabel(name, header)
             title_lbl.setObjectName("setGroupTitle")
-            title_lbl.setToolTip("더블클릭하여 세트 이름 변경")
+            title_lbl.setToolTip(f"세트: {name} (더블클릭하여 이름 변경)")
 
             # 세트 헤더 더블클릭 시 세트 이름 즉시 변경
             header.mouseDoubleClickEvent = lambda e, s=sid_str: self.rename_set(s) if e.button() == Qt.MouseButton.LeftButton else None
@@ -7192,9 +7231,9 @@ class MasterController(QMainWindow):
 
             header_layout.addWidget(toggle_btn, 0, Qt.AlignmentFlag.AlignVCenter)
             header_layout.addWidget(folder_icon_lbl, 0, Qt.AlignmentFlag.AlignVCenter)
-            header_layout.addWidget(title_lbl, 0, Qt.AlignmentFlag.AlignVCenter)
+            header_layout.addWidget(title_lbl, 1, Qt.AlignmentFlag.AlignVCenter)
             header_layout.addWidget(count_badge, 0, Qt.AlignmentFlag.AlignVCenter)
-            header_layout.addStretch(1)
+            header_layout.addStretch(0)
 
             # 세트 액션 버튼
             if is_applied:
@@ -7208,13 +7247,34 @@ class MasterController(QMainWindow):
                 apply_btn.clicked.connect(lambda _, s=sid_str: self._on_apply_set_clicked(s))
                 header_layout.addWidget(apply_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
+            # 세트 순서 이동 버튼 (▲ / ▼)
+            btn_set_up = QPushButton(header)
+            btn_set_up.setProperty("kind", "rowAction")
+            btn_set_up.setFixedSize(26, 26)
+            btn_set_up.setIconSize(QSize(12, 12))
+            btn_set_up.setIcon(render_vector_icon("chevron_up", "#8da8cb", 12))
+            btn_set_up.setToolTip("세트를 위로 이동")
+            btn_set_up.setEnabled(s_idx > 0)
+            btn_set_up.clicked.connect(lambda _, s=sid_str: self.move_set_up(s))
+            header_layout.addWidget(btn_set_up, 0, Qt.AlignmentFlag.AlignVCenter)
+
+            btn_set_down = QPushButton(header)
+            btn_set_down.setProperty("kind", "rowAction")
+            btn_set_down.setFixedSize(26, 26)
+            btn_set_down.setIconSize(QSize(12, 12))
+            btn_set_down.setIcon(render_vector_icon("chevron_down", "#8da8cb", 12))
+            btn_set_down.setToolTip("세트를 아래로 이동")
+            btn_set_down.setEnabled(s_idx < len(self._set_order) - 1)
+            btn_set_down.clicked.connect(lambda _, s=sid_str: self.move_set_down(s))
+            header_layout.addWidget(btn_set_down, 0, Qt.AlignmentFlag.AlignVCenter)
+
             menu_btn = QPushButton(header)
             menu_btn.setProperty("kind", "rowAction")
             menu_btn.setFixedSize(26, 26)
             menu_btn.setIconSize(QSize(13, 13))
             menu_btn.setIcon(render_vector_icon("settings", "#8da8cb", 13))
             menu_btn.setToolTip("세트 관리 (이름 변경, 복사, 삭제)")
-            menu_btn.clicked.connect(self.open_set_manager)
+            menu_btn.clicked.connect(lambda _, s=sid_str: self.open_set_manager(s))
             header_layout.addWidget(menu_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
             card_layout.addWidget(header)
@@ -7335,8 +7395,10 @@ class MasterController(QMainWindow):
                     status_dot.setFixedSize(4, 18)
                     status_dot.setProperty("running", "true" if is_running else "false")
 
-                    name_lbl = QLabel(p_name, row)
+                    # 위젯 이름 (긴 파일명 자동 말줄임표 ... 적용)
+                    name_lbl = ElidedLabel(p_name, row)
                     name_lbl.setObjectName("profileName")
+                    name_lbl.setToolTip(p_name)
 
                     badge_lbl = QLabel(badge_text, row)
                     badge_lbl.setObjectName("mediaBadge")
@@ -7564,6 +7626,32 @@ class MasterController(QMainWindow):
         self.master_settings.sync()
         self.load_profiles(force_rebuild=True)
 
+    def move_set_up(self, set_id):
+        sid = str(set_id)
+        if sid not in self._set_order:
+            return
+        idx = self._set_order.index(sid)
+        if idx <= 0:
+            return
+        self._set_order[idx], self._set_order[idx - 1] = self._set_order[idx - 1], self._set_order[idx]
+        self.master_settings.setValue("set_ids", list(self._set_order))
+        if hasattr(self.master_settings, "sync"):
+            self.master_settings.sync()
+        self.load_profiles(force_rebuild=True)
+
+    def move_set_down(self, set_id):
+        sid = str(set_id)
+        if sid not in self._set_order:
+            return
+        idx = self._set_order.index(sid)
+        if idx < 0 or idx >= len(self._set_order) - 1:
+            return
+        self._set_order[idx], self._set_order[idx + 1] = self._set_order[idx + 1], self._set_order[idx]
+        self.master_settings.setValue("set_ids", list(self._set_order))
+        if hasattr(self.master_settings, "sync"):
+            self.master_settings.sync()
+        self.load_profiles(force_rebuild=True)
+
     def bulk_stop_profiles(self):
         if not self._check_set_applied_for_action("일괄 정지"):
             return
@@ -7668,11 +7756,34 @@ class MasterController(QMainWindow):
         new_mute = dialog.mute_checkbox.isChecked()
         new_gpu_guard = dialog.gpu_guard_checkbox.isChecked()
 
+        keep_indiv_size = bool(getattr(dialog, "keep_individual_size_cb", None) and dialog.keep_individual_size_cb.isChecked())
+        if not keep_indiv_size:
+            sizes = set()
+            for pid in checked_ids:
+                spid = str(pid)
+                if spid in self.widgets:
+                    sizes.add((self.widgets[spid].width(), self.widgets[spid].height()))
+                else:
+                    prof_s = QSettings("MyHomeApp", f"Profile_{spid}")
+                    sizes.add((int(prof_s.value("w", 200)), int(prof_s.value("h", 200))))
+            if len(sizes) > 1:
+                from mywidgetbox_core import ask_dark_confirm
+                if not ask_dark_confirm(
+                    self,
+                    "위젯 크기 일괄 변경",
+                    f"그룹 내 위젯들의 크기가 서로 다릅니다.\n모든 위젯의 크기를 [{new_w} x {new_h} px]로 일괄 변경하시겠습니까?\n('취소' 시 각 위젯의 기존 크기가 유지됩니다.)",
+                    yes_text="일괄 변경",
+                    no_text="기존 크기 유지",
+                    is_danger=False,
+                ):
+                    keep_indiv_size = True
+
         for pid in checked_ids:
             spid = str(pid)
             prof_s = QSettings("MyHomeApp", f"Profile_{spid}")
-            prof_s.setValue("w", new_w)
-            prof_s.setValue("h", new_h)
+            if not keep_indiv_size:
+                prof_s.setValue("w", new_w)
+                prof_s.setValue("h", new_h)
             prof_s.setValue("opacity_pct", new_opacity)
             prof_s.setValue("bg_color_mode", new_bg)
             prof_s.setValue("corner_mode", int(new_corner))
@@ -7690,7 +7801,7 @@ class MasterController(QMainWindow):
 
             if spid in self.widgets:
                 w = self.widgets[spid]
-                if w.width() != new_w or w.height() != new_h:
+                if not keep_indiv_size and (w.width() != new_w or w.height() != new_h):
                     w.resize(new_w, new_h)
                 w.current_opacity_pct = new_opacity
                 w.setWindowOpacity(new_opacity / 100.0)
@@ -8015,69 +8126,310 @@ class MasterController(QMainWindow):
         spid = str(origin_pid) if origin_pid not in (None, "") else ""
         target_widget = origin_widget or (self.widgets.get(spid) if spid else None)
 
-        if target_widget and target_widget.isVisible():
-            start_x = target_widget.x()
-            start_y = target_widget.y()
+        fit_strategy = spread_config.get("fit_strategy", "auto_aspect")
+
+        if fit_strategy == "fullscreen_autofill":
+            # [전체 화면 자동 꽉 채움 계산 - 작업표시줄 자동 숨김 감지 연동]
+            from PyQt6.QtGui import QCursor
+            from mywidgetbox_core import get_screen_work_area, is_windows_taskbar_autohide
+            screen = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
+            screen_geo = get_screen_work_area(screen)
+            S_w = max(400, screen_geo.width())
+
+            is_autohide = is_windows_taskbar_autohide()
+            if is_autohide or screen_geo.height() >= (screen.geometry().height() if screen else 1080):
+                S_h = max(300, screen_geo.height())
+                area_factor = 1.0
+            else:
+                S_h = max(300, screen_geo.height())
+                area_factor = 0.98
+
+            start_x = screen_geo.left()
+            start_y = screen_geo.top()
+            spread_direction = "top-left"
+
+            sum_area_factor = 0.0
+            for p in item_paths:
+                sz = get_media_native_size(p)
+                if sz and len(sz) == 2 and sz[0] > 0 and sz[1] > 0:
+                    aspect = sz[0] / max(1, sz[1])
+                else:
+                    aspect = 1.0
+                span = 2 if aspect >= 1.55 else 1
+                sum_area_factor += (span * span) / max(0.2, aspect)
+
+            import math
+            w_ideal = math.sqrt((S_w * S_h * area_factor) / max(1.0, sum_area_factor))
+            cols = max(2, int(round(S_w / max(50.0, w_ideal + margin))))
+            w = max(50, int((S_w - (cols - 1) * margin) / cols))
+            h = w
         else:
-            screen = QApplication.primaryScreen()
-            screen_geo = screen.availableGeometry() if screen else QRect(0, 0, 1920, 1080)
-            total_w = cols * w + (cols - 1) * margin
-            total_h = rows * h + (rows - 1) * margin
-            start_x = max(screen_geo.left() + 40, screen_geo.left() + (screen_geo.width() - total_w) // 2)
-            start_y = max(screen_geo.top() + 40, screen_geo.top() + (screen_geo.height() - total_h) // 2)
+            if target_widget and target_widget.isVisible():
+                start_x = target_widget.x()
+                start_y = target_widget.y()
+            else:
+                from PyQt6.QtGui import QCursor
+                screen = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
+                screen_geo = screen.availableGeometry() if screen else QRect(0, 0, 1920, 1080)
+                total_w = cols * w + (cols - 1) * margin
+                total_h = rows * h + (rows - 1) * margin
+                start_x = max(screen_geo.left() + 40, screen_geo.left() + (screen_geo.width() - total_w) // 2)
+                start_y = max(screen_geo.top() + 40, screen_geo.top() + (screen_geo.height() - total_h) // 2)
 
         sid = self.selected_set_id()
         if sid not in self._set_defs and self._set_order:
             sid = self._set_order[0]
         current_set_profiles = list(self._set_defs.get(sid, {}).get("profiles", [])) if sid in self._set_defs else []
 
+        # 만약 기존 세트에 실행 중이던 이전 위젯들이 있다면 유령 중복 방지를 위해 target_widget 제외 정리
+        if target_widget and spid:
+            old_set_pids = [str(p) for p in current_set_profiles if str(p) != spid]
+            for old_p in old_set_pids:
+                if old_p in self.widgets:
+                    w_old = self.widgets.pop(old_p, None)
+                    if w_old:
+                        w_old.close()
+                        w_old.deleteLater()
+            current_set_profiles = [spid]
+
         all_pids = self._all_profile_ids()
         created_count = 0
 
-        fit_strategy = spread_config.get("fit_strategy", "auto_aspect")
-        spread_direction = str(spread_config.get("spread_direction", "top-left") or "top-left")
+        spread_direction = str(spread_config.get("spread_direction", "top-left") or "top-left") if fit_strategy != "fullscreen_autofill" else "top-left"
         dir_x_sign = -1 if "right" in spread_direction else 1
         dir_y_sign = -1 if "bottom" in spread_direction else 1
 
         bg_mode = int(spread_config.get("bg_color_mode", 0))
         corner_mode = int(spread_config.get("corner_mode", 0))
 
-        col_heights = [start_y] * cols
+        positions = [None] * len(item_paths)
 
-        for idx, item_path in enumerate(item_paths):
-            c = idx % cols
-            r = idx // cols
-            item_name = os.path.basename(item_path)
-
-            item_w = w
-            item_h = h
-            media_fit_mode = 0
-
-            if fit_strategy == "auto_aspect":
+        if fit_strategy in ("auto_aspect", "fullscreen_autofill"):
+            # [하이브리드 적응형 메이슨리 (Hybrid Adaptive Masonry)]
+            # 1. 아이템별 원본 비율 100% 보존 크기 및 열 Span 산출
+            item_data = []
+            for item_path in item_paths:
                 sz = get_media_native_size(item_path)
                 if sz and len(sz) == 2 and sz[0] > 0 and sz[1] > 0:
                     iw, ih = sz[0], sz[1]
-                    item_w, item_h = calc_smart_aspect_size(iw, ih, w, h)
-                media_fit_mode = 1
-
-                pos_x = start_x + (c * (w + margin) * dir_x_sign)
-                if dir_x_sign < 0:
-                    pos_x -= (item_w - w)
-
-                if dir_y_sign < 0:
-                    pos_y = col_heights[c] - item_h
-                    col_heights[c] -= (item_h + margin)
+                    aspect = iw / max(1, ih)
                 else:
-                    pos_y = col_heights[c]
-                    col_heights[c] += (item_h + margin)
-            elif fit_strategy == "crop_fill":
-                pos_x = start_x + (c * (w + margin) * dir_x_sign)
-                pos_y = start_y + (r * (h + margin) * dir_y_sign)
-                media_fit_mode = 1
-            else:
-                pos_x = start_x + (c * (w + margin) * dir_x_sign)
-                pos_y = start_y + (r * (h + margin) * dir_y_sign)
-                media_fit_mode = 0
+                    aspect = 1.0
+                    iw, ih = w, h
+
+                if aspect >= 1.55 and cols >= 2:
+                    # 가로 와이드 짤: 2개 열 차지
+                    span_cols = 2
+                    item_w = 2 * w + margin
+                    item_h = max(50, int(round(item_w / aspect)))
+                else:
+                    # 1개 열 차지: 1:1, 세로 롱짤, 4컷만화 등 100% 원본 비율 보존!
+                    span_cols = 1
+                    item_w = w
+                    item_h = max(50, int(round(w / aspect)))
+
+                item_data.append((span_cols, item_w, item_h))
+
+            # 2. 열(Column)별 실시간 높이 추적 및 빈 구멍 우선 메꿈(Smart Hole-Filling) 테트리스 배치
+            col_xs = [0] * cols
+            for c in range(cols):
+                if "right" in spread_direction:
+                    col_xs[c] = start_x - (c * (w + margin)) - w
+                else:
+                    col_xs[c] = start_x + (c * (w + margin))
+
+            col_heights = [start_y] * cols
+            unplaced = list(range(len(item_paths)))
+
+            while unplaced:
+                # 1) 현재 가장 낮게 파인 열(Hole) 찾기
+                if "bottom" in spread_direction:
+                    best_c = max(range(cols), key=lambda c: col_heights[c])
+                    min_h = col_heights[best_c]
+                else:
+                    best_c = min(range(cols), key=lambda c: col_heights[c])
+                    min_h = col_heights[best_c]
+
+                # 2) 평평한 2열 쌍이 있고 대기열에 와이드 짤이 있는지 검사
+                chosen_idx = None
+                wide_candidates = [i for i in unplaced if item_data[i][0] == 2]
+                single_candidates = [i for i in unplaced if item_data[i][0] == 1]
+
+                chosen_pair_c = None
+                if wide_candidates and cols >= 2:
+                    for c in range(cols - 1):
+                        diff = abs(col_heights[c] - col_heights[c + 1])
+                        if diff <= 30:
+                            if "bottom" in spread_direction:
+                                pair_top = min(col_heights[c], col_heights[c + 1])
+                                if abs(pair_top - min_h) <= 40:
+                                    chosen_pair_c = c
+                                    break
+                            else:
+                                pair_top = max(col_heights[c], col_heights[c + 1])
+                                if abs(pair_top - min_h) <= 40:
+                                    chosen_pair_c = c
+                                    break
+
+                if chosen_pair_c is not None and wide_candidates:
+                    chosen_idx = wide_candidates[0]
+                    unplaced.remove(chosen_idx)
+                    span_cols, item_w, item_h = item_data[chosen_idx]
+                    c = chosen_pair_c
+                    if "bottom" in spread_direction:
+                        target_y = min(col_heights[c], col_heights[c + 1])
+                        if "right" in spread_direction:
+                            pos_x = start_x - ((c + 1) * (w + margin))
+                        else:
+                            pos_x = col_xs[c]
+                        pos_y = target_y - item_h
+                        new_y = pos_y - margin
+                        col_heights[c] = new_y
+                        col_heights[c + 1] = new_y
+                    else:
+                        target_y = max(col_heights[c], col_heights[c + 1])
+                        if "right" in spread_direction:
+                            pos_x = start_x - ((c + 1) * (w + margin))
+                        else:
+                            pos_x = col_xs[c]
+                        pos_y = target_y
+                        new_y = target_y + item_h + margin
+                        col_heights[c] = new_y
+                        col_heights[c + 1] = new_y
+                    positions[chosen_idx] = (pos_x, pos_y, item_w, item_h)
+                else:
+                    # 빈 구멍(best_c)에 1칸짜리 미디어를 쏙 집어넣어 평평하게 메꿈!
+                    if single_candidates:
+                        chosen_idx = single_candidates[0]
+                    else:
+                        chosen_idx = unplaced[0]
+
+                    unplaced.remove(chosen_idx)
+                    span_cols, item_w, item_h = item_data[chosen_idx]
+
+                    if span_cols == 1:
+                        if "bottom" in spread_direction:
+                            if "right" in spread_direction:
+                                pos_x = start_x - (best_c * (w + margin)) - item_w
+                            else:
+                                pos_x = col_xs[best_c]
+                            pos_y = col_heights[best_c] - item_h
+                            col_heights[best_c] -= (item_h + margin)
+                        else:
+                            if "right" in spread_direction:
+                                pos_x = start_x - (best_c * (w + margin)) - item_w
+                            else:
+                                pos_x = col_xs[best_c]
+                            pos_y = col_heights[best_c]
+                            col_heights[best_c] += (item_h + margin)
+                    else:
+                        # 남은 게 와이드 짤밖에 없을 때
+                        pair_c = min(best_c, cols - 2) if best_c < cols - 1 else max(0, cols - 2)
+                        if "bottom" in spread_direction:
+                            target_y = min(col_heights[pair_c], col_heights[pair_c + 1])
+                            if "right" in spread_direction:
+                                pos_x = start_x - ((pair_c + 1) * (w + margin))
+                            else:
+                                pos_x = col_xs[pair_c]
+                            pos_y = target_y - item_h
+                            new_y = pos_y - margin
+                            col_heights[pair_c] = new_y
+                            col_heights[pair_c + 1] = new_y
+                        else:
+                            target_y = max(col_heights[pair_c], col_heights[pair_c + 1])
+                            if "right" in spread_direction:
+                                pos_x = start_x - ((pair_c + 1) * (w + margin))
+                            else:
+                                pos_x = col_xs[pair_c]
+                            pos_y = target_y
+                            new_y = target_y + item_h + margin
+                            col_heights[pair_c] = new_y
+                            col_heights[pair_c + 1] = new_y
+
+                    positions[chosen_idx] = (pos_x, pos_y, item_w, item_h)
+        elif fit_strategy == "grid_span":
+            # [테트리스 그리드 블록 (1x1, 1x2, 2x1 규격 밀착)]
+            item_spans = []
+            item_sizes = []
+            for item_path in item_paths:
+                span_x, span_y = 1, 1
+                sz = get_media_native_size(item_path)
+                if sz and len(sz) == 2 and sz[0] > 0 and sz[1] > 0:
+                    iw, ih = sz[0], sz[1]
+                    aspect = iw / max(1, ih)
+                    if aspect >= 1.45:
+                        span_x = 2
+                        span_y = 1
+                    elif aspect <= 0.68:
+                        span_x = 1
+                        span_y = 2
+                span_x = min(span_x, cols)
+                cur_w = span_x * w + (span_x - 1) * margin
+                cur_h = span_y * h + (span_y - 1) * margin
+                item_spans.append((span_x, span_y))
+                item_sizes.append((cur_w, cur_h))
+
+            grid_occupied = set()
+
+            def is_cell_free(r, c, sx, sy):
+                if c + sx > cols:
+                    return False
+                for dr in range(sy):
+                    for dc in range(sx):
+                        if (r + dr, c + dc) in grid_occupied:
+                            return False
+                return True
+
+            def occupy_cells(r, c, sx, sy):
+                for dr in range(sy):
+                    for dc in range(sx):
+                        grid_occupied.add((r + dr, c + dc))
+
+            for idx in range(len(item_paths)):
+                sx, sy = item_spans[idx]
+                iw, ih = item_sizes[idx]
+                placed = False
+                r = 0
+                while not placed:
+                    for c in range(cols - sx + 1):
+                        if is_cell_free(r, c, sx, sy):
+                            occupy_cells(r, c, sx, sy)
+                            if "right" in spread_direction:
+                                pos_x = start_x - (c * (w + margin)) - iw
+                            else:
+                                pos_x = start_x + (c * (w + margin))
+
+                            if "bottom" in spread_direction:
+                                pos_y = start_y - (r * (h + margin)) - ih
+                            else:
+                                pos_y = start_y + (r * (h + margin))
+
+                            positions[idx] = (pos_x, pos_y, iw, ih)
+                            placed = True
+                            break
+                    r += 1
+        else:
+            # 고정 격자 (crop_fill 또는 fit_inside)
+            for idx in range(len(item_paths)):
+                c = idx % cols
+                r = idx // cols
+                cur_w, cur_h = w, h
+                if "right" in spread_direction:
+                    pos_x = start_x - (c * (w + margin)) - cur_w
+                else:
+                    pos_x = start_x + (c * (w + margin))
+
+                if "bottom" in spread_direction:
+                    pos_y = start_y - (r * (h + margin)) - cur_h
+                else:
+                    pos_y = start_y + (r * (h + margin))
+
+                positions[idx] = (pos_x, pos_y, cur_w, cur_h)
+
+        for idx, item_path in enumerate(item_paths):
+            item_name = os.path.basename(item_path)
+            pos_x, pos_y, item_w, item_h = positions[idx]
+            media_fit_mode = 1 if fit_strategy in ("auto_aspect", "fullscreen_autofill", "grid_span", "crop_fill") else 0
 
             if idx == 0 and target_widget:
                 target_widget.profile_name = item_name
@@ -8312,7 +8664,72 @@ class MasterController(QMainWindow):
             else:
                 w.set_performance_paused(False, reason="guard_not_target")
 
+    def _on_pause_on_fullscreen_toggled(self, checked):
+        self._pause_on_fullscreen = bool(checked)
+        self.master_settings.setValue("pause_on_fullscreen", self._pause_on_fullscreen)
+        if not self._pause_on_fullscreen and getattr(self, "_fullscreen_paused", False):
+            self._fullscreen_paused = False
+            for w in self.widgets.values():
+                if isinstance(w, DesktopWidget):
+                    w.set_performance_paused(False, reason="fullscreen_disabled")
+
+    def _is_other_app_fullscreen(self):
+        try:
+            import win32gui, win32api, win32con
+            hwnd = win32gui.GetForegroundWindow()
+            if not hwnd or hwnd == win32gui.GetDesktopWindow() or hwnd == win32gui.GetShellWindow():
+                return False
+
+            own_hwnds = {int(self.winId())}
+            for w in self.widgets.values():
+                if w and w.isVisible():
+                    try:
+                        own_hwnds.add(int(w.winId()))
+                    except Exception:
+                        pass
+            if int(hwnd) in own_hwnds:
+                return False
+
+            class_name = win32gui.GetClassName(hwnd)
+            if class_name in ("Progman", "WorkerW", "Shell_TrayWnd"):
+                return False
+
+            if not win32gui.IsWindowVisible(hwnd) or win32gui.IsIconic(hwnd):
+                return False
+
+            rect = win32gui.GetWindowRect(hwnd)
+            w_left, w_top, w_right, w_bottom = rect
+
+            monitor = win32api.MonitorFromWindow(hwnd, win32con.MONITOR_DEFAULTTONEAREST)
+            if not monitor:
+                return False
+            mon_info = win32api.GetMonitorInfo(monitor)
+            m_left, m_top, m_right, m_bottom = mon_info["Monitor"]
+
+            if w_left <= m_left and w_top <= m_top and w_right >= m_right and w_bottom >= m_bottom:
+                return True
+        except Exception:
+            pass
+        return False
+
     def _poll_gpu_guard(self):
+        # 0. 다른 앱 전체화면 일시정지 감지 및 처리
+        if getattr(self, "_pause_on_fullscreen", True):
+            is_fs = self._is_other_app_fullscreen()
+            if is_fs:
+                if not getattr(self, "_fullscreen_paused", False):
+                    self._fullscreen_paused = True
+                    for w in self.widgets.values():
+                        if isinstance(w, DesktopWidget):
+                            w.set_performance_paused(True, reason="전체화면 감지", force=True)
+                return
+            else:
+                if getattr(self, "_fullscreen_paused", False):
+                    self._fullscreen_paused = False
+                    for w in self.widgets.values():
+                        if isinstance(w, DesktopWidget):
+                            w.set_performance_paused(False, reason="전체화면 해제")
+
         targets = self._gpu_guard_targets()
         if not targets:
             self._gpu_high_streak = 0

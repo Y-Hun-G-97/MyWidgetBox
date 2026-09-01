@@ -321,3 +321,30 @@ class MarqueeSelectionOverlay(QWidget):
         painter.setBrush(QBrush(fill_color))
         painter.setPen(border_pen)
         painter.drawRoundedRect(rect, 4, 4)
+
+
+class ElidedLabel(QLabel):
+    def __init__(self, text="", parent=None):
+        super().__init__(parent)
+        self._full_text = str(text or "")
+        from PyQt6.QtWidgets import QSizePolicy
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.setMinimumWidth(30)
+        self.setToolTip(self._full_text)
+
+    def setText(self, text):
+        self._full_text = str(text or "")
+        self.setToolTip(self._full_text)
+        self.update()
+
+    def text(self):
+        return self._full_text
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        fm = self.fontMetrics()
+        elided = fm.elidedText(self._full_text, Qt.TextElideMode.ElideRight, max(10, self.width()))
+        painter.setPen(self.palette().color(self.foregroundRole()))
+        painter.setFont(self.font())
+        painter.drawText(self.rect(), int(self.alignment()), elided)
+

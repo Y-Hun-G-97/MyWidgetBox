@@ -435,8 +435,8 @@ class FolderSpreadDialog(QDialog):
         self.setObjectName("folderSpreadDialog")
         self.setWindowTitle("스프레드(바둑판) 위젯 배치 설정")
         self.setWindowIcon(render_vector_icon("widget", "#528bf8", 32))
-        self.resize(600, 710)
-        self.setFixedWidth(600)
+        self.resize(640, 720)
+        self.setFixedWidth(640)
         self.folder_path = str(folder_path or "").strip()
         self.media_paths = [str(p) for p in (media_paths or []) if p and os.path.isfile(p)]
         self.result_data = None
@@ -693,7 +693,8 @@ class FolderSpreadDialog(QDialog):
         self.width_input.setValue(default_w)
         self.width_input.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.width_input.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        grid_layout.addWidget(_make_input_with_unit(self.width_input, "px"), 0, 1)
+        self.w_wrap = _make_input_with_unit(self.width_input, "px")
+        grid_layout.addWidget(self.w_wrap, 0, 1)
 
         grid_layout.addWidget(QLabel("위젯 높이(H):"), 0, 2)
         self.height_input = QSpinBox()
@@ -701,7 +702,8 @@ class FolderSpreadDialog(QDialog):
         self.height_input.setValue(default_h)
         self.height_input.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.height_input.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        grid_layout.addWidget(_make_input_with_unit(self.height_input, "px"), 0, 3)
+        self.h_wrap = _make_input_with_unit(self.height_input, "px")
+        grid_layout.addWidget(self.h_wrap, 0, 3)
 
         self._syncing_spread_size = False
         def _on_spread_w_changed(val):
@@ -722,7 +724,8 @@ class FolderSpreadDialog(QDialog):
         self.cols_input.setValue(init_cols)
         self.cols_input.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.cols_input.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        grid_layout.addWidget(_make_input_with_unit(self.cols_input, "열"), 1, 1)
+        self.cols_wrap = _make_input_with_unit(self.cols_input, "열")
+        grid_layout.addWidget(self.cols_wrap, 1, 1)
 
         grid_layout.addWidget(QLabel("세로 행(Rows):"), 1, 2)
         self.rows_input = QSpinBox()
@@ -730,7 +733,8 @@ class FolderSpreadDialog(QDialog):
         self.rows_input.setValue(init_rows)
         self.rows_input.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.rows_input.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        grid_layout.addWidget(_make_input_with_unit(self.rows_input, "행"), 1, 3)
+        self.rows_wrap = _make_input_with_unit(self.rows_input, "행")
+        grid_layout.addWidget(self.rows_wrap, 1, 3)
 
         grid_layout.addWidget(QLabel("위젯 간격:"), 2, 0)
         self.margin_input = QSpinBox()
@@ -750,19 +754,34 @@ class FolderSpreadDialog(QDialog):
         self.corner_combo = DownwardComboBox()
         self.corner_combo.addItems(["곡선 (둥근)", "직각 (사각)", "원형 (최대)"])
         self.corner_combo.setCurrentIndex(0)
-        grid_layout.addWidget(self.corner_combo, 3, 1)
+        grid_layout.addWidget(self.corner_combo, 3, 1, 1, 3)
 
-        grid_layout.addWidget(QLabel("비율/맞춤:"), 3, 2)
+        grid_layout.addWidget(QLabel("비율/맞춤:"), 4, 0)
         self.fit_combo = DownwardComboBox()
         self.fit_combo.addItems([
-            "원본 비율 맞춤",
-            "영역 꽉 채우기",
-            "지정 크기 고정",
+            "🎨 하이브리드 적응형 (권장: 100% 원본 비율 보존 + 빈자리 자동 채움)",
+            "🖥️ 전체 화면 자동 꽉 채움 (화면 크기 기반 W/H 및 열 개수 자동 계산)",
+            "🎮 테트리스 그리드 블록 (1x1, 1x2, 2x1 규격 밀착 결합)",
+            "🔲 균일 바둑판 꽉 채우기 (크롭 맞춤)",
+            "🖼️ 균일 바둑판 원본 비율 (레터박스 맞춤)",
         ])
         self.fit_combo.setCurrentIndex(0)
-        grid_layout.addWidget(self.fit_combo, 3, 3)
+        grid_layout.addWidget(self.fit_combo, 4, 1, 1, 3)
 
-        grid_layout.addWidget(QLabel("전개 방향:"), 4, 0)
+        def _on_fit_combo_changed(idx):
+            is_auto = (idx == 1)
+            self.width_input.setEnabled(not is_auto)
+            self.height_input.setEnabled(not is_auto)
+            self.cols_input.setEnabled(not is_auto)
+            self.rows_input.setEnabled(not is_auto)
+            self.w_wrap.setEnabled(not is_auto)
+            self.h_wrap.setEnabled(not is_auto)
+            self.cols_wrap.setEnabled(not is_auto)
+            self.rows_wrap.setEnabled(not is_auto)
+
+        self.fit_combo.currentIndexChanged.connect(_on_fit_combo_changed)
+
+        grid_layout.addWidget(QLabel("전개 방향:"), 5, 0)
         self.direction_combo = DownwardComboBox()
         self.direction_combo.addItems([
             "↘ 우하단 전개 (좌상단 시작, 기본)",
@@ -771,7 +790,7 @@ class FolderSpreadDialog(QDialog):
             "↖ 좌상단 전개 (우하단 시작, 시계 구석 추천)",
         ])
         self.direction_combo.setCurrentIndex(0)
-        grid_layout.addWidget(self.direction_combo, 4, 1, 1, 3)
+        grid_layout.addWidget(self.direction_combo, 5, 1, 1, 3)
 
 
         layout.addWidget(grid_card)
@@ -907,16 +926,27 @@ class FolderSpreadDialog(QDialog):
         if not paths:
             QMessageBox.warning(self, "스프레드 배치", "생성할 미디어를 하나 이상 선택해주세요.")
             return
-        cells = int(self.rows_input.value()) * int(self.cols_input.value())
-        if len(paths) > cells:
-            QMessageBox.warning(
-                self,
-                "스프레드 배치",
-                f"선택한 미디어 개수({len(paths)}개)가 설정된 바둑판 칸수({cells}칸)보다 많습니다.\n행 또는 열 개수를 늘려주세요.",
-            )
-            return
         fit_idx = self.fit_combo.currentIndex()
-        fit_strategy = "auto_aspect" if fit_idx == 0 else ("crop_fill" if fit_idx == 1 else "fit_inside")
+        if fit_idx != 1:
+            cells = int(self.rows_input.value()) * int(self.cols_input.value())
+            if len(paths) > cells:
+                QMessageBox.warning(
+                    self,
+                    "스프레드 배치",
+                    f"선택한 미디어 개수({len(paths)}개)가 설정된 바둑판 칸수({cells}칸)보다 많습니다.\n행 또는 열 개수를 늘려주세요.",
+                )
+                return
+
+        if fit_idx == 0:
+            fit_strategy = "auto_aspect"
+        elif fit_idx == 1:
+            fit_strategy = "fullscreen_autofill"
+        elif fit_idx == 2:
+            fit_strategy = "grid_span"
+        elif fit_idx == 3:
+            fit_strategy = "crop_fill"
+        else:
+            fit_strategy = "fit_inside"
         bg_mode = self.bg_combo.currentIndex()
 
         self.result_data = {
@@ -1278,6 +1308,25 @@ QDialog#settingsDialog {
             QCheckBox:hover {
                 color: #ffffff;
             }
+            QFrame#bulkNoticeCard {
+                background-color: #19273c;
+                border: 1px solid #2f486d;
+                border-radius: 9px;
+            }
+            QCheckBox#keepIndivSizeToggle {
+                color: #eef4ff;
+                font-size: 12px;
+                font-weight: 700;
+                spacing: 8px;
+            }
+            QCheckBox#keepIndivSizeToggle:hover {
+                color: #ffffff;
+            }
+            QLabel#bulkNoticeHint {
+                color: #8fa7c7;
+                font-size: 11px;
+                padding-left: 24px;
+            }
             QToolButton#shortcutToggle {
                 color: #e8efff;
                 background-color: #2b4061;
@@ -1614,6 +1663,36 @@ QDialog#settingsDialog {
 
         self.keep_aspect_ratio_cb.setToolTip("너비나 높이 변경 시 가로세로 비율을 유지하여 자동으로 계산합니다.")
 
+        if self.bulk_mode:
+            self.bulk_notice_card = QFrame()
+            self.bulk_notice_card.setObjectName("bulkNoticeCard")
+            bn_layout = QVBoxLayout(self.bulk_notice_card)
+            bn_layout.setContentsMargins(10, 8, 10, 8)
+            bn_layout.setSpacing(3)
+
+            self.keep_individual_size_cb = QCheckBox("각 위젯의 기존 크기 유지 (일괄 변경 안 함)")
+            self.keep_individual_size_cb.setObjectName("keepIndivSizeToggle")
+            self.keep_individual_size_cb.setChecked(True)
+            self.keep_individual_size_cb.setToolTip(
+                "체크 시 그룹 내 각 위젯들의 고유한 너비/높이를 그대로 유지합니다.\n"
+                "체크 해제 시 아래 지정한 너비/높이로 모든 위젯의 크기가 일괄 통일됩니다."
+            )
+            bn_layout.addWidget(self.keep_individual_size_cb)
+
+            notice_hint = QLabel("그룹 내 위젯들의 고유한 종횡비와 크기를 안전하게 보존합니다.")
+            notice_hint.setObjectName("bulkNoticeHint")
+            bn_layout.addWidget(notice_hint)
+
+            def _on_keep_indiv_size_toggled(checked):
+                self.width_input.setEnabled(not checked)
+                self.height_input.setEnabled(not checked)
+                self.width_input_box.setEnabled(not checked)
+                self.height_input_box.setEnabled(not checked)
+                if hasattr(self, "ratio_row_widget"):
+                    self.ratio_row_widget.setEnabled(not checked)
+
+            self.keep_individual_size_cb.toggled.connect(_on_keep_indiv_size_toggled)
+
         self._syncing_aspect_size = False
         self._current_aspect_ratio = float(init_w) / max(1, float(init_h))
 
@@ -1902,6 +1981,14 @@ QDialog#settingsDialog {
 
         # Tab 2: 📐 위젯 & 외형
         _add_section_header(widget_form, "크기 및 종횡비")
+        if self.bulk_mode and hasattr(self, "bulk_notice_card"):
+            widget_form.addRow(self.bulk_notice_card)
+            self.width_input.setEnabled(False)
+            self.height_input.setEnabled(False)
+            self.width_input_box.setEnabled(False)
+            self.height_input_box.setEnabled(False)
+            if hasattr(self, "ratio_row_widget"):
+                self.ratio_row_widget.setEnabled(False)
         widget_form.addRow("너비:", self.width_input_box)
         widget_form.addRow("높이:", self.height_input_box)
         widget_form.addRow("", self.ratio_row_widget)

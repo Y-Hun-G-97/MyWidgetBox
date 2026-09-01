@@ -384,11 +384,10 @@ def adjust_temp_group_layer(controller, source_pid, step):
     for widget in targets:
         cur_layer = int(getattr(widget, "layer_mode", 1))
         new_layer = max(0, min(2, cur_layer + step_val))
-        if new_layer == cur_layer:
-            continue
-        widget.layer_mode = new_layer
-        widget.apply_window_settings(new_layer, widget.is_locked)
-        widget.save_all_settings()
+        if new_layer != cur_layer:
+            widget.layer_mode = new_layer
+            widget.apply_window_settings(new_layer, widget.is_locked)
+            widget.save_all_settings()
         if hasattr(widget, "_show_action_hud"):
             name = layer_names.get(new_layer, str(new_layer))
             widget._show_action_hud(f"레이어: {name}")

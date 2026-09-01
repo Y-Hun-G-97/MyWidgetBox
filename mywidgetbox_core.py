@@ -628,3 +628,51 @@ def render_vector_icon(name, color="#a4bedc", size=16):
     return QIcon(pixmap)
 
 
+def is_windows_taskbar_autohide():
+    """Windows 작업표시줄 자동 숨김(Auto-hide) 활성화 여부 실시간 확인 (Win32 SHAppBarMessage)"""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class APPBARDATA(ctypes.Structure):
+            _fields_ = [
+                ("cbSize", wintypes.DWORD),
+                ("hWnd", wintypes.HWND),
+                ("uCallbackMessage", wintypes.UINT),
+                ("uEdge", wintypes.UINT),
+                ("rc", wintypes.RECT),
+                ("lParam", wintypes.LPARAM),
+            ]
+
+        abd = APPBARDATA()
+        abd.cbSize = ctypes.sizeof(APPBARDATA)
+        # ABM_GETSTATE = 4
+        state = ctypes.windll.shell32.SHAppBarMessage(4, ctypes.byref(abd))
+        # ABS_AUTOHIDE = 1
+        return bool(state & 1)
+    except Exception:
+        return False
+
+
+def get_screen_work_area(screen, force_full=False):
+    """
+    모니터의 실제 유효 작업 영역(QRect)을 반환.
+    - force_full=True 이거나 작업표시줄이 자동 숨김(Auto-hide) 상태인 경우: 모니터 전체 해상도 100% (screen.geometry()) 반환
+    - 일반 고정 작업표시줄인 경우: 작업표시줄 영역을 제외한 screen.availableGeometry() 반환
+    """
+    if not screen:
+        from PyQt6.QtCore import QRect
+        return QRect(0, 0, 1920, 1080)
+
+    if bool(force_full) or is_windows_taskbar_autohide():
+        return screen.geometry()
+
+    avail = screen.availableGeometry()
+    full = screen.geometry()
+    if avail.width() >= full.width() and avail.height() >= full.height():
+        return full
+
+    return avail
+
+
+
