@@ -453,10 +453,18 @@ def ask_dark_confirm(parent, title, message, yes_text="삭제", no_text="취소"
     return dlg.exec() == QDialog.DialogCode.Accepted
 
 
+_vector_icon_cache = {}
+
+
 def render_vector_icon(name, color="#a4bedc", size=16):
     """
     Figma / Feather 스타일의 미니멀 모던 벡터 아이콘을 QIcon으로 생성합니다.
+    자주 호출되는 아이콘은 전역 메모리에 캐시하여 렌더링 오버헤드를 제거합니다.
     """
+    cache_key = (str(name), str(color).lower(), int(size))
+    if cache_key in _vector_icon_cache:
+        return _vector_icon_cache[cache_key]
+
     import math
     from PyQt6.QtGui import QIcon, QPixmap, QPainter, QColor, QPen, QBrush, QPolygonF
     from PyQt6.QtCore import Qt, QPointF, QRectF
@@ -625,7 +633,9 @@ def render_vector_icon(name, color="#a4bedc", size=16):
         painter.drawEllipse(QRectF(pad, pad, s - 2 * pad, s - 2 * pad))
 
     painter.end()
-    return QIcon(pixmap)
+    icon = QIcon(pixmap)
+    _vector_icon_cache[cache_key] = icon
+    return icon
 
 
 def is_windows_taskbar_autohide():

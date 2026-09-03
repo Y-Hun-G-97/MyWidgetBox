@@ -7578,7 +7578,7 @@ class MasterController(QMainWindow):
             spid = str(pid)
             if spid not in self.widgets:
                 name = str(QSettings("MyHomeApp", f"Profile_{spid}").value("name", "New 세팅"))
-                self.run_widget(spid, name)
+                self.run_widget(spid, name, defer_reload=True)
         self.update_active_status()
         self.load_profiles()
 
@@ -7756,27 +7756,31 @@ class MasterController(QMainWindow):
         new_mute = dialog.mute_checkbox.isChecked()
         new_gpu_guard = dialog.gpu_guard_checkbox.isChecked()
 
-        keep_indiv_size = bool(getattr(dialog, "keep_individual_size_cb", None) and dialog.keep_individual_size_cb.isChecked())
-        if not keep_indiv_size:
-            sizes = set()
-            for pid in checked_ids:
-                spid = str(pid)
-                if spid in self.widgets:
-                    sizes.add((self.widgets[spid].width(), self.widgets[spid].height()))
-                else:
-                    prof_s = QSettings("MyHomeApp", f"Profile_{spid}")
-                    sizes.add((int(prof_s.value("w", 200)), int(prof_s.value("h", 200))))
-            if len(sizes) > 1:
-                from mywidgetbox_core import ask_dark_confirm
-                if not ask_dark_confirm(
-                    self,
-                    "위젯 크기 일괄 변경",
-                    f"그룹 내 위젯들의 크기가 서로 다릅니다.\n모든 위젯의 크기를 [{new_w} x {new_h} px]로 일괄 변경하시겠습니까?\n('취소' 시 각 위젯의 기존 크기가 유지됩니다.)",
-                    yes_text="일괄 변경",
-                    no_text="기존 크기 유지",
-                    is_danger=False,
-                ):
-                    keep_indiv_size = True
+        spread_relayout_cfg = dialog.get_spread_relayout_config() if hasattr(dialog, "get_spread_relayout_config") else None
+        if spread_relayout_cfg:
+            keep_indiv_size = True
+        else:
+            keep_indiv_size = bool(getattr(dialog, "keep_individual_size_cb", None) and dialog.keep_individual_size_cb.isChecked())
+            if not keep_indiv_size:
+                sizes = set()
+                for pid in checked_ids:
+                    spid = str(pid)
+                    if spid in self.widgets:
+                        sizes.add((self.widgets[spid].width(), self.widgets[spid].height()))
+                    else:
+                        prof_s = QSettings("MyHomeApp", f"Profile_{spid}")
+                        sizes.add((int(prof_s.value("w", 200)), int(prof_s.value("h", 200))))
+                if len(sizes) > 1:
+                    from mywidgetbox_core import ask_dark_confirm
+                    if not ask_dark_confirm(
+                        self,
+                        "위젯 크기 일괄 변경",
+                        f"그룹 내 위젯들의 크기가 서로 다릅니다.\n모든 위젯의 크기를 [{new_w} x {new_h} px]로 일괄 변경하시겠습니까?\n('취소' 시 각 위젯의 기존 크기가 유지됩니다.)",
+                        yes_text="일괄 변경",
+                        no_text="기존 크기 유지",
+                        is_danger=False,
+                    ):
+                        keep_indiv_size = True
 
         for pid in checked_ids:
             spid = str(pid)
@@ -7826,6 +7830,51 @@ class MasterController(QMainWindow):
                     w.timer.setInterval(new_interval)
                 if hasattr(w, "_apply_media_scale_mode"):
                     w._apply_media_scale_mode()
+
+        if spread_relayout_cfg:
+            group_media_paths = []
+            for pid in checked_ids:
+                spid = str(pid)
+                m_path = ""
+                if spid in self.widgets:
+                    w_inst = self.widgets[spid]
+                    if hasattr(w_inst, "get_current_media_path"):
+                        m_path = w_inst.get_current_media_path()
+                if not m_path:
+                    p_s = QSettings("MyHomeApp", f"Profile_{spid}")
+                    fpaths = DesktopWidget._as_path_list(p_s.value("folder_item_paths", []))
+                    if fpaths:
+                        m_path = fpaths[0]
+                group_media_paths.append(m_path)
+
+            from master_operations import calculate_spread_layout
+            layout_positions = calculate_spread_layout(
+                item_paths=group_media_paths,
+                w=spread_relayout_cfg["w"],
+                h=spread_relayout_cfg["h"],
+                cols=spread_relayout_cfg["cols"],
+                rows=max(1, (len(checked_ids) + spread_relayout_cfg["cols"] - 1) // max(1, spread_relayout_cfg["cols"])),
+                margin=spread_relayout_cfg["margin"],
+                fit_strategy=spread_relayout_cfg["fit_strategy"],
+                spread_direction=spread_relayout_cfg["direction"],
+            )
+
+            for idx, pid in enumerate(checked_ids):
+                if idx < len(layout_positions) and layout_positions[idx]:
+                    px, py, pw, ph = layout_positions[idx]
+                    spid = str(pid)
+                    prof_s = QSettings("MyHomeApp", f"Profile_{spid}")
+                    prof_s.setValue("x", px)
+                    prof_s.setValue("y", py)
+                    prof_s.setValue("w", pw)
+                    prof_s.setValue("h", ph)
+                    prof_s.sync()
+
+                    if spid in self.widgets:
+                        w_inst = self.widgets[spid]
+                        w_inst.setGeometry(px, py, pw, ph)
+                        w_inst.save_all_settings()
+                        w_inst.apply_mask_and_style()
 
         self.load_profiles()
 
@@ -8128,308 +8177,47 @@ class MasterController(QMainWindow):
 
         fit_strategy = spread_config.get("fit_strategy", "auto_aspect")
 
-        if fit_strategy == "fullscreen_autofill":
-            # [전체 화면 자동 꽉 채움 계산 - 작업표시줄 자동 숨김 감지 연동]
-            from PyQt6.QtGui import QCursor
-            from mywidgetbox_core import get_screen_work_area, is_windows_taskbar_autohide
-            screen = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
-            screen_geo = get_screen_work_area(screen)
-            S_w = max(400, screen_geo.width())
-
-            is_autohide = is_windows_taskbar_autohide()
-            if is_autohide or screen_geo.height() >= (screen.geometry().height() if screen else 1080):
-                S_h = max(300, screen_geo.height())
-                area_factor = 1.0
-            else:
-                S_h = max(300, screen_geo.height())
-                area_factor = 0.98
-
-            start_x = screen_geo.left()
-            start_y = screen_geo.top()
-            spread_direction = "top-left"
-
-            sum_area_factor = 0.0
-            for p in item_paths:
-                sz = get_media_native_size(p)
-                if sz and len(sz) == 2 and sz[0] > 0 and sz[1] > 0:
-                    aspect = sz[0] / max(1, sz[1])
-                else:
-                    aspect = 1.0
-                span = 2 if aspect >= 1.55 else 1
-                sum_area_factor += (span * span) / max(0.2, aspect)
-
-            import math
-            w_ideal = math.sqrt((S_w * S_h * area_factor) / max(1.0, sum_area_factor))
-            cols = max(2, int(round(S_w / max(50.0, w_ideal + margin))))
-            w = max(50, int((S_w - (cols - 1) * margin) / cols))
-            h = w
+        if target_widget and target_widget.isVisible():
+            start_x = target_widget.x()
+            start_y = target_widget.y()
         else:
-            if target_widget and target_widget.isVisible():
-                start_x = target_widget.x()
-                start_y = target_widget.y()
-            else:
-                from PyQt6.QtGui import QCursor
-                screen = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
-                screen_geo = screen.availableGeometry() if screen else QRect(0, 0, 1920, 1080)
-                total_w = cols * w + (cols - 1) * margin
-                total_h = rows * h + (rows - 1) * margin
-                start_x = max(screen_geo.left() + 40, screen_geo.left() + (screen_geo.width() - total_w) // 2)
-                start_y = max(screen_geo.top() + 40, screen_geo.top() + (screen_geo.height() - total_h) // 2)
+            start_x = None
+            start_y = None
 
         sid = self.selected_set_id()
         if sid not in self._set_defs and self._set_order:
             sid = self._set_order[0]
         current_set_profiles = list(self._set_defs.get(sid, {}).get("profiles", [])) if sid in self._set_defs else []
 
-        # 만약 기존 세트에 실행 중이던 이전 위젯들이 있다면 유령 중복 방지를 위해 target_widget 제외 정리
-        if target_widget and spid:
-            old_set_pids = [str(p) for p in current_set_profiles if str(p) != spid]
-            for old_p in old_set_pids:
-                if old_p in self.widgets:
-                    w_old = self.widgets.pop(old_p, None)
-                    if w_old:
-                        w_old.close()
-                        w_old.deleteLater()
-            current_set_profiles = [spid]
+        # 기존 세트의 위젯들은 안전하게 보존하며, spid가 세트에 없으면 포함
+        if spid and spid not in current_set_profiles:
+            current_set_profiles.append(spid)
 
         all_pids = self._all_profile_ids()
         created_count = 0
 
-        spread_direction = str(spread_config.get("spread_direction", "top-left") or "top-left") if fit_strategy != "fullscreen_autofill" else "top-left"
-        dir_x_sign = -1 if "right" in spread_direction else 1
-        dir_y_sign = -1 if "bottom" in spread_direction else 1
-
+        spread_direction = str(spread_config.get("spread_direction", "top-left") or "top-left")
         bg_mode = int(spread_config.get("bg_color_mode", 0))
         corner_mode = int(spread_config.get("corner_mode", 0))
 
-        positions = [None] * len(item_paths)
-
-        if fit_strategy in ("auto_aspect", "fullscreen_autofill"):
-            # [하이브리드 적응형 메이슨리 (Hybrid Adaptive Masonry)]
-            # 1. 아이템별 원본 비율 100% 보존 크기 및 열 Span 산출
-            item_data = []
-            for item_path in item_paths:
-                sz = get_media_native_size(item_path)
-                if sz and len(sz) == 2 and sz[0] > 0 and sz[1] > 0:
-                    iw, ih = sz[0], sz[1]
-                    aspect = iw / max(1, ih)
-                else:
-                    aspect = 1.0
-                    iw, ih = w, h
-
-                if aspect >= 1.55 and cols >= 2:
-                    # 가로 와이드 짤: 2개 열 차지
-                    span_cols = 2
-                    item_w = 2 * w + margin
-                    item_h = max(50, int(round(item_w / aspect)))
-                else:
-                    # 1개 열 차지: 1:1, 세로 롱짤, 4컷만화 등 100% 원본 비율 보존!
-                    span_cols = 1
-                    item_w = w
-                    item_h = max(50, int(round(w / aspect)))
-
-                item_data.append((span_cols, item_w, item_h))
-
-            # 2. 열(Column)별 실시간 높이 추적 및 빈 구멍 우선 메꿈(Smart Hole-Filling) 테트리스 배치
-            col_xs = [0] * cols
-            for c in range(cols):
-                if "right" in spread_direction:
-                    col_xs[c] = start_x - (c * (w + margin)) - w
-                else:
-                    col_xs[c] = start_x + (c * (w + margin))
-
-            col_heights = [start_y] * cols
-            unplaced = list(range(len(item_paths)))
-
-            while unplaced:
-                # 1) 현재 가장 낮게 파인 열(Hole) 찾기
-                if "bottom" in spread_direction:
-                    best_c = max(range(cols), key=lambda c: col_heights[c])
-                    min_h = col_heights[best_c]
-                else:
-                    best_c = min(range(cols), key=lambda c: col_heights[c])
-                    min_h = col_heights[best_c]
-
-                # 2) 평평한 2열 쌍이 있고 대기열에 와이드 짤이 있는지 검사
-                chosen_idx = None
-                wide_candidates = [i for i in unplaced if item_data[i][0] == 2]
-                single_candidates = [i for i in unplaced if item_data[i][0] == 1]
-
-                chosen_pair_c = None
-                if wide_candidates and cols >= 2:
-                    for c in range(cols - 1):
-                        diff = abs(col_heights[c] - col_heights[c + 1])
-                        if diff <= 30:
-                            if "bottom" in spread_direction:
-                                pair_top = min(col_heights[c], col_heights[c + 1])
-                                if abs(pair_top - min_h) <= 40:
-                                    chosen_pair_c = c
-                                    break
-                            else:
-                                pair_top = max(col_heights[c], col_heights[c + 1])
-                                if abs(pair_top - min_h) <= 40:
-                                    chosen_pair_c = c
-                                    break
-
-                if chosen_pair_c is not None and wide_candidates:
-                    chosen_idx = wide_candidates[0]
-                    unplaced.remove(chosen_idx)
-                    span_cols, item_w, item_h = item_data[chosen_idx]
-                    c = chosen_pair_c
-                    if "bottom" in spread_direction:
-                        target_y = min(col_heights[c], col_heights[c + 1])
-                        if "right" in spread_direction:
-                            pos_x = start_x - ((c + 1) * (w + margin))
-                        else:
-                            pos_x = col_xs[c]
-                        pos_y = target_y - item_h
-                        new_y = pos_y - margin
-                        col_heights[c] = new_y
-                        col_heights[c + 1] = new_y
-                    else:
-                        target_y = max(col_heights[c], col_heights[c + 1])
-                        if "right" in spread_direction:
-                            pos_x = start_x - ((c + 1) * (w + margin))
-                        else:
-                            pos_x = col_xs[c]
-                        pos_y = target_y
-                        new_y = target_y + item_h + margin
-                        col_heights[c] = new_y
-                        col_heights[c + 1] = new_y
-                    positions[chosen_idx] = (pos_x, pos_y, item_w, item_h)
-                else:
-                    # 빈 구멍(best_c)에 1칸짜리 미디어를 쏙 집어넣어 평평하게 메꿈!
-                    if single_candidates:
-                        chosen_idx = single_candidates[0]
-                    else:
-                        chosen_idx = unplaced[0]
-
-                    unplaced.remove(chosen_idx)
-                    span_cols, item_w, item_h = item_data[chosen_idx]
-
-                    if span_cols == 1:
-                        if "bottom" in spread_direction:
-                            if "right" in spread_direction:
-                                pos_x = start_x - (best_c * (w + margin)) - item_w
-                            else:
-                                pos_x = col_xs[best_c]
-                            pos_y = col_heights[best_c] - item_h
-                            col_heights[best_c] -= (item_h + margin)
-                        else:
-                            if "right" in spread_direction:
-                                pos_x = start_x - (best_c * (w + margin)) - item_w
-                            else:
-                                pos_x = col_xs[best_c]
-                            pos_y = col_heights[best_c]
-                            col_heights[best_c] += (item_h + margin)
-                    else:
-                        # 남은 게 와이드 짤밖에 없을 때
-                        pair_c = min(best_c, cols - 2) if best_c < cols - 1 else max(0, cols - 2)
-                        if "bottom" in spread_direction:
-                            target_y = min(col_heights[pair_c], col_heights[pair_c + 1])
-                            if "right" in spread_direction:
-                                pos_x = start_x - ((pair_c + 1) * (w + margin))
-                            else:
-                                pos_x = col_xs[pair_c]
-                            pos_y = target_y - item_h
-                            new_y = pos_y - margin
-                            col_heights[pair_c] = new_y
-                            col_heights[pair_c + 1] = new_y
-                        else:
-                            target_y = max(col_heights[pair_c], col_heights[pair_c + 1])
-                            if "right" in spread_direction:
-                                pos_x = start_x - ((pair_c + 1) * (w + margin))
-                            else:
-                                pos_x = col_xs[pair_c]
-                            pos_y = target_y
-                            new_y = target_y + item_h + margin
-                            col_heights[pair_c] = new_y
-                            col_heights[pair_c + 1] = new_y
-
-                    positions[chosen_idx] = (pos_x, pos_y, item_w, item_h)
-        elif fit_strategy == "grid_span":
-            # [테트리스 그리드 블록 (1x1, 1x2, 2x1 규격 밀착)]
-            item_spans = []
-            item_sizes = []
-            for item_path in item_paths:
-                span_x, span_y = 1, 1
-                sz = get_media_native_size(item_path)
-                if sz and len(sz) == 2 and sz[0] > 0 and sz[1] > 0:
-                    iw, ih = sz[0], sz[1]
-                    aspect = iw / max(1, ih)
-                    if aspect >= 1.45:
-                        span_x = 2
-                        span_y = 1
-                    elif aspect <= 0.68:
-                        span_x = 1
-                        span_y = 2
-                span_x = min(span_x, cols)
-                cur_w = span_x * w + (span_x - 1) * margin
-                cur_h = span_y * h + (span_y - 1) * margin
-                item_spans.append((span_x, span_y))
-                item_sizes.append((cur_w, cur_h))
-
-            grid_occupied = set()
-
-            def is_cell_free(r, c, sx, sy):
-                if c + sx > cols:
-                    return False
-                for dr in range(sy):
-                    for dc in range(sx):
-                        if (r + dr, c + dc) in grid_occupied:
-                            return False
-                return True
-
-            def occupy_cells(r, c, sx, sy):
-                for dr in range(sy):
-                    for dc in range(sx):
-                        grid_occupied.add((r + dr, c + dc))
-
-            for idx in range(len(item_paths)):
-                sx, sy = item_spans[idx]
-                iw, ih = item_sizes[idx]
-                placed = False
-                r = 0
-                while not placed:
-                    for c in range(cols - sx + 1):
-                        if is_cell_free(r, c, sx, sy):
-                            occupy_cells(r, c, sx, sy)
-                            if "right" in spread_direction:
-                                pos_x = start_x - (c * (w + margin)) - iw
-                            else:
-                                pos_x = start_x + (c * (w + margin))
-
-                            if "bottom" in spread_direction:
-                                pos_y = start_y - (r * (h + margin)) - ih
-                            else:
-                                pos_y = start_y + (r * (h + margin))
-
-                            positions[idx] = (pos_x, pos_y, iw, ih)
-                            placed = True
-                            break
-                    r += 1
-        else:
-            # 고정 격자 (crop_fill 또는 fit_inside)
-            for idx in range(len(item_paths)):
-                c = idx % cols
-                r = idx // cols
-                cur_w, cur_h = w, h
-                if "right" in spread_direction:
-                    pos_x = start_x - (c * (w + margin)) - cur_w
-                else:
-                    pos_x = start_x + (c * (w + margin))
-
-                if "bottom" in spread_direction:
-                    pos_y = start_y - (r * (h + margin)) - cur_h
-                else:
-                    pos_y = start_y + (r * (h + margin))
-
-                positions[idx] = (pos_x, pos_y, cur_w, cur_h)
+        from master_operations import calculate_spread_layout
+        positions = calculate_spread_layout(
+            item_paths=item_paths,
+            w=w,
+            h=h,
+            cols=cols,
+            rows=rows,
+            margin=margin,
+            fit_strategy=fit_strategy,
+            spread_direction=spread_direction,
+            start_x=start_x,
+            start_y=start_y,
+        )
 
         for idx, item_path in enumerate(item_paths):
             item_name = os.path.basename(item_path)
             pos_x, pos_y, item_w, item_h = positions[idx]
-            media_fit_mode = 1 if fit_strategy in ("auto_aspect", "fullscreen_autofill", "grid_span", "crop_fill") else 0
+            media_fit_mode = 1 if fit_strategy in ("auto_aspect", "fullscreen_autofill", "grid_span", "crop_fill", "modular_tetris", "treemap_collage", "justified_rows") else 0
 
             if idx == 0 and target_widget:
                 target_widget.profile_name = item_name
@@ -8484,7 +8272,7 @@ class MasterController(QMainWindow):
                 if new_id not in current_set_profiles:
                     current_set_profiles.append(new_id)
 
-            self.run_widget(new_id, item_name)
+            self.run_widget(new_id, item_name, defer_reload=True)
             created_count += 1
 
         self.master_settings.setValue("profile_ids", all_pids)
@@ -8821,7 +8609,7 @@ class MasterController(QMainWindow):
         else:
             self.run_widget(new_id, "New 세팅")
 
-    def run_widget(self, pid, name):
+    def run_widget(self, pid, name, defer_reload=False):
         spid = str(pid)
         target_sid = self._set_of_profile(spid)
         applied_sid = str(getattr(self, "_applied_set_id", "") or "")
@@ -8835,8 +8623,9 @@ class MasterController(QMainWindow):
                 "MyHomeApp", f"Profile_{spid}"
             ).value("name", "New 세팅")
             self._start_widget_instance(spid, str(display_name))
-        self.update_active_status()
-        self.load_profiles()
+        if not defer_reload:
+            self.update_active_status()
+            self.load_profiles()
 
     def stop_widget(self, pid):
         spid = str(pid)
