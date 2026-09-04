@@ -1,6 +1,18 @@
-from PyQt6.QtCore import QPoint, QRect, Qt, pyqtSignal, QThread
+from PyQt6.QtCore import QCoreApplication, QEvent, QObject, QPoint, QRect, Qt, pyqtSignal, QThread
 from PyQt6.QtGui import QBrush, QColor, QPainter, QPen, QPolygon
-from PyQt6.QtWidgets import QApplication, QComboBox, QFrame, QLabel, QListWidget, QWidget
+from PyQt6.QtWidgets import (
+    QAbstractScrollArea,
+    QAbstractSpinBox,
+    QApplication,
+    QComboBox,
+    QDial,
+    QFrame,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QSlider,
+    QWidget,
+)
 
 
 class OverlayWidget(QWidget):
@@ -91,6 +103,57 @@ class DownwardComboBox(QComboBox):
         popup.setContentsMargins(0, 0, 0, 0)
         popup.setMinimumWidth(max(self.width(), popup.width()))
         popup.move(self.mapToGlobal(QPoint(0, self.height() + 3)))
+
+    def wheelEvent(self, event):
+        # 팝업 드롭다운이 열려있는 상태에서는 목록 스크롤 허용, 닫혀있을 때는 휠로 인한 선택 변경 방지
+        if self.view() and self.view().isVisible():
+            super().wheelEvent(event)
+        else:
+            event.ignore()
+
+
+class PreventInputWheelScrollFilter(QObject):
+    """
+    QSpinBox, QSlider, QComboBox 등 입력 컨트롤 위에서 마우스 휠을 굴렸을 때
+    숫자나 선택값이 의도치 않게 변경되거나 상위 QScrollArea 스크롤이 차단되는 현상을
+    원천 방지하는 이벤트 필터.
+    휠 이벤트를 부모 QScrollArea의 viewport로 토스하여 끊김 없는 페이지 스크롤을 유지합니다.
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._handling = False
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.Wheel:
+            if self._handling:
+                return False
+
+            # 콤보박스 드롭다운 목록이 열려있을 때는 목록 자체 스크롤 정상 허용
+            if isinstance(obj, QComboBox):
+                if hasattr(obj, "view"):
+                    v = obj.view()
+                    if v and v.isVisible():
+                        return False
+
+            is_input = (
+                isinstance(obj, (QAbstractSpinBox, QSlider, QDial, QComboBox))
+                or (isinstance(obj, QLineEdit) and isinstance(obj.parentWidget(), QAbstractSpinBox))
+            )
+            if is_input:
+                self._handling = True
+                try:
+                    # 상위 스크롤 영역을 찾아 viewport로 휠 이벤트 전달
+                    p = obj.parentWidget()
+                    while p is not None:
+                        if isinstance(p, QAbstractScrollArea):
+                            QCoreApplication.sendEvent(p.viewport(), event)
+                            return True
+                        p = p.parentWidget()
+                    # 상위 스크롤 영역이 없더라도 휠로 인한 값 변경은 차단
+                    return True
+                finally:
+                    self._handling = False
+        return super().eventFilter(obj, event)
 
 
 class TreeBranchLine(QWidget):

@@ -192,7 +192,7 @@ class DesktopWidget(QMainWindow):
     _desktop_icon_cache_hwnd = 0
     _desktop_icon_cache_ts = 0.0
     _desktop_icon_cache_rects = []
-    _desktop_icon_cache_max_age = 0.16
+    _desktop_icon_cache_max_age = 0.28
     _desktop_caption_path_cache_ts = 0.0
     _desktop_caption_path_cache = {}
     _desktop_icon_alpha_cache = {}
@@ -764,11 +764,11 @@ class DesktopWidget(QMainWindow):
             return
         enabled = (self._should_clone_desktop_icons() or self._should_punch_desktop_icons()) and self.isVisible()
         if enabled:
-            target_interval = 420
+            target_interval = 280
             if self._should_clone_desktop_icons():
-                target_interval = 120
+                target_interval = 280
             elif self._should_punch_desktop_icons():
-                target_interval = 320
+                target_interval = 350
             try:
                 if int(self._desktop_icon_mask_timer.interval()) != int(target_interval):
                     self._desktop_icon_mask_timer.setInterval(int(target_interval))
@@ -855,8 +855,6 @@ class DesktopWidget(QMainWindow):
                 self._desktop_icon_clone_refresh_timer.stop()
         self._desktop_icon_clone_last_refresh_mono = now
         items = self._desktop_icon_clone_items_local(force=bool(force))
-        if not items and not force:
-            items = self._desktop_icon_clone_items_local(force=True)
         self._set_clone_overlay_items(items)
 
     def _refresh_desktop_icon_mask(self):
@@ -870,8 +868,6 @@ class DesktopWidget(QMainWindow):
         if clone_mode:
             self._refresh_desktop_icon_clone_overlay(force=False)
             edit_local_rect = self._desktop_icon_edit_rect_local(force=False)
-            if (int(edit_local_rect.width()) <= 0 or int(edit_local_rect.height()) <= 0) and self.isVisible():
-                edit_local_rect = self._desktop_icon_edit_rect_local(force=True)
             if not (isinstance(edit_local_rect, QRect) and int(edit_local_rect.width()) > 0 and int(edit_local_rect.height()) > 0):
                 edit_local_rect = QRect()
             prev_edit_rect = getattr(self, "_desktop_icon_last_edit_rect_local", QRect())
@@ -929,9 +925,9 @@ class DesktopWidget(QMainWindow):
         cache_ts = float(getattr(cls, "_desktop_icon_cache_ts", 0.0) or 0.0)
         cache_rects = list(getattr(cls, "_desktop_icon_cache_rects", []) or [])
         try:
-            cache_max_age = max(0.05, float(getattr(cls, "_desktop_icon_cache_max_age", 0.16) or 0.16))
+            cache_max_age = max(0.05, float(getattr(cls, "_desktop_icon_cache_max_age", 0.28) or 0.28))
         except Exception:
-            cache_max_age = 0.16
+            cache_max_age = 0.28
         if (
             not force
             and cache_hwnd
@@ -2114,7 +2110,7 @@ class DesktopWidget(QMainWindow):
                 event.type() == QEvent.Type.KeyPress
                 and key in (
                     Qt.Key.Key_M, Qt.Key.Key_O, Qt.Key.Key_P, Qt.Key.Key_C, Qt.Key.Key_G,
-                    Qt.Key.Key_H, Qt.Key.Key_R
+                    Qt.Key.Key_H, Qt.Key.Key_R, Qt.Key.Key_L
                 )
                 and self._is_topmost_widget_under_cursor()
             ):
@@ -2161,11 +2157,6 @@ class DesktopWidget(QMainWindow):
                         elif key == Qt.Key.Key_P:
                             if hasattr(self, "manager") and self.manager and hasattr(self.manager, "stop_widget"):
                                 QTimer.singleShot(0, lambda pid=self.profile_id: self.manager.stop_widget(pid))
-                        elif key == Qt.Key.Key_H:
-                            if hasattr(self, "manager") and self.manager and hasattr(self.manager, "set_temp_group_gpu_guard"):
-                                self.manager.set_temp_group_gpu_guard(self.profile_id, not bool(self.gpu_guard_enabled))
-                            else:
-                                self.toggle_gpu_guard_shortcut()
                         elif key == Qt.Key.Key_R:
                             curr_corner = self.coerce_corner_mode(getattr(self, "corner_mode", self.CORNER_ROUNDED))
                             next_corner = (int(curr_corner) + 1) % 3
@@ -2173,6 +2164,17 @@ class DesktopWidget(QMainWindow):
                                 self.manager.set_temp_group_corner_mode(self.profile_id, next_corner)
                             else:
                                 self.toggle_corner_mode_shortcut()
+                        elif key == Qt.Key.Key_L:
+                            new_lock = not bool(self.is_locked)
+                            if hasattr(self, "manager") and self.manager and hasattr(self.manager, "set_temp_group_lock"):
+                                self.manager.set_temp_group_lock(self.profile_id, new_lock)
+                            else:
+                                if hasattr(self, "cancel_active_interaction"):
+                                    self.cancel_active_interaction()
+                                self.apply_window_settings(self.layer_mode, new_lock)
+                                self.save_all_settings()
+                                if hasattr(self, "show_lock_hud"):
+                                    self.show_lock_hud(new_lock)
                         return True
             return False
 
@@ -3309,19 +3311,10 @@ class DesktopWidget(QMainWindow):
         self.set_mute_shortcut_state(not bool(self.is_muted), log=True)
 
     def set_gpu_guard_shortcut_state(self, enabled, log=False, show_hud=False):
-        self.gpu_guard_enabled = bool(enabled)
-        if not self.gpu_guard_enabled:
-            self.set_performance_paused(False, reason="guard_toggle_off")
-        elif hasattr(self, "manager") and self.manager and bool(getattr(self.manager, "_gpu_guard_paused", False)):
-            usage = float(getattr(self.manager, "_gpu_last_usage", 0.0))
-            self.set_performance_paused(True, reason=f"gpu {usage:.1f}%", force=True)
-        self.save_all_settings()
-        if show_hud:
-            self.show_gpu_guard_hud(self.gpu_guard_enabled)
-        _ = bool(log)
+        pass
 
     def toggle_gpu_guard_shortcut(self):
-        self.set_gpu_guard_shortcut_state(not bool(self.gpu_guard_enabled), log=True, show_hud=True)
+        pass
 
     def set_corner_mode_shortcut_state(self, mode, log=False):
         mode_int = self.coerce_corner_mode(mode)
@@ -3365,11 +3358,20 @@ class DesktopWidget(QMainWindow):
 
             return
 
-        if self._perf_paused_video and self.stack.currentIndex() == 2:
-            self.media_player.play()
-        if self._perf_paused_gif and self.movie is not None:
-            self.movie.setPaused(False)
-        if self._perf_gif_timer_was_active and self.stack.currentIndex() == 1 and self.movie is not None:
+        if self.stack.currentIndex() == 2:
+            try:
+                if self._perf_paused_video or self.media_player.playbackState() == QMediaPlayer.PlaybackState.PausedState:
+                    self.media_player.play()
+            except Exception:
+                pass
+        elif self.stack.currentIndex() == 1 and self.movie is not None:
+            try:
+                self.movie.setPaused(False)
+                if self.movie.state() != QMovie.MovieState.Running:
+                    self.movie.start()
+            except Exception:
+                pass
+        if (self._perf_gif_timer_was_active or not self.timer.isActive()) and self.stack.currentIndex() == 1 and self.movie is not None:
             if not self.timer.isActive():
                 self.timer.start(self.interval_ms)
 
@@ -4455,6 +4457,10 @@ class DesktopWidget(QMainWindow):
         self._sync_video_loop_policy_for_path(path)
         self.media_player.setSource(self._to_media_qurl(playback_path))
         self._apply_mute_state()
+        if bool(getattr(self, "_deferred_playback_active", False)):
+            self._deferred_playback_pending = True
+            self._refresh_icon_overlay_for_current_media()
+            return
         self.media_player.play()
         self._refresh_icon_overlay_for_current_media()
         if self._performance_paused:
@@ -4723,12 +4729,27 @@ class DesktopWidget(QMainWindow):
             return
         target = self._safe_target_size(getattr(self, "img_label", None), self.size())
         src = QSize()
-        try:
-            fr = movie_obj.frameRect()
-            if isinstance(fr, QRect):
-                src = fr.size()
-        except Exception:
-            src = QSize()
+        orig_size = getattr(movie_obj, "_original_size", None)
+        if isinstance(orig_size, QSize) and orig_size.isValid() and orig_size.width() > 0 and orig_size.height() > 0:
+            src = orig_size
+        else:
+            file_name = movie_obj.fileName()
+            if file_name and os.path.isfile(file_name):
+                try:
+                    reader = QImageReader(file_name)
+                    r_size = reader.size()
+                    if r_size.isValid() and r_size.width() > 0 and r_size.height() > 0:
+                        src = r_size
+                        movie_obj._original_size = r_size
+                except Exception:
+                    pass
+        if int(src.width()) <= 0 or int(src.height()) <= 0:
+            try:
+                fr = movie_obj.frameRect()
+                if isinstance(fr, QRect) and fr.isValid() and fr.width() > 0 and fr.height() > 0:
+                    src = fr.size()
+            except Exception:
+                src = QSize()
         if int(src.width()) <= 0 or int(src.height()) <= 0:
             try:
                 pm = movie_obj.currentPixmap()
@@ -4739,10 +4760,36 @@ class DesktopWidget(QMainWindow):
         if int(src.width()) <= 0 or int(src.height()) <= 0:
             src = QSize(int(target.width()), int(target.height()))
         scaled = self._scaled_size_for_source(src, target, fill=self._is_media_fill_mode())
-        try:
-            movie_obj.setScaledSize(scaled)
-        except Exception:
-            pass
+
+        old_scaled = movie_obj.scaledSize()
+        needs_reload = False
+        if old_scaled != scaled:
+            needs_reload = True
+        elif movie_obj.currentPixmap() and not movie_obj.currentPixmap().isNull() and movie_obj.currentPixmap().size() != scaled:
+            needs_reload = True
+
+        if needs_reload:
+            file_name = movie_obj.fileName()
+            if movie_obj.cacheMode() == QMovie.CacheMode.CacheAll and file_name and os.path.isfile(file_name):
+                cur_frame = max(0, int(movie_obj.currentFrameNumber()))
+                is_running = (movie_obj.state() == QMovie.MovieState.Running)
+                try:
+                    movie_obj.stop()
+                    movie_obj.setFileName(file_name)
+                    movie_obj.setScaledSize(scaled)
+                    if is_running:
+                        movie_obj.start()
+                        movie_obj.jumpToFrame(cur_frame)
+                except Exception:
+                    try:
+                        movie_obj.setScaledSize(scaled)
+                    except Exception:
+                        pass
+            else:
+                try:
+                    movie_obj.setScaledSize(scaled)
+                except Exception:
+                    pass
 
     def _estimate_gif_duration_ms(self, movie_obj):
         if movie_obj is None:
@@ -5014,11 +5061,7 @@ class DesktopWidget(QMainWindow):
     def _apply_media_scale_mode(self):
         self._update_video_aspect_mode()
         if self.movie:
-            try:
-                # Keep GIF behavior aligned with legacy logic to avoid resize-time artifacts.
-                self.movie.setScaledSize(self.size())
-            except Exception:
-                pass
+            self._update_movie_scaled_size()
             return
         if self.current_static_pixmap and not self.current_static_pixmap.isNull():
             self._update_static_pixmap_size()
@@ -5097,6 +5140,9 @@ class DesktopWidget(QMainWindow):
             pass
         self._update_movie_scaled_size_for(self.movie)
         self.img_label.setUpdatesEnabled(True)
+        if bool(getattr(self, "_deferred_playback_active", False)):
+            self._deferred_playback_pending = True
+            return True
         self.movie.start()
         if self.movie.state() != QMovie.MovieState.Running:
             self.movie.start()
@@ -5114,6 +5160,35 @@ class DesktopWidget(QMainWindow):
         if self._performance_paused:
             self.set_performance_paused(True, reason="guard_active", force=True)
         return True
+
+    def _resume_deferred_playback(self):
+        self._deferred_playback_active = False
+        if not bool(getattr(self, "_deferred_playback_pending", False)):
+            return
+        self._deferred_playback_pending = False
+        if self.stack.currentIndex() == 1 and self.movie is not None:
+            try:
+                self.movie.start()
+                if self.movie.state() != QMovie.MovieState.Running:
+                    self.movie.start()
+                gif_total_duration = int(self._estimate_gif_duration_ms(self.movie))
+                try:
+                    loop_count = int(self.movie.loopCount())
+                except Exception:
+                    loop_count = -1
+                if loop_count == 1:
+                    wait_time = max(self.interval_ms, gif_total_duration) if gif_total_duration > 0 else self.interval_ms
+                    self.timer.start(wait_time)
+                    self._clear_active_gif_loop_watch()
+                else:
+                    self._start_active_gif_loop_watch()
+            except Exception:
+                pass
+        elif self.stack.currentIndex() == 2 and self.media_player is not None:
+            try:
+                self.media_player.play()
+            except Exception:
+                pass
 
     def _complete_gif_swap(self):
         pending = getattr(self, "_gif_swap_pending_movie", None)
@@ -5317,8 +5392,6 @@ class DesktopWidget(QMainWindow):
 
         if punch_icons and mask_region is not None:
             local_holes = self._desktop_icon_hole_rects_local(force=False)
-            if not local_holes:
-                local_holes = self._desktop_icon_hole_rects_local(force=True)
             for hole in local_holes:
                 if not isinstance(hole, dict):
                     continue
@@ -5331,8 +5404,6 @@ class DesktopWidget(QMainWindow):
 
         # In clone mode, keep only the active rename editor area native.
         edit_local_rect = self._desktop_icon_edit_rect_local(force=False)
-        if (int(edit_local_rect.width()) <= 0 or int(edit_local_rect.height()) <= 0) and self.isVisible():
-            edit_local_rect = self._desktop_icon_edit_rect_local(force=True)
         if isinstance(edit_local_rect, QRect) and int(edit_local_rect.width()) > 0 and int(edit_local_rect.height()) > 0:
             if mask_region is None:
                 mask_region = QRegion(self.rect())
@@ -5399,12 +5470,34 @@ class DesktopWidget(QMainWindow):
         if lock:
             flags |= Qt.WindowType.WindowTransparentForInput
 
-        self.setWindowFlags(flags)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        if was_visible:
-            self.show()
-        self.resize(current_size)
-        self._move_exact(current_pos)
+        hwnd = int(self.winId()) if was_visible else 0
+        layer_changed = (getattr(self, "_last_applied_layer_mode", None) != int(layer))
+        self._last_applied_layer_mode = int(layer)
+
+        if hwnd and not layer_changed and win32gui.IsWindow(hwnd):
+            try:
+                ex_style = win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
+                if lock:
+                    ex_style |= win32con.WS_EX_TRANSPARENT
+                else:
+                    ex_style &= ~win32con.WS_EX_TRANSPARENT
+                win32gui.SetWindowLong(hwnd, win32con.GWL_EXSTYLE, ex_style)
+                win32gui.SetWindowPos(hwnd, 0, 0, 0, 0, 0, win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_NOZORDER | win32con.SWP_FRAMECHANGED)
+                self.overrideWindowFlags(flags)
+            except Exception:
+                self.setWindowFlags(flags)
+                self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+                if was_visible:
+                    self.show()
+                self.resize(current_size)
+                self._move_exact(current_pos)
+        else:
+            self.setWindowFlags(flags)
+            self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+            if was_visible:
+                self.show()
+            self.resize(current_size)
+            self._move_exact(current_pos)
         self.setWindowOpacity(float(self.current_opacity_pct) / 100.0)
         self.apply_mask_and_style()
         self._schedule_desktop_icon_overlay_bootstrap(retries=3, delay_ms=60)
@@ -5565,12 +5658,14 @@ class MasterController(QMainWindow):
         else:
             self.setWindowIcon(render_vector_icon("widget", "#528bf8", 32))
         self.setObjectName("masterWindow")
-        self.setMinimumSize(440, 520)
+        self.setMinimumSize(560, 520)
         QTimer.singleShot(0, lambda: apply_windows_dark_title_bar(self))
         self.master_settings = QSettings("MyHomeApp", "MasterV3")
-        w_saved = int(self.master_settings.value("window_width", 490))
+        w_saved = int(self.master_settings.value("window_width", 620))
+        if w_saved < 560:
+            w_saved = 620
         h_saved = int(self.master_settings.value("window_height", 680))
-        self.resize(max(440, min(3000, w_saved)), max(520, min(3000, h_saved)))
+        self.resize(max(560, min(3000, w_saved)), max(520, min(3000, h_saved)))
         try:
             master_sync_ms = int(os.environ.get("MYCANVAS_MASTER_SYNC_MS", "650") or "650")
         except Exception:
@@ -6090,6 +6185,13 @@ class MasterController(QMainWindow):
         gpu_cfg_panel_layout.setContentsMargins(10, 8, 10, 10)
         gpu_cfg_panel_layout.setSpacing(6)
 
+        self.gpu_guard_enable_cb = QCheckBox("GPU 과부하 시 미디어 자동 일시정지")
+        self.gpu_guard_enable_cb.setObjectName("gpuGuardMasterToggle")
+        self.gpu_guard_enable_cb.setToolTip(
+            "PC의 GPU 사용률이 설정치를 초과하면 모든 위젯의 미디어 재생을 일시정지하여 게임 및 작업 성능을 확보합니다."
+        )
+        gpu_cfg_panel_layout.addWidget(self.gpu_guard_enable_cb)
+
         gpu_pause_row = QHBoxLayout()
         gpu_pause_row.setContentsMargins(0, 0, 0, 0)
         gpu_pause_row.setSpacing(6)
@@ -6106,6 +6208,7 @@ class MasterController(QMainWindow):
         self.gpu_pause_slider.setObjectName("gpuCfgSlider")
         self.gpu_pause_slider.setRange(1, 100)
         self.gpu_pause_slider.setSingleStep(1)
+        self.gpu_pause_slider.wheelEvent = lambda event: event.ignore()
         gpu_cfg_panel_layout.addWidget(self.gpu_pause_slider)
 
         gpu_resume_row = QHBoxLayout()
@@ -6124,6 +6227,7 @@ class MasterController(QMainWindow):
         self.gpu_resume_slider.setObjectName("gpuCfgSlider")
         self.gpu_resume_slider.setRange(0, 99)
         self.gpu_resume_slider.setSingleStep(1)
+        self.gpu_resume_slider.wheelEvent = lambda event: event.ignore()
         gpu_cfg_panel_layout.addWidget(self.gpu_resume_slider)
 
         sep_line = QFrame()
@@ -6202,7 +6306,7 @@ class MasterController(QMainWindow):
             app.installEventFilter(self)
         self._alt_click_pressed_prev = False
         self._alt_click_poll_timer = QTimer(self)
-        self._alt_click_poll_timer.setInterval(25)
+        self._alt_click_poll_timer.setInterval(30)
         self._alt_click_poll_timer.timeout.connect(self._poll_alt_click_toggle_lock)
         self._alt_click_poll_timer.start()
         self._gpu_sampler = GpuUsageSampler()
@@ -6222,6 +6326,11 @@ class MasterController(QMainWindow):
             persist=False,
         )
         self._sync_gpu_threshold_inputs()
+        self._gpu_guard_enabled = _as_bool(self.master_settings.value("gpu_guard_enabled", True), True)
+        self.gpu_guard_enable_cb.setChecked(self._gpu_guard_enabled)
+        self.gpu_pause_slider.setEnabled(self._gpu_guard_enabled)
+        self.gpu_resume_slider.setEnabled(self._gpu_guard_enabled)
+        self.gpu_guard_enable_cb.toggled.connect(self._on_gpu_guard_enable_toggled)
         self.gpu_pause_slider.valueChanged.connect(self._on_gpu_threshold_inputs_changed)
         self.gpu_resume_slider.valueChanged.connect(self._on_gpu_threshold_inputs_changed)
         self.startup_shortcut_cb.toggled.connect(self._on_startup_shortcut_toggled)
@@ -6408,32 +6517,56 @@ class MasterController(QMainWindow):
         return _mset_cleanup_orphan_profiles_impl(self)
 
     def _profile_startup_media_kind(self, pid):
-        if _as_bool(os.environ.get("MYCANVAS_FAST_STARTUP", "1"), True):
-            return "other"
         spid = str(pid)
         settings = QSettings("MyHomeApp", f"Profile_{spid}")
-        folder_path = str(settings.value("folder_path", "") or "").strip()
-        if not folder_path or not os.path.isdir(folder_path):
-            return "other"
-        media_ext = DesktopWidget._supported_media_extensions()
-        try:
-            files = os.listdir(folder_path)
-        except OSError:
-            return "other"
-        candidates = []
-        for name in sorted(files):
-            low = str(name).lower()
-            path = os.path.join(folder_path, str(name))
-            if low.endswith(media_ext):
-                candidates.append(path)
-        if not candidates:
-            return "other"
-        first_name = str(candidates[0]).strip().lower()
-        if DesktopWidget._is_video_path(first_name):
-            return "video"
-        if DesktopWidget._is_gif_path(first_name):
-            return "gif"
+        fip = settings.value("folder_item_paths")
+        path = ""
+        if fip:
+            path = fip[0] if isinstance(fip, list) else str(fip)
+        if not path:
+            path = str(settings.value("image_path", "") or "")
+        if not path:
+            folder_path = str(settings.value("folder_path", "") or "").strip()
+            if folder_path and os.path.isdir(folder_path):
+                try:
+                    media_ext = DesktopWidget._supported_media_extensions()
+                    for name in sorted(os.listdir(folder_path)):
+                        low = str(name).lower()
+                        if low.endswith(media_ext):
+                            path = os.path.join(folder_path, str(name))
+                            break
+                except Exception:
+                    pass
+        if path:
+            target = str(path).strip().lower()
+            if DesktopWidget._is_video_path(target):
+                return "video"
+            if DesktopWidget._is_gif_path(target):
+                return "gif"
+            if DesktopWidget._is_image_path(target):
+                return "image"
         return "other"
+
+    def _start_deferred_playbacks(self):
+        deferred = [
+            w for w in self.widgets.values()
+            if isinstance(w, DesktopWidget) and bool(getattr(w, "_deferred_playback_pending", False))
+        ]
+        if not deferred:
+            return
+        for w in deferred:
+            try:
+                w._resume_deferred_playback()
+            except Exception:
+                pass
+
+    def _bootstrap_all_desktop_icon_overlays(self):
+        for w in self.widgets.values():
+            if isinstance(w, DesktopWidget) and (w._should_clone_desktop_icons() or w._should_punch_desktop_icons()):
+                try:
+                    w._schedule_desktop_icon_overlay_bootstrap(retries=2, delay_ms=60)
+                except Exception:
+                    pass
 
     @staticmethod
     def _startup_delay_for_kind(kind, mode="default"):
@@ -6471,6 +6604,21 @@ class MasterController(QMainWindow):
 
     def _sync_temp_group_badges(self):
         _mtg_sync_temp_group_badges_impl(self)
+        self._sync_temp_group_list_checkboxes()
+
+    def _sync_temp_group_list_checkboxes(self):
+        for spid, row in list(getattr(self, "profile_rows", {}).items()):
+            if isinstance(row, ProfileRowWidget) and hasattr(row, "_checkbox") and row._checkbox:
+                should_check = (str(spid) in self._temp_group_ids)
+                if row._checkbox.isChecked() != should_check:
+                    row._checkbox.blockSignals(True)
+                    row._checkbox.setChecked(should_check)
+                    row._checkbox.blockSignals(False)
+        self._sync_bulk_action_ui()
+
+    def _refresh_temp_group_ui(self):
+        self._sync_temp_group_badges()
+        self._sync_temp_group_list_checkboxes()
 
     def toggle_temp_group_member(self, pid):
         return _mtg_toggle_temp_group_member_impl(self, pid)
@@ -6492,14 +6640,17 @@ class MasterController(QMainWindow):
                 continue
             if w.geometry().intersects(selection_rect):
                 matched_pids.append(str(pid))
+        modifiers = QApplication.keyboardModifiers()
+        is_add = bool(modifiers & (Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.ControlModifier))
         if not matched_pids:
+            if not is_add and self._temp_group_ids:
+                self.clear_temp_group()
             return
+        if not is_add:
+            self._temp_group_ids.clear()
         for pid in matched_pids:
             self._temp_group_ids.add(str(pid))
-        if hasattr(self, "_refresh_temp_group_ui"):
-            self._refresh_temp_group_ui()
-        elif hasattr(self, "_sync_temp_group_badges"):
-            self._sync_temp_group_badges()
+        self._sync_temp_group_badges()
         for pid in matched_pids:
             w = self.widgets.get(str(pid))
             if w and hasattr(w, "_show_action_hud"):
@@ -6587,7 +6738,7 @@ class MasterController(QMainWindow):
     def _place_gpu_cfg_panel(self):
         self.gpu_cfg_panel.adjustSize()
         hint = self.gpu_cfg_panel.sizeHint()
-        popup_w = max(256, hint.width())
+        popup_w = max(280, hint.width())
         popup_h = hint.height()
 
         anchor_global = self.gpu_cfg_toggle.mapToGlobal(QPoint(0, self.gpu_cfg_toggle.height() + 6))
@@ -7853,7 +8004,7 @@ class MasterController(QMainWindow):
                 w=spread_relayout_cfg["w"],
                 h=spread_relayout_cfg["h"],
                 cols=spread_relayout_cfg["cols"],
-                rows=max(1, (len(checked_ids) + spread_relayout_cfg["cols"] - 1) // max(1, spread_relayout_cfg["cols"])),
+                rows=int(spread_relayout_cfg.get("rows", max(1, (len(checked_ids) + spread_relayout_cfg["cols"] - 1) // max(1, spread_relayout_cfg["cols"])))),
                 margin=spread_relayout_cfg["margin"],
                 fit_strategy=spread_relayout_cfg["fit_strategy"],
                 spread_direction=spread_relayout_cfg["direction"],
@@ -8416,40 +8567,18 @@ class MasterController(QMainWindow):
             chord_down = alt_down and left_down
 
             if chord_down and not self._alt_click_pressed_prev:
-                # 1. 타 프로그램(포토샵, 그래픽 툴, 에디터, 게임 등) 사용 중 Alt+클릭 간섭 원천 방지
-                # 포그라운드 윈도우가 바탕화면(Progman/WorkerW), 셸, 또는 MyWidgetBox 관련 창일 때만 반응
-                fg_hwnd = win32gui.GetForegroundWindow()
-                is_allowed_fg = False
-                if not fg_hwnd or fg_hwnd == win32gui.GetDesktopWindow() or fg_hwnd == win32gui.GetShellWindow():
-                    is_allowed_fg = True
-                else:
-                    own_hwnds = {int(self.winId())}
-                    for w in self.widgets.values():
-                        if w and hasattr(w, "winId"):
-                            try:
-                                own_hwnds.add(int(w.winId()))
-                            except Exception:
-                                pass
-                    if int(fg_hwnd) in own_hwnds:
-                        is_allowed_fg = True
-                    else:
-                        cls_name = win32gui.GetClassName(fg_hwnd)
-                        if cls_name in ("Progman", "WorkerW", "Shell_TrayWnd"):
-                            is_allowed_fg = True
-
-                if is_allowed_fg:
-                    cursor_x, cursor_y = win32api.GetCursorPos()
-                    target = self._widget_under_global_pos(QPoint(int(cursor_x), int(cursor_y)))
-                    if target is not None:
-                        new_lock = not bool(getattr(target, "is_locked", False))
-                        if hasattr(self, "set_temp_group_lock"):
-                            self.set_temp_group_lock(target.profile_id, new_lock)
-                        else:
-                            if hasattr(target, "cancel_active_interaction"):
-                                target.cancel_active_interaction()
-                            target.apply_window_settings(int(getattr(target, "layer_mode", DesktopWidget.LAYER_NORMAL)), new_lock)
-                            target.save_all_settings()
-                        self.load_profiles()
+                cursor_x, cursor_y = win32api.GetCursorPos()
+                target = self._widget_under_global_pos(QPoint(int(cursor_x), int(cursor_y)))
+                if target is not None:
+                    new_lock = not bool(getattr(target, "is_locked", False))
+                    if hasattr(target, "cancel_active_interaction"):
+                        target.cancel_active_interaction()
+                    target.apply_window_settings(int(getattr(target, "layer_mode", DesktopWidget.LAYER_NORMAL)), new_lock)
+                    target.save_all_settings()
+                    if hasattr(target, "show_lock_hud"):
+                        target.show_lock_hud(new_lock)
+                    if hasattr(target, "_refresh_group_badge"):
+                        target._refresh_group_badge()
 
             self._alt_click_pressed_prev = chord_down
         except Exception:
@@ -8459,8 +8588,16 @@ class MasterController(QMainWindow):
     def _gpu_guard_targets(self):
         return [
             w for w in self.widgets.values()
-            if isinstance(w, DesktopWidget) and bool(getattr(w, "gpu_guard_enabled", False))
+            if isinstance(w, DesktopWidget)
         ]
+
+    def _on_gpu_guard_enable_toggled(self, checked):
+        self._gpu_guard_enabled = bool(checked)
+        self.master_settings.setValue("gpu_guard_enabled", self._gpu_guard_enabled)
+        self.gpu_pause_slider.setEnabled(self._gpu_guard_enabled)
+        self.gpu_resume_slider.setEnabled(self._gpu_guard_enabled)
+        if not self._gpu_guard_enabled and getattr(self, "_gpu_guard_paused", False):
+            self._set_gpu_guard_paused(False, self._gpu_last_usage, reason="guard_disabled")
 
     def _set_gpu_guard_paused(self, paused, usage, reason="", force_targets=False):
         self._gpu_guard_paused = bool(paused)
@@ -8490,10 +8627,17 @@ class MasterController(QMainWindow):
 
     def _is_other_app_fullscreen(self):
         try:
-            import win32gui, win32api, win32con
+            import win32gui, win32api, win32con, win32process
             hwnd = win32gui.GetForegroundWindow()
             if not hwnd or hwnd == win32gui.GetDesktopWindow() or hwnd == win32gui.GetShellWindow():
                 return False
+
+            try:
+                _, win_pid = win32process.GetWindowThreadProcessId(hwnd)
+                if win_pid == os.getpid():
+                    return False
+            except Exception:
+                pass
 
             own_hwnds = {int(self.winId())}
             for w in self.widgets.values():
@@ -8506,11 +8650,30 @@ class MasterController(QMainWindow):
                 return False
 
             class_name = win32gui.GetClassName(hwnd)
-            if class_name in ("Progman", "WorkerW", "Shell_TrayWnd"):
+            shell_classes = (
+                "Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd",
+                "SHELLDLL_DefView", "SysListView32", "DV2ControlHost",
+                "Windows.UI.Core.CoreWindow",
+            )
+            if class_name in shell_classes:
                 return False
+
+            try:
+                root = win32gui.GetAncestor(hwnd, win32con.GA_ROOT)
+                if root and root != hwnd:
+                    root_cls = win32gui.GetClassName(root)
+                    if root_cls in shell_classes:
+                        return False
+            except Exception:
+                pass
 
             if not win32gui.IsWindowVisible(hwnd) or win32gui.IsIconic(hwnd):
                 return False
+
+            try:
+                style = win32gui.GetWindowLong(hwnd, win32con.GWL_STYLE)
+            except Exception:
+                style = 0
 
             rect = win32gui.GetWindowRect(hwnd)
             w_left, w_top, w_right, w_bottom = rect
@@ -8520,8 +8683,19 @@ class MasterController(QMainWindow):
                 return False
             mon_info = win32api.GetMonitorInfo(monitor)
             m_left, m_top, m_right, m_bottom = mon_info["Monitor"]
+            work_left, work_top, work_right, work_bottom = mon_info["Work"]
 
+            # 1. 완전 전체화면 (게임, 유튜브 F11, 독점 전체화면: 모니터 영역 전체를 덮음)
             if w_left <= m_left and w_top <= m_top and w_right >= m_right and w_bottom >= m_bottom:
+                return True
+
+            # 2. 창 최대화 (작업 관리자, 웹브라우저, 창모드 게임 등 해당 모니터 작업 영역 전체를 채움)
+            is_maximized = bool(style & win32con.WS_MAXIMIZE)
+            covers_work_area = (
+                w_left <= work_left + 16 and w_top <= work_top + 16 and
+                w_right >= work_right - 16 and w_bottom >= work_bottom - 16
+            )
+            if is_maximized or covers_work_area:
                 return True
         except Exception:
             pass
@@ -8544,6 +8718,11 @@ class MasterController(QMainWindow):
                     for w in self.widgets.values():
                         if isinstance(w, DesktopWidget):
                             w.set_performance_paused(False, reason="전체화면 해제")
+
+        if not getattr(self, "_gpu_guard_enabled", True):
+            if self._gpu_guard_paused:
+                self._set_gpu_guard_paused(False, self._gpu_last_usage, reason="guard_disabled")
+            return
 
         targets = self._gpu_guard_targets()
         if not targets:
@@ -8815,11 +8994,20 @@ if __name__ == "__main__":
     sys.excepthook = lambda cls, exception, traceback: sys.__excepthook__(cls, exception, traceback)
 
     try:
+        import ctypes
+        ctypes.windll.winmm.timeBeginPeriod(1)
+    except Exception:
+        pass
+
+    try:
         QApplication.setAttribute(Qt.ApplicationAttribute.AA_CompressHighFrequencyEvents, True)
     except Exception:
         pass
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
+    from mywidgetbox_ui_primitives import PreventInputWheelScrollFilter
+    app._wheel_filter = PreventInputWheelScrollFilter(app)
+    app.installEventFilter(app._wheel_filter)
     master = MasterController()
     # Avoid initial flash before restore_last_session decides visibility.
     master.hide()

@@ -26,6 +26,20 @@ Get-Process -Name "MyWidgetBox" -ErrorAction SilentlyContinue | ForEach-Object {
 }
 Start-Sleep -Milliseconds 450
 Get-Process -Name "MyWidgetBox" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Start-Sleep -Milliseconds 300
+
+$targetDist = Join-Path $root "dist\MyWidgetBox"
+if (Test-Path -LiteralPath $targetDist) {
+    try {
+        Remove-Item -LiteralPath $targetDist -Recurse -Force -ErrorAction Stop
+    } catch {
+        $tempTrash = Join-Path $root ("dist\trash_" + [Guid]::NewGuid().ToString("N"))
+        try {
+            Rename-Item -LiteralPath $targetDist -NewName (Split-Path -Leaf $tempTrash) -Force
+            Remove-Item -LiteralPath $tempTrash -Recurse -Force -ErrorAction SilentlyContinue
+        } catch {}
+    }
+}
 
 $pyExecutable = $null
 if (Get-Command py -ErrorAction SilentlyContinue) {

@@ -6,7 +6,7 @@ from PyQt6.QtGui import *
 from PyQt6.QtWidgets import *
 
 from mywidgetbox_core import _as_bool, calc_smart_aspect_size, get_media_native_size
-from mywidgetbox_ui_primitives import DownwardComboBox
+from mywidgetbox_ui_primitives import DownwardComboBox, PreventInputWheelScrollFilter
 
 DesktopWidget = None
 
@@ -435,8 +435,10 @@ class FolderSpreadDialog(QDialog):
         self.setObjectName("folderSpreadDialog")
         self.setWindowTitle("스프레드(바둑판) 위젯 배치 설정")
         self.setWindowIcon(render_vector_icon("widget", "#528bf8", 32))
-        self.resize(640, 720)
-        self.setFixedWidth(640)
+        self.resize(720, 720)
+        self.setFixedWidth(720)
+        self._wheel_filter = PreventInputWheelScrollFilter(self)
+        self.installEventFilter(self._wheel_filter)
         self.folder_path = str(folder_path or "").strip()
         self.media_paths = [str(p) for p in (media_paths or []) if p and os.path.isfile(p)]
         self.result_data = None
@@ -493,22 +495,27 @@ class FolderSpreadDialog(QDialog):
                 min-height: 32px;
                 color: #ffffff;
                 background-color: #121c2b;
-                border: 1px solid #283a54;
+                border: 1.5px solid #2e4466;
                 border-radius: 8px;
                 padding: 2px 8px;
                 font-size: 13px;
-                font-weight: 600;
+                font-weight: 700;
             }
             QSpinBox:disabled {
-                color: #556a85;
-                background-color: #0e1622;
-                border: 1px dashed #223247;
+                color: #4a617e;
+                background-color: #0c1420;
+                border: 1px dashed #203147;
             }
             QLabel:disabled {
-                color: #4e637f;
+                color: #4a617e;
+            }
+            QLabel#unitLabel {
+                color: #b7cceb;
+                font-weight: 700;
+                font-size: 13px;
             }
             QLabel#unitLabel:disabled {
-                color: #3e536e;
+                color: #3b4f66;
             }
             QSpinBox:hover {
                 border-color: #3d587d;
@@ -691,13 +698,34 @@ class FolderSpreadDialog(QDialog):
             h = QHBoxLayout(w)
             h.setContentsMargins(0, 0, 0, 0)
             h.setSpacing(6)
+            spinbox.wheelEvent = lambda event: event.ignore()
             h.addWidget(spinbox, 1)
             unit_lbl = QLabel(unit_text)
             unit_lbl.setObjectName("unitLabel")
-            unit_lbl.setStyleSheet("color: #b7cceb; font-weight: 600; font-size: 13px;")
+            unit_lbl.setStyleSheet("color: #b7cceb; font-weight: 700; font-size: 13px;")
             h.addWidget(unit_lbl, 0)
+            w.spinbox = spinbox
             w.unit_lbl = unit_lbl
+            w.default_unit = str(unit_text or "")
             return w
+
+        def _set_folder_input_active(wrap, spinbox, label, is_active, auto_text="자동", tooltip=""):
+            spinbox.setEnabled(bool(is_active))
+            wrap.setEnabled(bool(is_active))
+            if label is not None:
+                label.setEnabled(bool(is_active))
+                label.setToolTip(tooltip if not is_active else "")
+            if hasattr(wrap, "unit_lbl"):
+                wrap.unit_lbl.setEnabled(bool(is_active))
+                if is_active:
+                    wrap.unit_lbl.setText(getattr(wrap, "default_unit", "px"))
+                    wrap.unit_lbl.setStyleSheet("color: #b7cceb; font-weight: 700; font-size: 13px;")
+                else:
+                    wrap.unit_lbl.setText(auto_text)
+                    wrap.unit_lbl.setStyleSheet("color: #4a617e; font-weight: 600; font-size: 11px;")
+            tip = tooltip if not is_active else ""
+            wrap.setToolTip(tip)
+            spinbox.setToolTip(tip)
 
         # 위젯 너비 & 높이
         self.lbl_w = QLabel("위젯 너비(W):")
@@ -776,16 +804,17 @@ class FolderSpreadDialog(QDialog):
         grid_layout.addWidget(QLabel("비율/맞춤:"), 4, 0)
         self.fit_combo = DownwardComboBox()
         self.fit_combo.addItems([
-            "📸 사진첩 행 정돈 (구글포토 스타일, 가로 라인 밀착)",
-            "🖥️ 모니터 자동 맞춤 (해상도 기반 열/크기 자동 계산)",
-            "📌 핀터레스트 컬럼 (세로 열 메이슨리)",
-            "🔲 균일 바둑판 - 크롭 채우기",
-            "🖼️ 균일 바둑판 - 원본 비율 유지 (레터박스)",
+            "🧩 빈칸 자동 채우기 (자유 비율, 권장)",
+            "📏 가로 줄 맞춤 (단정한 앨범형)",
+            "📐 세로 줄 맞춤 (세로 짤 돋보임)",
+            "🔲 균일 바둑판 (꽉 채움)",
+            "🖼️ 균일 바둑판 (원본 비율)",
         ])
         self.fit_combo.setCurrentIndex(0)
         grid_layout.addWidget(self.fit_combo, 4, 1, 1, 3)
 
-        self.auto_calc_hint_lbl = QLabel("✨ 사진첩 행 정돈 모드: 각 짤의 비율을 완벽히 살리며 가로 벽면에 칼같이 맞추어 정렬합니다.")
+        self.auto_calc_hint_lbl = QLabel("✨ 빈칸 자동 채우기: 각 짤의 원래 비율을 살리며, 남는 빈자리에 다음 짤을 쏙쏙 넣어 자연스럽게 채웁니다.")
+        self.auto_calc_hint_lbl.setWordWrap(True)
         self.auto_calc_hint_lbl.setStyleSheet("""
             color: #7eb0ff;
             background-color: #15253b;
@@ -799,35 +828,36 @@ class FolderSpreadDialog(QDialog):
         grid_layout.addWidget(self.auto_calc_hint_lbl, 5, 0, 1, 4)
 
         def _on_fit_combo_changed(idx):
-            is_auto = (idx in (0, 1))
-            self.width_input.setEnabled(not is_auto)
-            self.height_input.setEnabled(not is_auto)
-            self.cols_input.setEnabled(not is_auto)
-            self.rows_input.setEnabled(not is_auto)
-            self.w_wrap.setEnabled(not is_auto)
-            self.h_wrap.setEnabled(not is_auto)
-            self.cols_wrap.setEnabled(not is_auto)
-            self.rows_wrap.setEnabled(not is_auto)
-            self.lbl_w.setEnabled(not is_auto)
-            self.lbl_h.setEnabled(not is_auto)
-            self.lbl_cols.setEnabled(not is_auto)
-            self.lbl_rows.setEnabled(not is_auto)
-            if hasattr(self.w_wrap, "unit_lbl"):
-                self.w_wrap.unit_lbl.setEnabled(not is_auto)
-            if hasattr(self.h_wrap, "unit_lbl"):
-                self.h_wrap.unit_lbl.setEnabled(not is_auto)
-            if hasattr(self.cols_wrap, "unit_lbl"):
-                self.cols_wrap.unit_lbl.setEnabled(not is_auto)
-            if hasattr(self.rows_wrap, "unit_lbl"):
-                self.rows_wrap.unit_lbl.setEnabled(not is_auto)
+            if idx == 0:
+                _set_folder_input_active(self.w_wrap, self.width_input, self.lbl_w, True)
+                _set_folder_input_active(self.h_wrap, self.height_input, self.lbl_h, False, "(비율자동)", "각 짤의 원본 종횡비에 맞춰 높이가 자동 계산됩니다.")
+                _set_folder_input_active(self.cols_wrap, self.cols_input, self.lbl_cols, True)
+                _set_folder_input_active(self.rows_wrap, self.rows_input, self.lbl_rows, False, "(흐름자동)", "짤들이 아래로 차례차례 채워지므로 행 수는 자동 결정됩니다.")
+            elif idx == 1:
+                _set_folder_input_active(self.w_wrap, self.width_input, self.lbl_w, False, "(자동맞춤)", "화면 가로 폭에 맞춰 너비가 비례 자동 배분됩니다.")
+                _set_folder_input_active(self.h_wrap, self.height_input, self.lbl_h, False, "(자동맞춤)", "잡지 앨범처럼 단정하게 가로줄마다 최적 높이가 자동 계산됩니다.")
+                _set_folder_input_active(self.cols_wrap, self.cols_input, self.lbl_cols, False, "(자동분할)", "화면 가득 채우기에 최적화된 개수로 자동 분할됩니다.")
+                _set_folder_input_active(self.rows_wrap, self.rows_input, self.lbl_rows, False, "(자동분할)", "화면 높이에 맞춰 최적 행 수가 자동 계산됩니다.")
+            elif idx == 2:
+                _set_folder_input_active(self.w_wrap, self.width_input, self.lbl_w, False, "(자동맞춤)", "화면 가로 폭에 맞춰 열 너비가 균등 자동 배분됩니다.")
+                _set_folder_input_active(self.h_wrap, self.height_input, self.lbl_h, False, "(자동맞춤)", "세로 짤이 큼직하고 시원하게 돋보이도록 높이가 자동 조절됩니다.")
+                _set_folder_input_active(self.cols_wrap, self.cols_input, self.lbl_cols, False, "(자동분할)", "화면 너비에 맞춰 최적 열 수가 자동 계산됩니다.")
+                _set_folder_input_active(self.rows_wrap, self.rows_input, self.lbl_rows, False, "(자동분할)", "열 내부 짤 개수에 맞춰 자연스럽게 자동 분할됩니다.")
+            else:
+                _set_folder_input_active(self.w_wrap, self.width_input, self.lbl_w, True)
+                _set_folder_input_active(self.h_wrap, self.height_input, self.lbl_h, True)
+                _set_folder_input_active(self.cols_wrap, self.cols_input, self.lbl_cols, True)
+                _set_folder_input_active(self.rows_wrap, self.rows_input, self.lbl_rows, True)
 
             hints = {
-                0: "✨ 사진첩 행 정돈 모드: 각 짤의 비율을 완벽히 살리며 가로 벽면에 칼같이 맞추어 정렬합니다.",
-                1: "✨ 모니터 자동 맞춤 모드: 화면 해상도에 맞춰 너비·높이·열 개수가 자동으로 정밀 계산됩니다.",
+                0: "✨ 빈칸 자동 채우기: 각 짤의 원래 비율을 살리며, 남는 빈자리에 다음 짤을 쏙쏙 넣어 자연스럽게 채웁니다.",
+                1: "✨ 가로 줄 맞춤: 가로 줄마다 높이를 똑같이 맞춰 잡지나 앨범처럼 반듯한 수평선으로 화면을 꽉 채웁니다.",
+                2: "✨ 세로 줄 맞춤: 세로 줄마다 너비를 똑같이 맞춰 세로로 긴 짤들이 큼직하고 시원하게 돋보이도록 화면을 꽉 채웁니다.",
+                3: "✨ 균일 바둑판 (꽉 채움): 모든 위젯을 동일한 사각형 타일로 통일하고 빈틈없이 채웁니다.",
+                4: "✨ 균일 바둑판 (원본 비율): 동일한 사각형 틀에 짤이 잘리지 않도록 원본 비율을 유지하며 배치합니다.",
             }
-            if is_auto:
-                self.auto_calc_hint_lbl.setText(hints.get(idx, "✨ 화면 맞춤 모드: 화면 해상도에 맞춰 자동 계산됩니다."))
-            self.auto_calc_hint_lbl.setVisible(is_auto)
+            self.auto_calc_hint_lbl.setText(hints.get(idx, ""))
+            self.auto_calc_hint_lbl.setVisible(True)
 
         self.fit_combo.currentIndexChanged.connect(_on_fit_combo_changed)
         _on_fit_combo_changed(0)
@@ -913,8 +943,33 @@ class FolderSpreadDialog(QDialog):
         create_btn.clicked.connect(self._accept_if_valid)
 
         self.list_widget.itemClicked.connect(self._on_item_clicked)
-        self.cols_input.valueChanged.connect(self._refresh_status)
-        self.rows_input.valueChanged.connect(self._refresh_status)
+        self._syncing_grid = False
+        def _on_folder_cols_changed(val):
+            if self._syncing_grid or val <= 0:
+                return
+            self._syncing_grid = True
+            try:
+                sel_count = max(1, len(self._checked_paths()))
+                needed_rows = max(1, math.ceil(sel_count / val))
+                self.rows_input.setValue(needed_rows)
+            finally:
+                self._syncing_grid = False
+            self._refresh_status()
+
+        def _on_folder_rows_changed(val):
+            if self._syncing_grid or val <= 0:
+                return
+            self._syncing_grid = True
+            try:
+                sel_count = max(1, len(self._checked_paths()))
+                needed_cols = max(1, math.ceil(sel_count / val))
+                self.cols_input.setValue(needed_cols)
+            finally:
+                self._syncing_grid = False
+            self._refresh_status()
+
+        self.cols_input.valueChanged.connect(_on_folder_cols_changed)
+        self.rows_input.valueChanged.connect(_on_folder_rows_changed)
         self.list_widget.itemChanged.connect(lambda _item: self._refresh_status())
         self._refresh_status()
 
@@ -978,7 +1033,7 @@ class FolderSpreadDialog(QDialog):
             QMessageBox.warning(self, "스프레드 배치", "생성할 미디어를 하나 이상 선택해주세요.")
             return
         fit_idx = self.fit_combo.currentIndex()
-        if fit_idx != 1:
+        if fit_idx in (3, 4):
             cells = int(self.rows_input.value()) * int(self.cols_input.value())
             if len(paths) > cells:
                 QMessageBox.warning(
@@ -989,13 +1044,13 @@ class FolderSpreadDialog(QDialog):
                 return
 
         fit_strategy_map = {
-            0: "justified_rows",
-            1: "fullscreen_autofill",
-            2: "auto_aspect",
+            0: "auto_aspect",
+            1: "justified_rows",
+            2: "justified_columns",
             3: "crop_fill",
             4: "fit_inside",
         }
-        fit_strategy = fit_strategy_map.get(fit_idx, "justified_rows")
+        fit_strategy = fit_strategy_map.get(fit_idx, "auto_aspect")
         bg_mode = self.bg_combo.currentIndex()
 
         self.result_data = {
@@ -1104,10 +1159,12 @@ class SettingsDialog(QDialog):
         screen = QApplication.primaryScreen()
         avail_h = screen.availableGeometry().height() if screen else 900
         init_h = min(660, max(460, int(avail_h * 0.82)))
-        self.resize(580, init_h)
-        self.setFixedWidth(580)
+        self.resize(720, init_h)
+        self.setFixedWidth(720)
         self.setMinimumHeight(420)
         self.setMaximumHeight(max(500, avail_h - 40))
+        self._wheel_filter = PreventInputWheelScrollFilter(self)
+        self.installEventFilter(self._wheel_filter)
         self.setStyleSheet("""
             
             QFrame#anchorGridFrame {
@@ -1213,23 +1270,31 @@ QDialog#settingsDialog {
             }
             QFrame#unitInputContainer {
                 min-height: 32px;
-                background-color: #121c2b;
-                border: 1px solid #283a54;
+                background-color: #142133;
+                border: 1.5px solid #2f496e;
                 border-radius: 8px;
             }
             QFrame#unitInputContainer:hover {
-                border-color: #3d587d;
-                background-color: #152438;
+                border-color: #4f76aa;
+                background-color: #192a40;
             }
             QFrame#unitInputContainer:focus-within {
                 border: 1.5px solid #528bf8;
-                background-color: #17283f;
+                background-color: #192c45;
+            }
+            QFrame#unitInputContainer:disabled {
+                background-color: #0b121c;
+                border: 1px dashed #203147;
             }
             QLabel#unitBadgeLabel {
-                color: #7b96b8;
+                color: #8bb0dc;
                 font-size: 11px;
                 font-weight: 700;
                 padding-right: 6px;
+            }
+            QLabel#unitBadgeLabel:disabled {
+                color: #3b4f66;
+                font-weight: 600;
             }
             QSpinBox {
                 min-height: 30px;
@@ -1238,7 +1303,14 @@ QDialog#settingsDialog {
                 border: none;
                 padding: 2px 6px;
                 font-size: 13px;
-                font-weight: 600;
+                font-weight: 700;
+            }
+            QSpinBox:disabled {
+                color: #4a617e;
+                background-color: transparent;
+            }
+            QLabel:disabled {
+                color: #4a617e;
             }
             QSpinBox::up-button,
             QSpinBox::down-button {
@@ -1731,11 +1803,33 @@ QDialog#settingsDialog {
             spinbox.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
             spinbox.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             spinbox.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            spinbox.wheelEvent = lambda event: event.ignore()
             unit_label = QLabel(unit_text)
             unit_label.setObjectName("unitBadgeLabel")
             container_layout.addWidget(spinbox, 1)
             container_layout.addWidget(unit_label, 0)
+            container.spinbox = spinbox
+            container.unit_label = unit_label
+            container.default_unit = str(unit_text or "")
             return container
+
+        def _set_input_active_state(container, spinbox, label, is_active, auto_text="자동", tooltip=""):
+            spinbox.setEnabled(bool(is_active))
+            container.setEnabled(bool(is_active))
+            if label is not None:
+                label.setEnabled(bool(is_active))
+                label.setToolTip(tooltip if not is_active else "")
+            if hasattr(container, "unit_label"):
+                container.unit_label.setEnabled(bool(is_active))
+                if is_active:
+                    container.unit_label.setText(getattr(container, "default_unit", "px"))
+                    container.unit_label.setStyleSheet("color: #8bb0dc; font-weight: 700; font-size: 11px;")
+                else:
+                    container.unit_label.setText(auto_text)
+                    container.unit_label.setStyleSheet("color: #41556f; font-weight: 600; font-size: 10px;")
+            tip = tooltip if not is_active else ""
+            container.setToolTip(tip)
+            spinbox.setToolTip(tip)
 
         init_w = int(s.get('w', 200))
         init_h = int(s.get('h', 200))
@@ -1778,13 +1872,23 @@ QDialog#settingsDialog {
             notice_hint.setObjectName("bulkNoticeHint")
             bn_layout.addWidget(notice_hint)
 
-            def _on_keep_indiv_size_toggled(checked):
-                self.width_input.setEnabled(not checked)
-                self.height_input.setEnabled(not checked)
-                self.width_input_box.setEnabled(not checked)
-                self.height_input_box.setEnabled(not checked)
+            def _update_bulk_size_inputs_state():
+                spread_active = hasattr(self, "spread_relayout_cb") and self.spread_relayout_cb.isChecked()
+                keep_indiv = hasattr(self, "keep_individual_size_cb") and self.keep_individual_size_cb.isChecked()
+                can_edit_general = (not spread_active) and (not keep_indiv)
+                auto_badge = "(스프레드제어)" if spread_active else ("(기존유지)" if keep_indiv else "px")
+                tip = "위의 스프레드 재배치 카드에서 크기를 설정합니다." if spread_active else ("각 위젯의 기존 크기가 그대로 유지됩니다." if keep_indiv else "")
+                _set_input_active_state(self.width_input_box, self.width_input, None, can_edit_general, auto_badge, tip)
+                _set_input_active_state(self.height_input_box, self.height_input, None, can_edit_general, auto_badge, tip)
                 if hasattr(self, "ratio_row_widget"):
-                    self.ratio_row_widget.setEnabled(not checked)
+                    self.ratio_row_widget.setEnabled(can_edit_general)
+                if hasattr(self, "anchor_picker"):
+                    self.anchor_picker.setEnabled(not spread_active)
+
+            def _on_keep_indiv_size_toggled(checked):
+                if checked and hasattr(self, "spread_relayout_cb") and self.spread_relayout_cb.isChecked():
+                    self.spread_relayout_cb.setChecked(False)
+                _update_bulk_size_inputs_state()
 
             self.keep_individual_size_cb.toggled.connect(_on_keep_indiv_size_toggled)
 
@@ -1798,7 +1902,7 @@ QDialog#settingsDialog {
             self.spread_relayout_cb.setObjectName("spreadRelayoutToggle")
             self.spread_relayout_cb.setChecked(False)
             self.spread_relayout_cb.setToolTip(
-                "체크 시 그룹 내 위젯들을 지정한 스프레드(바둑판/테트리스/전체화면) 알고리즘에 따라\n"
+                "체크 시 그룹 내 위젯들을 지정한 스프레드(바둑판/자유비율/전체화면) 알고리즘에 따라\n"
                 "바탕화면에서 빈틈없이 깔끔하게 일괄 재배치합니다."
             )
             bs_layout.addWidget(self.spread_relayout_cb)
@@ -1812,16 +1916,17 @@ QDialog#settingsDialog {
             bso_layout.addWidget(QLabel("배치 맞춤:"), 0, 0)
             self.bulk_spread_fit_combo = DownwardComboBox()
             self.bulk_spread_fit_combo.addItems([
-                "📸 사진첩 행 정돈 (구글포토 스타일, 가로 라인 밀착)",
-                "🖥️ 모니터 자동 맞춤 (해상도 기반 열/크기 자동 계산)",
-                "📌 핀터레스트 컬럼 (세로 열 메이슨리)",
-                "🔲 균일 바둑판 - 크롭 채우기",
-                "🖼️ 균일 바둑판 - 원본 비율 유지 (레터박스)",
+                "🧩 빈칸 자동 채우기 (자유 비율, 권장)",
+                "📏 가로 줄 맞춤 (단정한 앨범형)",
+                "📐 세로 줄 맞춤 (세로 짤 돋보임)",
+                "🔲 균일 바둑판 (꽉 채움)",
+                "🖼️ 균일 바둑판 (원본 비율)",
             ])
             self.bulk_spread_fit_combo.setCurrentIndex(0)
             bso_layout.addWidget(self.bulk_spread_fit_combo, 0, 1, 1, 3)
 
-            self.bulk_spread_auto_hint = QLabel("✨ 사진첩 행 정돈 모드: 각 짤의 비율을 완벽히 살리며 가로 벽면에 칼같이 맞추어 정렬합니다.")
+            self.bulk_spread_auto_hint = QLabel("✨ 빈칸 자동 채우기: 각 짤의 원래 비율을 살리며, 남는 빈자리에 다음 짤을 쏙쏙 넣어 자연스럽게 채웁니다.")
+            self.bulk_spread_auto_hint.setWordWrap(True)
             self.bulk_spread_auto_hint.setStyleSheet("""
                 color: #7eb0ff;
                 background-color: #132133;
@@ -1834,25 +1939,55 @@ QDialog#settingsDialog {
             self.bulk_spread_auto_hint.setVisible(True)
             bso_layout.addWidget(self.bulk_spread_auto_hint, 1, 0, 1, 4)
 
-            self.bulk_spread_lbl_cols = QLabel("가로 열(Cols):")
-            bso_layout.addWidget(self.bulk_spread_lbl_cols, 2, 0)
-            self.bulk_spread_cols_spin = QSpinBox()
-            self.bulk_spread_cols_spin.setRange(1, 20)
+            # Row 2: 위젯 너비(W) & 높이(H)
+            self.bulk_spread_lbl_w = QLabel("위젯 너비(W):")
+            bso_layout.addWidget(self.bulk_spread_lbl_w, 2, 0)
+            self.bulk_spread_w_spin = QSpinBox()
+            self.bulk_spread_w_spin.setRange(50, 5000)
+            self.bulk_spread_w_spin.setValue(init_w)
+            self.bulk_spread_w_box = _create_unit_input(self.bulk_spread_w_spin, "px", width=120)
+            bso_layout.addWidget(self.bulk_spread_w_box, 2, 1)
+
+            self.bulk_spread_lbl_h = QLabel("위젯 높이(H):")
+            bso_layout.addWidget(self.bulk_spread_lbl_h, 2, 2)
+            self.bulk_spread_h_spin = QSpinBox()
+            self.bulk_spread_h_spin.setRange(50, 5000)
+            self.bulk_spread_h_spin.setValue(init_h)
+            self.bulk_spread_h_box = _create_unit_input(self.bulk_spread_h_spin, "px", width=120)
+            bso_layout.addWidget(self.bulk_spread_h_box, 2, 3)
+
+            # Row 3: 가로 열(Cols) & 세로 행(Rows)
             import math
             target_cnt = max(1, getattr(self, "target_count", 4))
-            self.bulk_spread_cols_spin.setValue(max(1, math.ceil(math.sqrt(target_cnt))))
-            self.bulk_spread_cols_box = _create_unit_input(self.bulk_spread_cols_spin, "열", width=120)
-            bso_layout.addWidget(self.bulk_spread_cols_box, 2, 1)
+            init_cols = max(1, math.ceil(math.sqrt(target_cnt)))
+            init_rows = max(1, math.ceil(target_cnt / init_cols))
 
+            self.bulk_spread_lbl_cols = QLabel("가로 열(Cols):")
+            bso_layout.addWidget(self.bulk_spread_lbl_cols, 3, 0)
+            self.bulk_spread_cols_spin = QSpinBox()
+            self.bulk_spread_cols_spin.setRange(1, 50)
+            self.bulk_spread_cols_spin.setValue(init_cols)
+            self.bulk_spread_cols_box = _create_unit_input(self.bulk_spread_cols_spin, "열", width=120)
+            bso_layout.addWidget(self.bulk_spread_cols_box, 3, 1)
+
+            self.bulk_spread_lbl_rows = QLabel("세로 행(Rows):")
+            bso_layout.addWidget(self.bulk_spread_lbl_rows, 3, 2)
+            self.bulk_spread_rows_spin = QSpinBox()
+            self.bulk_spread_rows_spin.setRange(1, 50)
+            self.bulk_spread_rows_spin.setValue(init_rows)
+            self.bulk_spread_rows_box = _create_unit_input(self.bulk_spread_rows_spin, "행", width=120)
+            bso_layout.addWidget(self.bulk_spread_rows_box, 3, 3)
+
+            # Row 4: 위젯 간격 & 전개 방향
             self.bulk_spread_lbl_margin = QLabel("위젯 간격:")
-            bso_layout.addWidget(self.bulk_spread_lbl_margin, 2, 2)
+            bso_layout.addWidget(self.bulk_spread_lbl_margin, 4, 0)
             self.bulk_spread_margin_spin = QSpinBox()
             self.bulk_spread_margin_spin.setRange(0, 500)
             self.bulk_spread_margin_spin.setValue(10)
             self.bulk_spread_margin_box = _create_unit_input(self.bulk_spread_margin_spin, "px", width=120)
-            bso_layout.addWidget(self.bulk_spread_margin_box, 2, 3)
+            bso_layout.addWidget(self.bulk_spread_margin_box, 4, 1)
 
-            bso_layout.addWidget(QLabel("전개 방향:"), 3, 0)
+            bso_layout.addWidget(QLabel("전개 방향:"), 4, 2)
             self.bulk_spread_dir_combo = DownwardComboBox()
             self.bulk_spread_dir_combo.addItems([
                 "↘ 우하단 전개 (좌상단 시작, 기본)",
@@ -1861,31 +1996,96 @@ QDialog#settingsDialog {
                 "↖ 좌상단 전개 (우하단 시작, 시계 구석 추천)",
             ])
             self.bulk_spread_dir_combo.setCurrentIndex(0)
-            bso_layout.addWidget(self.bulk_spread_dir_combo, 3, 1, 1, 3)
+            bso_layout.addWidget(self.bulk_spread_dir_combo, 4, 3)
 
             bs_layout.addWidget(self.bulk_spread_opts)
             self.bulk_spread_opts.setVisible(False)
 
+            self._syncing_bulk_grid = False
+            def _on_bulk_cols_changed(val):
+                if self._syncing_bulk_grid or val <= 0:
+                    return
+                self._syncing_bulk_grid = True
+                try:
+                    needed_rows = max(1, math.ceil(target_cnt / val))
+                    self.bulk_spread_rows_spin.setValue(needed_rows)
+                finally:
+                    self._syncing_bulk_grid = False
+
+            def _on_bulk_rows_changed(val):
+                if self._syncing_bulk_grid or val <= 0:
+                    return
+                self._syncing_bulk_grid = True
+                try:
+                    needed_cols = max(1, math.ceil(target_cnt / val))
+                    self.bulk_spread_cols_spin.setValue(needed_cols)
+                finally:
+                    self._syncing_bulk_grid = False
+
+            self.bulk_spread_cols_spin.valueChanged.connect(_on_bulk_cols_changed)
+            self.bulk_spread_rows_spin.valueChanged.connect(_on_bulk_rows_changed)
+
+            self._syncing_bulk_wh = False
+            def _on_bulk_w_changed(val):
+                if self._syncing_bulk_wh:
+                    return
+                self._syncing_bulk_wh = True
+                try:
+                    self.width_input.setValue(val)
+                finally:
+                    self._syncing_bulk_wh = False
+
+            def _on_bulk_h_changed(val):
+                if self._syncing_bulk_wh:
+                    return
+                self._syncing_bulk_wh = True
+                try:
+                    self.height_input.setValue(val)
+                finally:
+                    self._syncing_bulk_wh = False
+
+            self.bulk_spread_w_spin.valueChanged.connect(_on_bulk_w_changed)
+            self.bulk_spread_h_spin.valueChanged.connect(_on_bulk_h_changed)
+
             def _on_bulk_spread_relayout_toggled(checked):
                 self.bulk_spread_opts.setVisible(checked)
-                if checked:
-                    if hasattr(self, "keep_individual_size_cb") and self.keep_individual_size_cb.isChecked():
-                        self.keep_individual_size_cb.setChecked(False)
+                if checked and hasattr(self, "keep_individual_size_cb") and self.keep_individual_size_cb.isChecked():
+                    self.keep_individual_size_cb.setChecked(False)
+                _update_bulk_size_inputs_state()
 
             self.spread_relayout_cb.toggled.connect(_on_bulk_spread_relayout_toggled)
 
             def _on_bulk_spread_fit_changed(idx):
-                is_auto = (idx in (0, 1))
-                self.bulk_spread_cols_spin.setEnabled(not is_auto)
-                self.bulk_spread_cols_box.setEnabled(not is_auto)
-                self.bulk_spread_lbl_cols.setEnabled(not is_auto)
+                if idx == 0:
+                    _set_input_active_state(self.bulk_spread_w_box, self.bulk_spread_w_spin, self.bulk_spread_lbl_w, True)
+                    _set_input_active_state(self.bulk_spread_h_box, self.bulk_spread_h_spin, self.bulk_spread_lbl_h, False, "(비율자동)", "각 짤의 원본 종횡비에 맞춰 높이가 자동 계산됩니다.")
+                    _set_input_active_state(self.bulk_spread_cols_box, self.bulk_spread_cols_spin, self.bulk_spread_lbl_cols, True)
+                    _set_input_active_state(self.bulk_spread_rows_box, self.bulk_spread_rows_spin, self.bulk_spread_lbl_rows, False, "(흐름자동)", "짤들이 아래로 차례차례 채워지므로 행 수는 자동 결정됩니다.")
+                elif idx == 1:
+                    _set_input_active_state(self.bulk_spread_w_box, self.bulk_spread_w_spin, self.bulk_spread_lbl_w, False, "(자동맞춤)", "화면 가로 폭에 맞춰 너비가 비례 자동 배분됩니다.")
+                    _set_input_active_state(self.bulk_spread_h_box, self.bulk_spread_h_spin, self.bulk_spread_lbl_h, False, "(자동맞춤)", "잡지 앨범처럼 단정하게 가로줄마다 최적 높이가 자동 계산됩니다.")
+                    _set_input_active_state(self.bulk_spread_cols_box, self.bulk_spread_cols_spin, self.bulk_spread_lbl_cols, False, "(자동분할)", "화면 가득 채우기에 최적화된 개수로 자동 분할됩니다.")
+                    _set_input_active_state(self.bulk_spread_rows_box, self.bulk_spread_rows_spin, self.bulk_spread_lbl_rows, False, "(자동분할)", "화면 높이에 맞춰 최적 행 수가 자동 계산됩니다.")
+                elif idx == 2:
+                    _set_input_active_state(self.bulk_spread_w_box, self.bulk_spread_w_spin, self.bulk_spread_lbl_w, False, "(자동맞춤)", "화면 가로 폭에 맞춰 열 너비가 균등 자동 배분됩니다.")
+                    _set_input_active_state(self.bulk_spread_h_box, self.bulk_spread_h_spin, self.bulk_spread_lbl_h, False, "(자동맞춤)", "세로 짤이 큼직하고 시원하게 돋보이도록 높이가 자동 조절됩니다.")
+                    _set_input_active_state(self.bulk_spread_cols_box, self.bulk_spread_cols_spin, self.bulk_spread_lbl_cols, False, "(자동분할)", "화면 너비에 맞춰 최적 열 수가 자동 계산됩니다.")
+                    _set_input_active_state(self.bulk_spread_rows_box, self.bulk_spread_rows_spin, self.bulk_spread_lbl_rows, False, "(자동분할)", "열 내부 짤 개수에 맞춰 자연스럽게 자동 분할됩니다.")
+                else:
+                    _set_input_active_state(self.bulk_spread_w_box, self.bulk_spread_w_spin, self.bulk_spread_lbl_w, True)
+                    _set_input_active_state(self.bulk_spread_h_box, self.bulk_spread_h_spin, self.bulk_spread_lbl_h, True)
+                    _set_input_active_state(self.bulk_spread_cols_box, self.bulk_spread_cols_spin, self.bulk_spread_lbl_cols, True)
+                    _set_input_active_state(self.bulk_spread_rows_box, self.bulk_spread_rows_spin, self.bulk_spread_lbl_rows, True)
+
                 hints = {
-                    0: "✨ 사진첩 행 정돈 모드: 각 짤의 비율을 완벽히 살리며 가로 벽면에 칼같이 맞추어 정렬합니다.",
-                    1: "✨ 모니터 자동 맞춤 모드: 화면 해상도에 맞춰 열 개수와 크기가 자동 계산됩니다.",
+                    0: "✨ 빈칸 자동 채우기: 각 짤의 원래 비율을 살리며, 남는 빈자리에 다음 짤을 쏙쏙 넣어 자연스럽게 채웁니다.",
+                    1: "✨ 가로 줄 맞춤: 가로 줄마다 높이를 똑같이 맞춰 잡지나 앨범처럼 반듯한 수평선으로 화면을 꽉 채웁니다.",
+                    2: "✨ 세로 줄 맞춤: 세로 줄마다 너비를 똑같이 맞춰 세로로 긴 짤들이 큼직하고 시원하게 돋보이도록 화면을 꽉 채웁니다.",
+                    3: "✨ 균일 바둑판 (꽉 채움): 모든 위젯을 동일한 정사각형/직사각형 타일로 통일하고 빈틈없이 꽉 채웁니다.",
+                    4: "✨ 균일 바둑판 (원본 비율): 동일한 사각형 틀에 짤이 잘리지 않도록 원본 비율을 유지하며 배치합니다.",
                 }
-                if is_auto:
-                    self.bulk_spread_auto_hint.setText(hints.get(idx, "✨ 화면 맞춤 모드: 화면 해상도에 맞춰 자동 계산됩니다."))
-                self.bulk_spread_auto_hint.setVisible(is_auto)
+                self.bulk_spread_auto_hint.setText(hints.get(idx, ""))
+                self.bulk_spread_auto_hint.setVisible(True)
 
             self.bulk_spread_fit_combo.currentIndexChanged.connect(_on_bulk_spread_fit_changed)
             _on_bulk_spread_fit_changed(0)
@@ -1894,6 +2094,12 @@ QDialog#settingsDialog {
         self._current_aspect_ratio = float(init_w) / max(1, float(init_h))
 
         def _on_width_changed(val):
+            if not getattr(self, "_syncing_bulk_wh", False) and hasattr(self, "bulk_spread_w_spin"):
+                self._syncing_bulk_wh = True
+                try:
+                    self.bulk_spread_w_spin.setValue(val)
+                finally:
+                    self._syncing_bulk_wh = False
             if self._syncing_aspect_size or not self.keep_aspect_ratio_cb.isChecked():
                 return
             self._syncing_aspect_size = True
@@ -1901,10 +2107,22 @@ QDialog#settingsDialog {
                 ratio = self._current_aspect_ratio if self._current_aspect_ratio > 0 else 1.0
                 new_h = max(50, min(5000, int(round(val / ratio))))
                 self.height_input.setValue(new_h)
+                if hasattr(self, "bulk_spread_h_spin") and not getattr(self, "_syncing_bulk_wh", False):
+                    self._syncing_bulk_wh = True
+                    try:
+                        self.bulk_spread_h_spin.setValue(new_h)
+                    finally:
+                        self._syncing_bulk_wh = False
             finally:
                 self._syncing_aspect_size = False
 
         def _on_height_changed(val):
+            if not getattr(self, "_syncing_bulk_wh", False) and hasattr(self, "bulk_spread_h_spin"):
+                self._syncing_bulk_wh = True
+                try:
+                    self.bulk_spread_h_spin.setValue(val)
+                finally:
+                    self._syncing_bulk_wh = False
             if self._syncing_aspect_size or not self.keep_aspect_ratio_cb.isChecked():
                 return
             self._syncing_aspect_size = True
@@ -1912,6 +2130,12 @@ QDialog#settingsDialog {
                 ratio = self._current_aspect_ratio if self._current_aspect_ratio > 0 else 1.0
                 new_w = max(50, min(5000, int(round(val * ratio))))
                 self.width_input.setValue(new_w)
+                if hasattr(self, "bulk_spread_w_spin") and not getattr(self, "_syncing_bulk_wh", False):
+                    self._syncing_bulk_wh = True
+                    try:
+                        self.bulk_spread_w_spin.setValue(new_w)
+                    finally:
+                        self._syncing_bulk_wh = False
             finally:
                 self._syncing_aspect_size = False
 
@@ -1950,6 +2174,8 @@ QDialog#settingsDialog {
         curr_op = s.get('opacity_pct', 100)
         self.opacity_slider.setValue(curr_op)
         self.opacity_slider.setFixedHeight(26)
+        self.opacity_slider.setFixedWidth(220)
+        self.opacity_slider.wheelEvent = lambda event: event.ignore()
     
         self.opacity_spinbox = QSpinBox()
         self.opacity_spinbox.setRange(10, 100)
@@ -1963,7 +2189,8 @@ QDialog#settingsDialog {
         opacity_row.setContentsMargins(0, 0, 0, 0)
         opacity_row.setSpacing(10)
         opacity_row.addWidget(self.opacity_spinbox_box, 0)
-        opacity_row.addWidget(self.opacity_slider, 1)
+        opacity_row.addWidget(self.opacity_slider, 0)
+        opacity_row.addStretch(1)
 
         self.opacity_slider.valueChanged.connect(self.opacity_spinbox.setValue)
         self.opacity_spinbox.valueChanged.connect(self.opacity_slider.setValue)
@@ -2106,7 +2333,6 @@ QDialog#settingsDialog {
             "- Alt+클릭: 마우스 잠금 토글\n"
             "- G: 임시 그룹 토글\n"
             "- Ctrl+G: 임시 그룹 전체 해제\n"
-            "- H: 성능 보호 토글\n"
             "- R: 모서리 모드 전환\n"
             "- M: 음소거 토글\n"
             "- O: 설정 상세\n"
@@ -2210,9 +2436,12 @@ QDialog#settingsDialog {
         system_form.addRow("포커싱 대상:", self.focus_binding_label)
         system_form.addRow("", self._focus_bind_row_widget)
 
-        _add_section_header(system_form, "오디오 및 성능")
+        _add_section_header(system_form, "오디오 및 성능 보호")
         system_form.addRow("음소거:", self.mute_checkbox)
-        system_form.addRow("성능 보호:", self.gpu_guard_checkbox)
+        self.gpu_guard_info_lbl = QLabel("전체화면 및 GPU 과부하 시 미디어 일시정지는\n위젯 컨트롤러(상단 GPU 버튼)에서 전체 위젯에 통합 적용됩니다.")
+        self.gpu_guard_info_lbl.setStyleSheet("color: #7d96b8; font-size: 11px; line-height: 1.3;")
+        self.gpu_guard_info_lbl.setWordWrap(True)
+        system_form.addRow("성능 보호:", self.gpu_guard_info_lbl)
 
         _add_section_header(system_form, "저장 공간 관리")
         system_form.addRow("영상 캐시:", self.video_cache_usage_label)
@@ -2293,13 +2522,15 @@ QDialog#settingsDialog {
 
     def _set_shortcut_panel_visible(self, expanded):
         expanded = bool(expanded)
+        self.shortcut_toggle.blockSignals(True)
+        self.shortcut_toggle.setChecked(expanded)
+        self.shortcut_toggle.blockSignals(False)
         self.shortcut_toggle.setArrowType(Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow)
         self.shortcut_toggle.setText("단축키 안내")
         if expanded:
             self._place_shortcut_panel()
             self.shortcut_panel.show()
             self.shortcut_panel.raise_()
-            self.shortcut_panel.activateWindow()
         else:
             self.shortcut_panel.hide()
         self.shortcut_panel.update()
@@ -2313,7 +2544,6 @@ QDialog#settingsDialog {
             self._place_folder_help_panel()
             self.folder_help_panel.show()
             self.folder_help_panel.raise_()
-            self.folder_help_panel.activateWindow()
         else:
             self.folder_help_panel.hide()
         self.folder_help_panel.update()
@@ -2589,13 +2819,51 @@ QDialog#settingsDialog {
         if self.folder_help_btn.isChecked() and self.folder_help_panel.isVisible():
             self._place_folder_help_panel()
 
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            if hasattr(self, "shortcut_panel") and self.shortcut_panel is not None and self.shortcut_panel.isVisible():
+                self._set_shortcut_panel_visible(False)
+                event.accept()
+                return
+            if hasattr(self, "folder_help_panel") and self.folder_help_panel is not None and self.folder_help_panel.isVisible():
+                self._set_folder_help_panel_visible(False)
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
+    def done(self, r):
+        if hasattr(self, "shortcut_toggle"):
+            self.shortcut_toggle.setChecked(False)
+        if hasattr(self, "shortcut_panel") and self.shortcut_panel is not None:
+            self.shortcut_panel.hide()
+        if hasattr(self, "folder_help_btn"):
+            self.folder_help_btn.setChecked(False)
+        if hasattr(self, "folder_help_panel") and self.folder_help_panel is not None:
+            self.folder_help_panel.hide()
+        super().done(r)
+
+    def hideEvent(self, event):
+        if hasattr(self, "shortcut_toggle"):
+            self.shortcut_toggle.setChecked(False)
+        if hasattr(self, "shortcut_panel") and self.shortcut_panel is not None:
+            self.shortcut_panel.hide()
+        if hasattr(self, "folder_help_btn"):
+            self.folder_help_btn.setChecked(False)
+        if hasattr(self, "folder_help_panel") and self.folder_help_panel is not None:
+            self.folder_help_panel.hide()
+        super().hideEvent(event)
+
     def closeEvent(self, event):
         if hasattr(self, "_focus_capture_timer") and self._focus_capture_timer.isActive():
             self._focus_capture_timer.stop()
             self._focus_capture_deadline = 0.0
-        if hasattr(self, "shortcut_panel") and self.shortcut_panel.isVisible():
+        if hasattr(self, "shortcut_toggle"):
+            self.shortcut_toggle.setChecked(False)
+        if hasattr(self, "shortcut_panel") and self.shortcut_panel is not None:
             self.shortcut_panel.hide()
-        if hasattr(self, "folder_help_panel") and self.folder_help_panel.isVisible():
+        if hasattr(self, "folder_help_btn"):
+            self.folder_help_btn.setChecked(False)
+        if hasattr(self, "folder_help_panel") and self.folder_help_panel is not None:
             self.folder_help_panel.hide()
         super().closeEvent(event)
 
@@ -2966,13 +3234,13 @@ QDialog#settingsDialog {
             return None
         fit_idx = self.bulk_spread_fit_combo.currentIndex()
         fit_strategy_map = {
-            0: "justified_rows",
-            1: "fullscreen_autofill",
-            2: "auto_aspect",
+            0: "auto_aspect",
+            1: "justified_rows",
+            2: "justified_columns",
             3: "crop_fill",
             4: "fit_inside",
         }
-        fit_strategy = fit_strategy_map.get(fit_idx, "justified_rows")
+        fit_strategy = fit_strategy_map.get(fit_idx, "auto_aspect")
 
         dir_idx = self.bulk_spread_dir_combo.currentIndex()
         dir_map = {
@@ -2984,10 +3252,11 @@ QDialog#settingsDialog {
         return {
             "fit_strategy": fit_strategy,
             "cols": int(self.bulk_spread_cols_spin.value()),
+            "rows": int(self.bulk_spread_rows_spin.value()),
             "margin": int(self.bulk_spread_margin_spin.value()),
             "direction": dir_map.get(dir_idx, "top-left"),
-            "w": int(self.width_input.value()),
-            "h": int(self.height_input.value()),
+            "w": int(self.bulk_spread_w_spin.value()),
+            "h": int(self.bulk_spread_h_spin.value()),
         }
 
 

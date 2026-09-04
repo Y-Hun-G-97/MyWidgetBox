@@ -12,15 +12,15 @@ def startup_delay_for_kind(kind, mode="default"):
     queue_mode = str(mode or "").strip().lower()
     if queue_mode == "set_switch" and _as_bool(os.environ.get("MYCANVAS_FAST_SET_SWITCH", "1"), True):
         if key == "video":
-            return 150 if fast else 240
+            return 25 if fast else 60
         if key == "gif":
-            return 90 if fast else 160
-        return 10 if fast else 30
+            return 15 if fast else 30
+        return 5 if fast else 15
     if key == "video":
-        return 200 if fast else 300
+        return 40 if fast else 80
     if key == "gif":
-        return 130 if fast else 210
-    return 20 if fast else 50
+        return 20 if fast else 50
+    return 10 if fast else 20
 
 
 def cancel_startup_queue(controller):
@@ -29,20 +29,29 @@ def cancel_startup_queue(controller):
     controller._startup_queue = []
     controller._startup_queue_active = False
     controller._startup_queue_mode = "default"
+    if hasattr(controller, "_start_deferred_playbacks"):
+        try:
+            controller._start_deferred_playbacks()
+        except Exception:
+            pass
 
 
 def build_profile_startup_queue(controller, profile_ids):
     ordered = []
+    media_priority_enabled = _as_bool(os.environ.get("MYCANVAS_STARTUP_MEDIA_PRIORITY", "1"), True)
     for order_idx, pid in enumerate(profile_ids):
         spid = str(pid)
         if not controller._profile_run_enabled(spid):
             continue
         name = QSettings("MyHomeApp", f"Profile_{spid}").value("name", "New 세팅")
         kind = controller._profile_startup_media_kind(spid)
-        if kind == "video":
-            priority = 1
-        elif kind == "gif":
-            priority = 2
+        if media_priority_enabled:
+            if kind == "video":
+                priority = 2
+            elif kind == "gif":
+                priority = 1
+            else:
+                priority = 0
         else:
             priority = 0
         ordered.append((int(priority), int(order_idx), spid, str(name), str(kind)))
@@ -75,6 +84,12 @@ def run_next_startup_item(controller):
         return
     if not controller._startup_queue:
         controller._startup_queue_active = False
+        if hasattr(controller, "_start_deferred_playbacks"):
+            controller._start_deferred_playbacks()
+        if hasattr(controller, "_sync_all_widget_video_viewports"):
+            controller._sync_all_widget_video_viewports()
+        if hasattr(controller, "_bootstrap_all_desktop_icon_overlays"):
+            controller._bootstrap_all_desktop_icon_overlays()
         controller.update_active_status()
         controller.load_profiles()
         controller._refresh_apply_button_state()
@@ -87,6 +102,12 @@ def run_next_startup_item(controller):
 
     if not controller._startup_queue:
         controller._startup_queue_active = False
+        if hasattr(controller, "_start_deferred_playbacks"):
+            controller._start_deferred_playbacks()
+        if hasattr(controller, "_sync_all_widget_video_viewports"):
+            controller._sync_all_widget_video_viewports()
+        if hasattr(controller, "_bootstrap_all_desktop_icon_overlays"):
+            controller._bootstrap_all_desktop_icon_overlays()
         controller.update_active_status(sync=True)
         controller.load_profiles()
         controller._refresh_apply_button_state()
@@ -116,34 +137,33 @@ def start_widget_instance(controller, pid, name, startup_kind=""):
         return False
     widget = widget_cls(spid, name, controller)
     kind_key = str(startup_kind or "").strip().lower()
-    defer_prepare = bool(
-        getattr(controller, "_startup_queue_active", False)
-        and kind_key in ("video", "gif")
-    )
-    widget._defer_initial_prepare_on_show = bool(defer_prepare)
-    if not defer_prepare:
-        try:
-            widget.prepare_media_before_show()
-        except Exception:
-            pass
-    controller.widgets[spid] = widget
-    widget.show()
-    controller._sync_all_widget_video_viewports()
+    in_startup_queue = bool(getattr(controller, "_startup_queue_active", False))
+    if in_startup_queue and kind_key in ("video", "gif"):
+        widget._deferred_playback_active = True
+    widget._defer_initial_prepare_on_show = False
     try:
-        widget = controller.widgets[spid]
-        QTimer.singleShot(
-            0,
-            lambda w=widget: (
-                w._schedule_desktop_icon_overlay_bootstrap(retries=4, delay_ms=50)
-                if hasattr(w, "_schedule_desktop_icon_overlay_bootstrap")
-                else None
-            ),
-        )
+        widget.prepare_media_before_show()
     except Exception:
         pass
+    controller.widgets[spid] = widget
+    widget.show()
+    if not in_startup_queue:
+        controller._sync_all_widget_video_viewports()
+        try:
+            widget = controller.widgets[spid]
+            QTimer.singleShot(
+                0,
+                lambda w=widget: (
+                    w._schedule_desktop_icon_overlay_bootstrap(retries=4, delay_ms=50)
+                    if hasattr(w, "_schedule_desktop_icon_overlay_bootstrap")
+                    else None
+                ),
+            )
+        except Exception:
+            pass
     if spid in controller._temp_group_ids:
         controller.widgets[spid]._refresh_group_badge()
-    if controller._gpu_guard_paused and bool(getattr(controller.widgets[spid], "gpu_guard_enabled", False)):
+    if controller._gpu_guard_paused:
         controller.widgets[spid].set_performance_paused(
             True, reason=f"gpu {controller._gpu_last_usage:.1f}%", force=True
         )
@@ -193,6 +213,8 @@ def sync_temp_group_badges(controller):
     for widget in controller.widgets.values():
         if _is_widget_like(widget) and hasattr(widget, "_refresh_group_badge"):
             widget._refresh_group_badge()
+    if hasattr(controller, "_sync_temp_group_list_checkboxes"):
+        controller._sync_temp_group_list_checkboxes()
 
 
 def toggle_temp_group_member(controller, pid):
@@ -330,11 +352,7 @@ def set_temp_group_mute(controller, source_pid, muted):
 
 
 def set_temp_group_gpu_guard(controller, source_pid, enabled):
-    targets = temp_group_shortcut_targets(controller, source_pid)
-    if not targets:
-        return
-    for idx, widget in enumerate(targets):
-        widget.set_gpu_guard_shortcut_state(bool(enabled), log=(idx == 0), show_hud=True)
+    pass
 
 
 def set_temp_group_corner_mode(controller, source_pid, mode):
@@ -490,6 +508,52 @@ def release_exec_window_claim(controller, profile_id=None, hwnd=None):
             controller._exec_window_claims.pop(key, None)
 
 
+def _linear_partition_indices(seq, k):
+    """
+    동적 계획법(DP)을 사용해 seq 시퀀스를 k개의 부분으로 균등 분할합니다.
+    (각 분할 부분의 합 중 최댓값을 최소화하여 가장 균형 잡힌 행 배치를 생성)
+    """
+    n = len(seq)
+    if n == 0 or k <= 0:
+        return []
+    if k >= n:
+        return [[i] for i in range(n)]
+    if k == 1:
+        return [list(range(n))]
+
+    table = [[0] * (k + 1) for _ in range(n + 1)]
+    dividers = [[0] * (k + 1) for _ in range(n + 1)]
+    prefix_sums = [0] * (n + 1)
+    for i in range(n):
+        prefix_sums[i + 1] = prefix_sums[i] + seq[i]
+
+    for i in range(1, n + 1):
+        table[i][1] = prefix_sums[i]
+    for j in range(1, k + 1):
+        table[1][j] = seq[0]
+
+    for i in range(2, n + 1):
+        for j in range(2, k + 1):
+            min_max = float("inf")
+            best_x = 1
+            for x in range(1, i):
+                cost = max(table[x][j - 1], prefix_sums[i] - prefix_sums[x])
+                if cost < min_max:
+                    min_max = cost
+                    best_x = x
+            table[i][j] = min_max
+            dividers[i][j] = best_x
+
+    ranges = []
+    curr_n = n
+    for curr_k in range(k, 1, -1):
+        split_pt = dividers[curr_n][curr_k]
+        ranges.insert(0, list(range(split_pt, curr_n)))
+        curr_n = split_pt
+    ranges.insert(0, list(range(0, curr_n)))
+    return ranges
+
+
 def calculate_spread_layout(
     item_paths,
     w=200,
@@ -532,30 +596,14 @@ def calculate_spread_layout(
     S_h = max(300, screen_geo.height())
 
     is_fullscreen_strategy = fit_strategy in (
-        "fullscreen_autofill", "modular_tetris", "treemap_collage", "justified_rows"
+        "fullscreen_autofill", "mosaic_puzzle", "modular_tetris", "treemap_collage", "justified_rows"
     )
 
     if is_fullscreen_strategy:
         start_x = screen_geo.left()
         start_y = screen_geo.top()
         spread_direction = "top-left"
-
-    if fit_strategy == "fullscreen_autofill":
-        sum_area_factor = 0.0
-        for p in item_paths:
-            sz = get_media_native_size(p) if p else None
-            if sz and len(sz) == 2 and sz[0] > 0 and sz[1] > 0:
-                aspect = sz[0] / max(1, sz[1])
-            else:
-                aspect = 1.0
-            span = 2 if aspect >= 1.55 else 1
-            sum_area_factor += (span * span) / max(0.2, aspect)
-
-        w_ideal = math.sqrt((S_w * S_h) / max(1.0, sum_area_factor))
-        cols = max(2, int(round(S_w / max(50.0, w_ideal + margin))))
-        w = max(50, int((S_w - (cols - 1) * margin) / cols))
-        h = w
-    elif not is_fullscreen_strategy:
+    else:
         if start_x is None:
             total_w = cols * w + (cols - 1) * margin
             start_x = max(screen_geo.left() + 40, screen_geo.left() + (screen_geo.width() - total_w) // 2)
@@ -566,7 +614,7 @@ def calculate_spread_layout(
     spread_direction = str(spread_direction or "top-left") if not is_fullscreen_strategy else "top-left"
     positions = [None] * count
 
-    if fit_strategy in ("auto_aspect", "fullscreen_autofill"):
+    if fit_strategy == "auto_aspect":
         # 1. 아이템별 원본 비율 크기 및 열 Span 산출
         item_data = []
         for p in item_paths:
@@ -677,26 +725,6 @@ def calculate_spread_layout(
                         col_heights[pair_c + 1] = new_y
                 positions[chosen_idx] = (pos_x, pos_y, item_w, item_h)
 
-        # 전체화면 꽉 채움 모드: 바닥 빈 공간 수직 밀착 스냅 보정
-        if fit_strategy == "fullscreen_autofill":
-            screen_bottom = screen_geo.top() + S_h
-            for c in range(cols):
-                # 해당 열에 위치한 위젯들 중 가장 아래쪽에 있는 위젯 찾기
-                col_widgets = []
-                for idx, pos in enumerate(positions):
-                    if pos and abs(pos[0] - col_xs[c]) < 10:
-                        col_widgets.append((idx, pos))
-                if col_widgets:
-                    bottom_idx, bottom_pos = max(col_widgets, key=lambda it: it[1][1] + it[1][3])
-                    diff_bottom = screen_bottom - (bottom_pos[1] + bottom_pos[3])
-                    if 0 < diff_bottom <= 120:  # 바닥 틈이 미세하게 남았을 때 완벽 밀착!
-                        positions[bottom_idx] = (
-                            bottom_pos[0],
-                            bottom_pos[1],
-                            bottom_pos[2],
-                            bottom_pos[3] + diff_bottom,
-                        )
-
     elif fit_strategy == "grid_span":
         item_spans = []
         item_sizes = []
@@ -748,169 +776,305 @@ def calculate_spread_layout(
                         placed = True
                         break
                 r += 1
-    elif fit_strategy == "modular_tetris":
-        # 🎮 테트리스 모듈러 (대·중·소 블록이 어우러져 사각형 100% 빈틈없이 채움)
-        item_spans = []
-        for idx, p in enumerate(item_paths):
-            span_x, span_y = 1, 1
-            sz = get_media_native_size(p) if p else None
-            aspect = (sz[0] / max(1, sz[1])) if (sz and len(sz) == 2 and sz[0] > 0 and sz[1] > 0) else 1.0
-            if aspect >= 1.45:
-                span_x, span_y = 2, 1
-            elif aspect <= 0.68:
-                span_x, span_y = 1, 2
-            elif 0.82 <= aspect <= 1.25 and (idx % 6 == 1) and count >= 10:
-                # 약 15~20% 비율로 2x2 대형 블록 생성 (리듬감 부여)
-                span_x, span_y = 2, 2
-            item_spans.append((span_x, span_y))
+    elif fit_strategy in ("fullscreen_autofill", "mosaic_puzzle", "modular_tetris", "treemap_collage"):
+        # 🎨 다이나믹 퍼즐 콜라주 (대·중·소 블록이 맞물려 화면 전체 100% 빈틈없이 채움)
+        import random
+        aspect_screen = float(S_w) / float(max(1, S_h))
 
-        total_cells = sum(sx * sy for sx, sy in item_spans)
-        aspect_ratio = float(S_w) / float(S_h)
-        tetris_cols = max(3, int(round(math.sqrt(total_cells * aspect_ratio))))
-        tetris_rows = max(2, int(math.ceil(total_cells / float(tetris_cols))))
-
-        unit_w = max(35, int((S_w - (tetris_cols - 1) * margin) / tetris_cols))
-        unit_h = max(35, int((S_h - (tetris_rows - 1) * margin) / tetris_rows))
-
-        grid_occupied = set()
-
-        def is_free(r, c, sx, sy):
-            if c + sx > tetris_cols:
-                return False
-            for dr in range(sy):
-                for dc in range(sx):
-                    if (r + dr, c + dc) in grid_occupied:
-                        return False
-            return True
-
-        def mark_occ(r, c, sx, sy):
-            for dr in range(sy):
-                for dc in range(sx):
-                    grid_occupied.add((r + dr, c + dc))
-
-        unplaced = list(range(count))
-        while unplaced:
-            first_empty = None
-            max_r = max((r for r, c in grid_occupied), default=-1) + 2
-            for r in range(max(tetris_rows, max_r + 2)):
-                for c in range(tetris_cols):
-                    if (r, c) not in grid_occupied:
-                        first_empty = (r, c)
-                        break
-                if first_empty:
-                    break
-            if not first_empty:
-                break
-            er, ec = first_empty
-
-            chosen_item = None
-            for cand in unplaced:
-                sx, sy = item_spans[cand]
-                if is_free(er, ec, sx, sy):
-                    chosen_item = cand
-                    break
-
-            if chosen_item is None:
-                chosen_item = unplaced[0]
-                item_spans[chosen_item] = (1, 1)
-
-            unplaced.remove(chosen_item)
-            sx, sy = item_spans[chosen_item]
-            mark_occ(er, ec, sx, sy)
-            pos_x = start_x + ec * (unit_w + margin)
-            pos_y = start_y + er * (unit_h + margin)
-            item_w = sx * unit_w + (sx - 1) * margin
-            item_h = sy * unit_h + (sy - 1) * margin
-            positions[chosen_item] = (pos_x, pos_y, item_w, item_h)
-
-    elif fit_strategy == "treemap_collage":
-        # 🗺️ 갤러리 트리맵 콜라주 (화면 전체 100% 무드보드 재귀 분할)
-        weights = []
-        for p in item_paths:
-            sz = get_media_native_size(p) if p else None
-            aspect = (sz[0] / max(1, sz[1])) if (sz and len(sz) == 2 and sz[0] > 0 and sz[1] > 0) else 1.0
-            w_factor = 1.5 if (aspect >= 1.5 or aspect <= 0.65) else 1.0
-            weights.append(w_factor)
-
-        def split_treemap(item_indices, rx, ry, rw, rh):
-            if not item_indices:
-                return
-            if len(item_indices) == 1:
-                idx = item_indices[0]
-                positions[idx] = (rx, ry, max(35, rw), max(35, rh))
-                return
-
-            total_weight = sum(weights[i] for i in item_indices)
-            half = total_weight / 2.0
-            acc = 0.0
-            split_idx = 1
-            for i, itm in enumerate(item_indices[:-1]):
-                acc += weights[itm]
-                if acc >= half:
-                    split_idx = i + 1
-                    break
-
-            left_items = item_indices[:split_idx]
-            right_items = item_indices[split_idx:]
-            left_w = sum(weights[i] for i in left_items)
-
-            if rw >= rh:
-                cut = int(round(rw * (left_w / max(0.1, total_weight))))
-                cut = max(35, min(rw - 35, cut))
-                half_m = margin // 2
-                split_treemap(left_items, rx, ry, cut - half_m, rh)
-                split_treemap(right_items, rx + cut + half_m, ry, rw - cut - half_m, rh)
-            else:
-                cut = int(round(rh * (left_w / max(0.1, total_weight))))
-                cut = max(35, min(rh - 35, cut))
-                half_m = margin // 2
-                split_treemap(left_items, rx, ry, rw, cut - half_m)
-                split_treemap(right_items, rx, ry + cut + half_m, rw, rh - cut - half_m)
-
-        split_treemap(list(range(count)), start_x, start_y, S_w, S_h)
-
-    elif fit_strategy == "justified_rows":
-        # 📸 사진첩 행 정돈 (구글 포토 스타일, 가로 행 높이 동적 조절)
         aspects = []
         for p in item_paths:
             sz = get_media_native_size(p) if p else None
             asp = (sz[0] / max(1, sz[1])) if (sz and len(sz) == 2 and sz[0] > 0 and sz[1] > 0) else 1.0
             aspects.append(max(0.3, min(3.0, asp)))
 
-        ideal_rows = max(2, int(round(math.sqrt(count / max(0.5, float(S_w) / float(S_h))))))
-        target_row_h = max(50, int((S_h - (ideal_rows - 1) * margin) / ideal_rows))
+        if count == 1:
+            positions[0] = (start_x, start_y, S_w, S_h)
+        else:
+            rng = random.Random(42)
 
-        rows_data = []
-        cur_row = []
-        cur_width = 0
-        for i in range(count):
-            asp = aspects[i]
-            est_w = target_row_h * asp
-            cur_row.append(i)
-            cur_width += est_w + margin
-            if cur_width >= S_w * 0.90 and len(cur_row) >= 2:
-                rows_data.append(cur_row)
-                cur_row = []
-                cur_width = 0
-        if cur_row:
-            rows_data.append(cur_row)
+            # 1. 화면 비율 기반 최적 기본 격자 (R 행 x C 열) 산출
+            ideal_R = max(1, int(round(math.sqrt(count / aspect_screen))))
+            ideal_C = max(1, int(math.ceil(count / ideal_R)))
+            target_cells = ideal_C * ideal_R
+            while target_cells < count:
+                ideal_C += 1
+                target_cells = ideal_C * ideal_R
+
+            R = ideal_R
+            C = ideal_C
+
+            # 기본 1x1 단위 블록 할당
+            item_spans = [[1, 1] for _ in range(count)]
+            diff = target_cells - count
+
+            # 여유 칸이 있으면 원본 비율에 맞춰 2x2 대형 대표 짤, 2x1 가로 짤, 1x2 세로 짤로 승격
+            if diff >= 3 and count >= 8 and R >= 2 and C >= 2:
+                for idx in range(count):
+                    if diff >= 3 and 0.85 <= aspects[idx] <= 1.15:
+                        item_spans[idx] = [2, 2]
+                        diff -= 3
+                    if diff < 3:
+                        break
+
+            if diff >= 1 and C >= 2:
+                for idx in range(count):
+                    if diff >= 1 and aspects[idx] >= 1.4 and item_spans[idx] == [1, 1]:
+                        item_spans[idx] = [2, 1]
+                        diff -= 1
+                    if diff == 0:
+                        break
+
+            if diff >= 1 and R >= 2:
+                for idx in range(count):
+                    if diff >= 1 and aspects[idx] <= 0.7 and item_spans[idx] == [1, 1]:
+                        item_spans[idx] = [1, 2]
+                        diff -= 1
+                    if diff == 0:
+                        break
+
+            # 잔여 차이가 남아있다면 1x1을 2x1로 승격
+            if diff > 0 and C >= 2:
+                for idx in range(count):
+                    if diff >= 1 and item_spans[idx] == [1, 1]:
+                        item_spans[idx] = [2, 1]
+                        diff -= 1
+                    if diff == 0:
+                        break
+
+            unit_w = (S_w - (C - 1) * margin) // C
+            unit_h = (S_h - (R - 1) * margin) // R
+            rem_w = S_w - (C * unit_w + (C - 1) * margin)
+            rem_h = S_h - (R * unit_h + (R - 1) * margin)
+
+            col_widths = [unit_w + (1 if c < rem_w else 0) for c in range(C)]
+            row_heights = [unit_h + (1 if r < rem_h else 0) for r in range(R)]
+
+            col_xs = [0] * C
+            for c in range(1, C):
+                col_xs[c] = col_xs[c - 1] + col_widths[c - 1] + margin
+
+            row_ys = [0] * R
+            for r in range(1, R):
+                row_ys[r] = row_ys[r - 1] + row_heights[r - 1] + margin
+
+            grid = [[None] * C for _ in range(R)]
+
+            def can_place(r, c, sx, sy):
+                if r + sy > R or c + sx > C:
+                    return False
+                for dr in range(sy):
+                    for dc in range(sx):
+                        if grid[r + dr][c + dc] is not None:
+                            return False
+                return True
+
+            def place(r, c, sx, sy, itm):
+                for dr in range(sy):
+                    for dc in range(sx):
+                        grid[r + dr][c + dc] = itm
+
+            hero_items = [i for i in range(count) if item_spans[i] == [2, 2]]
+            wide_items = [i for i in range(count) if item_spans[i] in ([2, 1], [3, 1])]
+            tall_items = [i for i in range(count) if item_spans[i] == [1, 2]]
+            single_items = [i for i in range(count) if item_spans[i] == [1, 1]]
+
+            # 2x2 대형 대표 짤을 화면 전체에 리듬감 있게 분산 배치
+            candidate_hero_spots = []
+            for r in range(0, R - 1, 2):
+                for c in range(0, C - 1, 3):
+                    candidate_hero_spots.append((r, c))
+            rng.shuffle(candidate_hero_spots)
+
+            for itm in hero_items:
+                placed = False
+                for r, c in candidate_hero_spots:
+                    if can_place(r, c, 2, 2):
+                        place(r, c, 2, 2, itm)
+                        placed = True
+                        break
+                if not placed:
+                    for r in range(R):
+                        for c in range(C):
+                            if can_place(r, c, 2, 2):
+                                place(r, c, 2, 2, itm)
+                                placed = True
+                                break
+                        if placed:
+                            break
+                if not placed:
+                    item_spans[itm] = [1, 1]
+                    single_items.append(itm)
+
+            # 가로 2x1 짤 배치
+            for itm in wide_items:
+                sx, sy = item_spans[itm]
+                placed = False
+                for r in range(R):
+                    for c in range(C):
+                        if can_place(r, c, sx, sy):
+                            place(r, c, sx, sy, itm)
+                            placed = True
+                            break
+                    if placed:
+                        break
+                if not placed:
+                    item_spans[itm] = [1, 1]
+                    single_items.append(itm)
+
+            # 세로 1x2 짤 배치
+            for itm in tall_items:
+                sx, sy = item_spans[itm]
+                placed = False
+                for r in range(R):
+                    for c in range(C):
+                        if can_place(r, c, sx, sy):
+                            place(r, c, sx, sy, itm)
+                            placed = True
+                            break
+                    if placed:
+                        break
+                if not placed:
+                    item_spans[itm] = [1, 1]
+                    single_items.append(itm)
+
+            # 남은 모든 빈칸에 1x1 일반 짤 채우기 (빈틈 0% 보장)
+            single_idx = 0
+            for r in range(R):
+                for c in range(C):
+                    if grid[r][c] is None:
+                        if single_idx < len(single_items):
+                            itm = single_items[single_idx]
+                            single_idx += 1
+                            place(r, c, 1, 1, itm)
+                        else:
+                            if c > 0 and grid[r][c - 1] is not None:
+                                grid[r][c] = grid[r][c - 1]
+                            elif r > 0 and grid[r - 1][c] is not None:
+                                grid[r][c] = grid[r - 1][c]
+
+            # 최종 위치 (x, y, w, h) 변환
+            for itm in range(count):
+                placed_cells = [(r, c) for r in range(R) for c in range(C) if grid[r][c] == itm]
+                if not placed_cells:
+                    continue
+                min_r = min(r for r, c in placed_cells)
+                max_r = max(r for r, c in placed_cells)
+                min_c = min(c for r, c in placed_cells)
+                max_c = max(c for r, c in placed_cells)
+                sx = max_c - min_c + 1
+                sy = max_r - min_r + 1
+
+                bx = start_x + col_xs[min_c]
+                by = start_y + row_ys[min_r]
+                bw = sum(col_widths[min_c + dc] for dc in range(sx)) + (sx - 1) * margin
+                bh = sum(row_heights[min_r + dr] for dr in range(sy)) + (sy - 1) * margin
+                positions[itm] = (bx, by, bw, bh)
+
+    elif fit_strategy == "justified_rows":
+        # 📏 가로 줄 맞춤 (단정한 앨범형, 행 단위 균등 분배)
+        aspects = []
+        for p in item_paths:
+            sz = get_media_native_size(p) if p else None
+            asp = (sz[0] / max(1, sz[1])) if (sz and len(sz) == 2 and sz[0] > 0 and sz[1] > 0) else 1.0
+            aspects.append(max(0.3, min(3.0, asp)))
+
+        total_aspect = max(0.1, sum(aspects))
+        # 화면 가로·세로 전체를 100% 채우기 위한 수학적 최적 행 수 산출
+        ideal_rows = max(1, int(round(math.sqrt((float(S_h) * total_aspect) / float(S_w)))))
+        k_rows = min(count, ideal_rows)
+
+        # 동적 계획법(DP)을 사용해 행별 비율 총합을 완벽하게 균등화 (마지막 행 폭발 방지)
+        rows_data = _linear_partition_indices(aspects, k_rows)
+
+        raw_heights = []
+        for r_idx, row_items in enumerate(rows_data):
+            sum_asp = max(0.1, sum(aspects[i] for i in row_items))
+            row_margin_total = (len(row_items) - 1) * margin
+            row_avail_w = S_w - row_margin_total
+            row_h = max(35, int(round(row_avail_w / sum_asp)))
+            raw_heights.append(row_h)
+
+        # 화면 전체 가용 높이에 정확히 채우기 위한 세로 스케일링
+        avail_h = max(100, S_h - (len(rows_data) - 1) * margin)
+        sum_raw_h = max(1, sum(raw_heights))
+        scale_y = min(1.4, max(0.6, float(avail_h) / float(sum_raw_h)))
+        final_heights = [max(35, int(round(h * scale_y))) for h in raw_heights]
+        diff = avail_h - sum(final_heights)
+        if final_heights:
+            final_heights[-1] = max(35, final_heights[-1] + diff)
 
         cur_y = start_y
         for r_idx, row_items in enumerate(rows_data):
-            sum_asp = sum(aspects[i] for i in row_items)
+            row_h = final_heights[r_idx]
             row_margin_total = (len(row_items) - 1) * margin
             row_avail_w = S_w - row_margin_total
-            row_h = max(40, int(round(row_avail_w / max(0.1, sum_asp))))
+            sum_asp = max(0.1, sum(aspects[i] for i in row_items))
+
+            # 각 아이템의 너비를 가용 가로 폭에 맞춰 비례 분배 (우측 끝 위젯 팽창/왜곡 원천 방지)
+            item_widths = [max(35, int(round(row_avail_w * (aspects[i] / sum_asp)))) for i in row_items]
+            w_diff = row_avail_w - sum(item_widths)
+            if item_widths:
+                item_widths[-1] = max(35, item_widths[-1] + w_diff)
 
             cur_x = start_x
             for c_idx, itm in enumerate(row_items):
-                if c_idx == len(row_items) - 1:
-                    itm_w = (start_x + S_w) - cur_x
-                else:
-                    itm_w = max(35, int(round(row_h * aspects[itm])))
+                itm_w = item_widths[c_idx]
                 positions[itm] = (cur_x, cur_y, itm_w, row_h)
                 cur_x += itm_w + margin
             cur_y += row_h + margin
+    elif fit_strategy == "justified_columns":
+        # 📐 세로 줄 맞춤 (열 단위 정돈, 세로 짤 돋보임)
+        inv_aspects = []
+        for p in item_paths:
+            sz = get_media_native_size(p) if p else None
+            asp = (sz[0] / max(1, sz[1])) if (sz and len(sz) == 2 and sz[0] > 0 and sz[1] > 0) else 1.0
+            inv_asp = 1.0 / max(0.2, asp)
+            inv_aspects.append(max(0.3, min(3.0, inv_asp)))
+
+        total_inv_aspect = max(0.1, sum(inv_aspects))
+        # 화면 가로·세로 전체를 100% 채우기 위한 수학적 최적 열(Column) 수 산출
+        ideal_cols = max(1, int(round(math.sqrt((float(S_w) * total_inv_aspect) / float(S_h)))))
+        k_cols = min(count, ideal_cols)
+
+        # 동적 계획법(DP)을 사용해 열별 세로 비율 총합을 완벽하게 균등화
+        cols_data = _linear_partition_indices(inv_aspects, k_cols)
+
+        raw_widths = []
+        for c_idx, col_items in enumerate(cols_data):
+            sum_inv = max(0.1, sum(inv_aspects[i] for i in col_items))
+            col_margin_total = (len(col_items) - 1) * margin
+            col_avail_h = S_h - col_margin_total
+            col_w = max(35, int(round(col_avail_h / sum_inv)))
+            raw_widths.append(col_w)
+
+        # 화면 전체 가용 너비에 정확히 채우기 위한 가로 스케일링
+        avail_w = max(100, S_w - (len(cols_data) - 1) * margin)
+        sum_raw_w = max(1, sum(raw_widths))
+        scale_x = min(1.4, max(0.6, float(avail_w) / float(sum_raw_w)))
+        final_widths = [max(35, int(round(w * scale_x))) for w in raw_widths]
+        diff_w = avail_w - sum(final_widths)
+        if final_widths:
+            final_widths[-1] = max(35, final_widths[-1] + diff_w)
+
+        cur_x = start_x
+        for c_idx, col_items in enumerate(cols_data):
+            col_w = final_widths[c_idx]
+            col_margin_total = (len(col_items) - 1) * margin
+            col_avail_h = S_h - col_margin_total
+            sum_inv = max(0.1, sum(inv_aspects[i] for i in col_items))
+
+            # 각 아이템의 높이를 가용 세로 높이에 맞춰 비례 분배 (하단 빈틈 방지)
+            item_heights = [max(35, int(round(col_avail_h * (inv_aspects[i] / sum_inv)))) for i in col_items]
+            h_diff = col_avail_h - sum(item_heights)
+            if item_heights:
+                item_heights[-1] = max(35, item_heights[-1] + h_diff)
+
+            cur_y = start_y
+            for r_idx, itm in enumerate(col_items):
+                itm_h = item_heights[r_idx]
+                positions[itm] = (cur_x, cur_y, col_w, itm_h)
+                cur_y += itm_h + margin
+            cur_x += col_w + margin
     else:
         # 고정 격자 (crop_fill, fit_inside)
         for idx in range(count):
@@ -996,25 +1160,5 @@ def calculate_spread_layout(
                 (p[0] + shift_x, p[1] + shift_y, p[2], p[3]) if p else None
                 for p in positions
             ]
-
-        # -------------------------------------------------------------
-        # 3. 전체화면 모드인 경우 하단 수직 밀착 (Vertical Bottom Snap)
-        # -------------------------------------------------------------
-        if fit_strategy == "fullscreen_autofill":
-            col_bottom_items = {}
-            for idx, p in enumerate(positions):
-                if not p:
-                    continue
-                px, py, pw, ph = p
-                c_key = int(round((px - s_left) / max(1, pw)))
-                item_bottom = py + ph
-                if c_key not in col_bottom_items or item_bottom > col_bottom_items[c_key][1]:
-                    col_bottom_items[c_key] = (idx, item_bottom, py, ph)
-
-            for c_key, (b_idx, item_bottom, py, ph) in col_bottom_items.items():
-                diff_bottom = s_bottom - item_bottom
-                if 0 < diff_bottom <= 60:
-                    px, py, pw, ph = positions[b_idx]
-                    positions[b_idx] = (px, py, pw, ph + diff_bottom)
 
     return positions
