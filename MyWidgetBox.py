@@ -7868,13 +7868,18 @@ class MasterController(QMainWindow):
                     prof_s.setValue("y", py)
                     prof_s.setValue("w", pw)
                     prof_s.setValue("h", ph)
+                    relayout_fit_mode = 0 if spread_relayout_cfg.get("fit_strategy") == "fit_inside" else 1
+                    prof_s.setValue("media_fit_mode", relayout_fit_mode)
                     prof_s.sync()
 
                     if spid in self.widgets:
                         w_inst = self.widgets[spid]
+                        w_inst.media_fit_mode = relayout_fit_mode
                         w_inst.setGeometry(px, py, pw, ph)
                         w_inst.save_all_settings()
                         w_inst.apply_mask_and_style()
+                        if hasattr(w_inst, "_apply_media_scale_mode"):
+                            w_inst._apply_media_scale_mode()
 
         self.load_profiles()
 
@@ -8411,18 +8416,40 @@ class MasterController(QMainWindow):
             chord_down = alt_down and left_down
 
             if chord_down and not self._alt_click_pressed_prev:
-                cursor_x, cursor_y = win32api.GetCursorPos()
-                target = self._widget_under_global_pos(QPoint(int(cursor_x), int(cursor_y)))
-                if target is not None:
-                    new_lock = not bool(getattr(target, "is_locked", False))
-                    if hasattr(self, "set_temp_group_lock"):
-                        self.set_temp_group_lock(target.profile_id, new_lock)
+                # 1. 타 프로그램(포토샵, 그래픽 툴, 에디터, 게임 등) 사용 중 Alt+클릭 간섭 원천 방지
+                # 포그라운드 윈도우가 바탕화면(Progman/WorkerW), 셸, 또는 MyWidgetBox 관련 창일 때만 반응
+                fg_hwnd = win32gui.GetForegroundWindow()
+                is_allowed_fg = False
+                if not fg_hwnd or fg_hwnd == win32gui.GetDesktopWindow() or fg_hwnd == win32gui.GetShellWindow():
+                    is_allowed_fg = True
+                else:
+                    own_hwnds = {int(self.winId())}
+                    for w in self.widgets.values():
+                        if w and hasattr(w, "winId"):
+                            try:
+                                own_hwnds.add(int(w.winId()))
+                            except Exception:
+                                pass
+                    if int(fg_hwnd) in own_hwnds:
+                        is_allowed_fg = True
                     else:
-                        if hasattr(target, "cancel_active_interaction"):
-                            target.cancel_active_interaction()
-                        target.apply_window_settings(int(getattr(target, "layer_mode", DesktopWidget.LAYER_NORMAL)), new_lock)
-                        target.save_all_settings()
-                    self.load_profiles()
+                        cls_name = win32gui.GetClassName(fg_hwnd)
+                        if cls_name in ("Progman", "WorkerW", "Shell_TrayWnd"):
+                            is_allowed_fg = True
+
+                if is_allowed_fg:
+                    cursor_x, cursor_y = win32api.GetCursorPos()
+                    target = self._widget_under_global_pos(QPoint(int(cursor_x), int(cursor_y)))
+                    if target is not None:
+                        new_lock = not bool(getattr(target, "is_locked", False))
+                        if hasattr(self, "set_temp_group_lock"):
+                            self.set_temp_group_lock(target.profile_id, new_lock)
+                        else:
+                            if hasattr(target, "cancel_active_interaction"):
+                                target.cancel_active_interaction()
+                            target.apply_window_settings(int(getattr(target, "layer_mode", DesktopWidget.LAYER_NORMAL)), new_lock)
+                            target.save_all_settings()
+                        self.load_profiles()
 
             self._alt_click_pressed_prev = chord_down
         except Exception:

@@ -307,19 +307,25 @@ def ensure_windows_startup_shortcut(controller, force=False):
         return False
     exe_path = frozen_executable_path()
     user_name = _current_windows_user()
-    if not exe_path or not user_name:
+    if not exe_path:
         return False
     working_dir = os.path.dirname(exe_path)
     exe_name = os.path.splitext(os.path.basename(exe_path))[0] or "MyWidgetBox"
     task_name = _startup_task_name(controller, exe_path=exe_path)
     description = f"{exe_name} auto start"
+    icon_path = startup_shortcut_icon_path(exe_path)
+
+    # 1. 작업 스케줄러 (Scheduled Task) 등록 시도
     script = f"""
 $ErrorActionPreference = 'Stop'
 Import-Module ScheduledTasks -ErrorAction Stop
-$user = '{_ps_single_quote(user_name)}'
 $action = New-ScheduledTaskAction -Execute '{_ps_single_quote(exe_path)}' -WorkingDirectory '{_ps_single_quote(working_dir)}'
-$trigger = New-ScheduledTaskTrigger -AtLogOn -User $user
-$principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
+$trigger = New-ScheduledTaskTrigger -AtLogOn
+try {{
+    $principal = New-ScheduledTaskPrincipal -UserId '{_ps_single_quote(user_name)}' -LogonType Interactive -RunLevel Limited
+}} catch {{
+    $principal = New-ScheduledTaskPrincipal -LogonType Interactive -RunLevel Limited
+}}
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew
 Register-ScheduledTask -TaskName '{_ps_single_quote(task_name)}' -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description '{_ps_single_quote(description)}' -Force | Out-Null
 exit 0
@@ -328,7 +334,29 @@ exit 0
     success = bool(result is not None and result.returncode == 0)
     if success:
         _remove_legacy_startup_shortcut(controller, exe_path=exe_path)
-    return success
+        return True
+
+    # 2. 작업 스케줄러 등록 실패 시: 시작프로그램 폴더(.lnk) 생성 안전 fallback
+    lnk_path = startup_shortcut_path(controller, exe_path=exe_path)
+    if lnk_path:
+        lnk_script = f"""
+$ErrorActionPreference = 'Stop'
+$wsh = New-Object -ComObject WScript.Shell
+$sc = $wsh.CreateShortcut('{_ps_single_quote(lnk_path)}')
+$sc.TargetPath = '{_ps_single_quote(exe_path)}'
+$sc.WorkingDirectory = '{_ps_single_quote(working_dir)}'
+$sc.Description = '{_ps_single_quote(description)}'
+if (Test-Path '{_ps_single_quote(icon_path)}') {{
+    $sc.IconLocation = '{_ps_single_quote(icon_path)},0'
+}}
+$sc.Save()
+exit 0
+"""
+        lnk_result = _run_powershell(lnk_script)
+        if lnk_result is not None and lnk_result.returncode == 0 and os.path.isfile(lnk_path):
+            return True
+
+    return False
 
 
 def remove_windows_startup_shortcut(controller):

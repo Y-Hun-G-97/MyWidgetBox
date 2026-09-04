@@ -1,4 +1,5 @@
 import os
+import time
 
 from PyQt6.QtCore import QSettings, QTimer, Qt
 from PyQt6.QtGui import QPixmap
@@ -28,7 +29,20 @@ def update_playlist(widget):
             if str(path).lower().endswith(media_ext)
             and os.path.normcase(os.path.dirname(path)) == os.path.normcase(os.path.normpath(folder))
         ]
-        widget.playlist = [path for path in candidates if path not in widget.quarantined_media]
+        filtered_selected = [path for path in candidates if path not in widget.quarantined_media]
+        if filtered_selected:
+            widget.playlist = filtered_selected
+            return
+        # 선택된 파일들이 모두 손상/격리된 경우 루프 방지
+        now_ts = time.monotonic()
+        last_reset = float(getattr(widget, "_quarantine_last_reset_ts", 0.0) or 0.0)
+        if now_ts - last_reset < 15.0:
+            widget.playlist = []
+            return
+        widget._quarantine_last_reset_ts = now_ts
+        widget.quarantined_media.clear()
+        widget._save_quarantined_media()
+        widget.playlist = candidates
         return
 
     candidates = scan_media_paths(
@@ -44,7 +58,13 @@ def update_playlist(widget):
         widget.playlist = filtered
         return
 
-    # If everything got quarantined, recover gracefully instead of staying empty forever.
+    # If everything got quarantined, recover with cooldown guard to prevent endless crash loops.
+    now_ts = time.monotonic()
+    last_reset = float(getattr(widget, "_quarantine_last_reset_ts", 0.0) or 0.0)
+    if now_ts - last_reset < 15.0:
+        widget.playlist = []
+        return
+    widget._quarantine_last_reset_ts = now_ts
     widget.quarantined_media.clear()
     widget._save_quarantined_media()
     widget.playlist = candidates
@@ -966,16 +986,31 @@ def fit_to_screen(widget, include_taskbar=False):
 
 
 def snap_fill_available_space(widget):
-    screen = QApplication.screenAt(widget.geometry().center())
-    if not screen:
-        screen = QApplication.primaryScreen()
-    if not screen:
+    cur_geo = widget.geometry()
+    screens = QApplication.screens()
+    best_screen = None
+    best_intersect_area = -1
+    for s in screens:
+        inter = s.geometry().intersected(cur_geo)
+        area = inter.width() * inter.height()
+        if area > best_intersect_area:
+            best_intersect_area = area
+            best_screen = s
+
+    if not best_screen:
+        best_screen = QApplication.screenAt(cur_geo.center()) or QApplication.primaryScreen()
+    if not best_screen:
         return
 
     from mywidgetbox_core import get_screen_work_area
-    screen_geo = get_screen_work_area(screen)
-    cur_geo = widget.geometry()
-    wx, wy, ww, wh = cur_geo.x(), cur_geo.y(), cur_geo.width(), cur_geo.height()
+    screen_geo = get_screen_work_area(best_screen)
+
+    # 1. 위젯 시작 위치가 화면 밖으로 벗어난 경우 화면 내로 안전 보정
+    wx = max(screen_geo.left(), min(screen_geo.right() - 50, cur_geo.x()))
+    wy = max(screen_geo.top(), min(screen_geo.bottom() - 50, cur_geo.y()))
+    ww, wh = cur_geo.width(), cur_geo.height()
+    if wx != cur_geo.x() or wy != cur_geo.y():
+        widget.move(wx, wy)
 
     other_geos = []
     if hasattr(widget, "manager") and widget.manager and hasattr(widget.manager, "widgets"):
@@ -997,8 +1032,9 @@ def snap_fill_available_space(widget):
                 if og.top() < max_bottom:
                     max_bottom = og.top()
 
-    avail_w = max(50, max_right - wx)
-    avail_h = max(50, max_bottom - wy)
+    # 화면 경계 초과 방지 상한선 클램핑
+    avail_w = max(50, min(screen_geo.width(), max_right - wx))
+    avail_h = max(50, min(screen_geo.height(), max_bottom - wy))
 
     keep_aspect = bool(getattr(widget, "keep_aspect_ratio", True))
     if keep_aspect:
@@ -1015,12 +1051,11 @@ def snap_fill_available_space(widget):
             ih = max(1, wh)
 
         scale = min(float(avail_w) / float(iw), float(avail_h) / float(ih))
-        new_w = max(50, min(5000, int(round(iw * scale))))
-        new_h = max(50, min(5000, int(round(ih * scale))))
+        new_w = max(50, min(avail_w, int(round(iw * scale))))
+        new_h = max(50, min(avail_h, int(round(ih * scale))))
     else:
-        # 비율 맞춤 해제: 인접한 빈 공간 전체(너비 & 높이)를 100% 꽉 채움
-        new_w = max(50, min(5000, avail_w))
-        new_h = max(50, min(5000, avail_h))
+        new_w = max(50, min(avail_w, avail_w))
+        new_h = max(50, min(avail_h, avail_h))
 
     widget.resize(new_w, new_h)
     widget.save_all_settings()
