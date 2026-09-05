@@ -70,8 +70,10 @@ if (-not (Test-Path -LiteralPath $exePath -PathType Leaf)) {
 
 $iconSourcePath = Join-Path $root "MyWidgetBox.ico"
 $distIconPath = Join-Path $root "dist\MyWidgetBox\icon.ico"
+$distMyWidgetBoxIcoPath = Join-Path $root "dist\MyWidgetBox\MyWidgetBox.ico"
 Copy-Item -LiteralPath $iconSourcePath -Destination $distIconPath -Force
-Write-Host "[build] copied icon sidecar: $distIconPath"
+Copy-Item -LiteralPath $iconSourcePath -Destination $distMyWidgetBoxIcoPath -Force
+Write-Host "[build] copied icon sidecars: $distIconPath and $distMyWidgetBoxIcoPath"
 
 $assetsSourcePath = Join-Path $root "assets"
 $distAssetsPath = Join-Path $root "dist\MyWidgetBox\assets"
