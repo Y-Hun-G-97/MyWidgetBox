@@ -14,7 +14,7 @@ class GuideDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("guideDialog")
-        self.setWindowTitle("MyWidgetBox 사용 설명서")
+        self.setWindowTitle("MyWidgetBox v6.0 사용 설명서")
         self.setWindowIcon(render_vector_icon("help", "#528bf8", 32))
         apply_windows_dark_title_bar(self)
         self.resize(860, 640)
@@ -145,7 +145,7 @@ class GuideDialog(QDialog):
         sidebar_layout.setContentsMargins(8, 14, 8, 14)
         sidebar_layout.setSpacing(10)
 
-        app_title = QLabel("📖 사용 설명서")
+        app_title = QLabel("📖 사용 설명서 (v6.0)")
         app_title.setStyleSheet("color: #eef3ff; font-size: 15px; font-weight: 800; padding: 4px 10px;")
         sidebar_layout.addWidget(app_title)
 
@@ -343,11 +343,25 @@ class GuideDialog(QDialog):
         body1.setObjectName("guideBodyText")
         body1.setWordWrap(True)
 
+        sec2 = QLabel("📐 스마트 정렬 알고리즘 안내")
+        sec2.setObjectName("guideSectionTitle")
+        body2 = QLabel("""
+• <b>🧩 빈칸 자동 채우기 (자유 비율, 권장)</b>: 각 미디어의 원본 비율을 100% 보존하며 빈자리에 순서대로 쏙쏙 채웁니다.<br>
+• <b>📏 가로 줄 맞춤 (단정한 앨범형)</b>: 가로 줄마다 높이를 균일하게 맞춰 잡지나 앨범처럼 반듯한 수평선으로 화면을 채웁니다. (와이드 짤 최적)<br>
+• <b>📐 세로 줄 맞춤 (세로 짤 돋보임)</b>: 세로 열마다 너비를 균일하게 맞춰 세로로 긴 캐릭터 일러스트나 GIF가 큼직하게 돋보입니다.<br>
+• <b>🔲 균일 바둑판 (꽉 채움)</b>: 모든 위젯을 동일한 사각형 규격으로 통일하고 빈틈없이 채웁니다.<br>
+• <b>🖼️ 균일 바둑판 (원본 비율)</b>: 동일한 사각형 틀 안에서 짤이 잘리지 않도록 원본 비율을 유지하며 배치합니다.
+        """)
+        body2.setObjectName("guideBodyText")
+        body2.setWordWrap(True)
+
         clayout.addWidget(sec1)
         clayout.addWidget(body1)
+        clayout.addWidget(sec2)
+        clayout.addWidget(body2)
         layout.addWidget(card)
 
-        layout.addWidget(self._create_tip_box("스프레드 팁", "모니터 우상단이나 우하단 모서리에 바둑판을 짤 때는 '전개 방향'을 ↙좌하단 또는 ↖좌상단으로 선택하면 화면 밖으로 밀려나지 않고 깔끔하게 배치됩니다."))
+        layout.addWidget(self._create_tip_box("스프레드 팁", "자유로운 배치를 원할 때는 '🧩 빈칸 자동 채우기'를, 가로 풍경/일러스트 위주일 때는 '📏 가로 줄 맞춤'을, 세로 일러스트나 GIF 위주일 때는 '📐 세로 줄 맞춤'을 선택하시면 가장 아름답게 정렬됩니다."))
         layout.addStretch(1)
         self.stack.addWidget(page)
 
@@ -466,6 +480,7 @@ class GuideDialog(QDialog):
 • <b>Alt + 클릭 (바탕화면 위젯)</b>: 위젯 이동 잠금 / 잠금 해제 토글 (체크된 임시 그룹 위젯 일괄 잠금)<br>
 • <b>Ctrl + 마우스 휠 (위젯 위)</b>: 위젯 투명도 5% 단위 즉시 조절<br>
 • <b>Alt + 마우스 휠 (위젯 위)</b>: 위젯 레이어(배경 ↔ 일반 ↔ 최상위) 즉시 단계 조절<br>
+• <b>바탕화면 위젯 우클릭</b>: 화면 크기 맞춤, 인접 빈 공간 밀착 채우기, 상세 설정 바로 열기<br>
 • <b>위젯 카드 더블클릭 (컨트롤러)</b>: 위젯 이름 즉시 변경 다이얼로그 호출<br>
 • <b>위젯 카드 클릭 (컨트롤러)</b>: 바탕화면 해당 위젯에 네온 테두리 하이라이트 점멸
         """)
@@ -478,9 +493,9 @@ class GuideDialog(QDialog):
         body3.setObjectName("guideBodyText")
         body3.setWordWrap(True)
 
-        sec4 = QLabel("⚡ GPU 부하 모니터링 & 자동 절전")
+        sec4 = QLabel("⚡ GPU 성능 보호 & 창 최대화/전체화면 자동 감지")
         sec4.setObjectName("guideSectionTitle")
-        body4 = QLabel("상단 우측의 <b>[ GPU ]</b> 버튼을 눌러 고사양 게임 실행 시 위젯 애니메이션/영상을 자동으로 일시 정지시켜 프레임 드랍을 원천 차단할 수 있습니다.")
+        body4 = QLabel("상단 우측의 <b>[ GPU ]</b> 버튼에서 성능 보호를 켜면 고사양 게임, 창 최대화(브라우저, 작업관리자 등), 듀얼 모니터 및 Lossless Scaling(LSFG) 환경에서도 작업 창 뒤로 위젯이 가려졌을 때 애니메이션/영상 디코딩을 자동으로 일시 정지하여 <b>GPU 점유율 0%</b>로 완벽하게 성능을 보존합니다.")
         body4.setObjectName("guideBodyText")
         body4.setWordWrap(True)
 

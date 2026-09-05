@@ -42,6 +42,7 @@ def runtime_binary_dirs(include_cwd=False, include_bin_subdir=True):
         candidates = [base]
         if bool(include_bin_subdir):
             candidates.append(os.path.join(base, "bin"))
+            candidates.append(os.path.join(base, "_internal"))
         for candidate in candidates:
             key = os.path.normcase(os.path.normpath(str(candidate)))
             if key in seen:

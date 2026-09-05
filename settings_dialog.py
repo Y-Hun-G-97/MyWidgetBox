@@ -1924,7 +1924,6 @@ QDialog#settingsDialog {
             ])
             self.bulk_spread_fit_combo.setCurrentIndex(0)
             bso_layout.addWidget(self.bulk_spread_fit_combo, 0, 1, 1, 3)
-
             self.bulk_spread_auto_hint = QLabel("✨ 빈칸 자동 채우기: 각 짤의 원래 비율을 살리며, 남는 빈자리에 다음 짤을 쏙쏙 넣어 자연스럽게 채웁니다.")
             self.bulk_spread_auto_hint.setWordWrap(True)
             self.bulk_spread_auto_hint.setStyleSheet("""

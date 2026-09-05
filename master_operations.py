@@ -554,6 +554,108 @@ def _linear_partition_indices(seq, k):
     return ranges
 
 
+def _sub_layout_justified_rows(pairs, bounds, margin=10):
+    import math
+    bx, by, bw, bh = bounds
+    count = len(pairs)
+    if count == 0:
+        return []
+    aspects = [max(0.2, min(5.0, float(p[1]))) for p in pairs]
+    total_aspect = max(0.1, sum(aspects))
+    ideal_rows = max(1, int(round(math.sqrt((float(bh) * total_aspect) / float(bw)))))
+    k_rows = min(count, ideal_rows)
+    rows_data = _linear_partition_indices(aspects, k_rows)
+
+    raw_heights = []
+    for row_items in rows_data:
+        sum_asp = max(0.1, sum(aspects[i] for i in row_items))
+        row_margin_total = (len(row_items) - 1) * margin
+        row_avail_w = max(50, bw - row_margin_total)
+        row_h = max(35, int(round(row_avail_w / sum_asp)))
+        raw_heights.append(row_h)
+
+    avail_h = max(50, bh - (len(rows_data) - 1) * margin)
+    sum_raw_h = max(1, sum(raw_heights))
+    scale_y = min(1.4, max(0.6, float(avail_h) / float(sum_raw_h)))
+    final_heights = [max(35, int(round(h * scale_y))) for h in raw_heights]
+    diff = avail_h - sum(final_heights)
+    if final_heights:
+        final_heights[-1] = max(35, final_heights[-1] + diff)
+
+    out = []
+    cur_y = by
+    for r_idx, row_items in enumerate(rows_data):
+        row_h = final_heights[r_idx]
+        row_margin_total = (len(row_items) - 1) * margin
+        row_avail_w = max(50, bw - row_margin_total)
+        sum_asp = max(0.1, sum(aspects[i] for i in row_items))
+
+        item_widths = [max(35, int(round(row_avail_w * (aspects[i] / sum_asp)))) for i in row_items]
+        w_diff = row_avail_w - sum(item_widths)
+        if item_widths:
+            item_widths[-1] = max(35, item_widths[-1] + w_diff)
+
+        cur_x = bx
+        for c_idx, itm_idx in enumerate(row_items):
+            itm_w = item_widths[c_idx]
+            orig_idx = pairs[itm_idx][0]
+            out.append((orig_idx, cur_x, cur_y, itm_w, row_h))
+            cur_x += itm_w + margin
+        cur_y += row_h + margin
+    return out
+
+
+def _sub_layout_justified_cols(pairs, bounds, margin=10):
+    import math
+    bx, by, bw, bh = bounds
+    count = len(pairs)
+    if count == 0:
+        return []
+    inv_aspects = [1.0 / max(0.2, min(5.0, float(p[1]))) for p in pairs]
+    total_inv = max(0.1, sum(inv_aspects))
+    ideal_cols = max(1, int(round(math.sqrt((float(bw) * total_inv) / float(bh)))))
+    k_cols = min(count, ideal_cols)
+    cols_data = _linear_partition_indices(inv_aspects, k_cols)
+
+    raw_widths = []
+    for col_items in cols_data:
+        sum_inv = max(0.1, sum(inv_aspects[i] for i in col_items))
+        col_margin_total = (len(col_items) - 1) * margin
+        col_avail_h = max(50, bh - col_margin_total)
+        col_w = max(35, int(round(col_avail_h / sum_inv)))
+        raw_widths.append(col_w)
+
+    avail_w = max(50, bw - (len(cols_data) - 1) * margin)
+    sum_raw_w = max(1, sum(raw_widths))
+    scale_x = min(1.4, max(0.6, float(avail_w) / float(sum_raw_w)))
+    final_widths = [max(35, int(round(w * scale_x))) for w in raw_widths]
+    diff_w = avail_w - sum(final_widths)
+    if final_widths:
+        final_widths[-1] = max(35, final_widths[-1] + diff_w)
+
+    out = []
+    cur_x = bx
+    for c_idx, col_items in enumerate(cols_data):
+        col_w = final_widths[c_idx]
+        col_margin_total = (len(col_items) - 1) * margin
+        col_avail_h = max(50, bh - col_margin_total)
+        sum_inv = max(0.1, sum(inv_aspects[i] for i in col_items))
+
+        item_heights = [max(35, int(round(col_avail_h * (inv_aspects[i] / sum_inv)))) for i in col_items]
+        h_diff = col_avail_h - sum(item_heights)
+        if item_heights:
+            item_heights[-1] = max(35, item_heights[-1] + h_diff)
+
+        cur_y = by
+        for r_idx, itm_idx in enumerate(col_items):
+            itm_h = item_heights[r_idx]
+            orig_idx = pairs[itm_idx][0]
+            out.append((orig_idx, cur_x, cur_y, col_w, itm_h))
+            cur_y += itm_h + margin
+        cur_x += col_w + margin
+    return out
+
+
 def calculate_spread_layout(
     item_paths,
     w=200,
@@ -566,6 +668,7 @@ def calculate_spread_layout(
     start_x=None,
     start_y=None,
     screen_geo=None,
+    **kwargs,
 ):
     """
     미디어 경로 목록과 스프레드 설정에 따라 각 위젯의 최적 (x, y, w, h) 좌표 목록을 반환.
@@ -596,7 +699,8 @@ def calculate_spread_layout(
     S_h = max(300, screen_geo.height())
 
     is_fullscreen_strategy = fit_strategy in (
-        "fullscreen_autofill", "mosaic_puzzle", "modular_tetris", "treemap_collage", "justified_rows"
+        "fullscreen_autofill", "mosaic_puzzle", "modular_tetris", "treemap_collage",
+        "justified_rows", "justified_columns"
     )
 
     if is_fullscreen_strategy:
@@ -972,109 +1076,22 @@ def calculate_spread_layout(
 
     elif fit_strategy == "justified_rows":
         # 📏 가로 줄 맞춤 (단정한 앨범형, 행 단위 균등 분배)
-        aspects = []
-        for p in item_paths:
+        pairs = []
+        for i, p in enumerate(item_paths):
             sz = get_media_native_size(p) if p else None
             asp = (sz[0] / max(1, sz[1])) if (sz and len(sz) == 2 and sz[0] > 0 and sz[1] > 0) else 1.0
-            aspects.append(max(0.3, min(3.0, asp)))
-
-        total_aspect = max(0.1, sum(aspects))
-        # 화면 가로·세로 전체를 100% 채우기 위한 수학적 최적 행 수 산출
-        ideal_rows = max(1, int(round(math.sqrt((float(S_h) * total_aspect) / float(S_w)))))
-        k_rows = min(count, ideal_rows)
-
-        # 동적 계획법(DP)을 사용해 행별 비율 총합을 완벽하게 균등화 (마지막 행 폭발 방지)
-        rows_data = _linear_partition_indices(aspects, k_rows)
-
-        raw_heights = []
-        for r_idx, row_items in enumerate(rows_data):
-            sum_asp = max(0.1, sum(aspects[i] for i in row_items))
-            row_margin_total = (len(row_items) - 1) * margin
-            row_avail_w = S_w - row_margin_total
-            row_h = max(35, int(round(row_avail_w / sum_asp)))
-            raw_heights.append(row_h)
-
-        # 화면 전체 가용 높이에 정확히 채우기 위한 세로 스케일링
-        avail_h = max(100, S_h - (len(rows_data) - 1) * margin)
-        sum_raw_h = max(1, sum(raw_heights))
-        scale_y = min(1.4, max(0.6, float(avail_h) / float(sum_raw_h)))
-        final_heights = [max(35, int(round(h * scale_y))) for h in raw_heights]
-        diff = avail_h - sum(final_heights)
-        if final_heights:
-            final_heights[-1] = max(35, final_heights[-1] + diff)
-
-        cur_y = start_y
-        for r_idx, row_items in enumerate(rows_data):
-            row_h = final_heights[r_idx]
-            row_margin_total = (len(row_items) - 1) * margin
-            row_avail_w = S_w - row_margin_total
-            sum_asp = max(0.1, sum(aspects[i] for i in row_items))
-
-            # 각 아이템의 너비를 가용 가로 폭에 맞춰 비례 분배 (우측 끝 위젯 팽창/왜곡 원천 방지)
-            item_widths = [max(35, int(round(row_avail_w * (aspects[i] / sum_asp)))) for i in row_items]
-            w_diff = row_avail_w - sum(item_widths)
-            if item_widths:
-                item_widths[-1] = max(35, item_widths[-1] + w_diff)
-
-            cur_x = start_x
-            for c_idx, itm in enumerate(row_items):
-                itm_w = item_widths[c_idx]
-                positions[itm] = (cur_x, cur_y, itm_w, row_h)
-                cur_x += itm_w + margin
-            cur_y += row_h + margin
+            pairs.append((i, asp))
+        for orig_i, x, y, iw, ih in _sub_layout_justified_rows(pairs, (start_x, start_y, S_w, S_h), margin):
+            positions[orig_i] = (x, y, iw, ih)
     elif fit_strategy == "justified_columns":
         # 📐 세로 줄 맞춤 (열 단위 정돈, 세로 짤 돋보임)
-        inv_aspects = []
-        for p in item_paths:
+        pairs = []
+        for i, p in enumerate(item_paths):
             sz = get_media_native_size(p) if p else None
             asp = (sz[0] / max(1, sz[1])) if (sz and len(sz) == 2 and sz[0] > 0 and sz[1] > 0) else 1.0
-            inv_asp = 1.0 / max(0.2, asp)
-            inv_aspects.append(max(0.3, min(3.0, inv_asp)))
-
-        total_inv_aspect = max(0.1, sum(inv_aspects))
-        # 화면 가로·세로 전체를 100% 채우기 위한 수학적 최적 열(Column) 수 산출
-        ideal_cols = max(1, int(round(math.sqrt((float(S_w) * total_inv_aspect) / float(S_h)))))
-        k_cols = min(count, ideal_cols)
-
-        # 동적 계획법(DP)을 사용해 열별 세로 비율 총합을 완벽하게 균등화
-        cols_data = _linear_partition_indices(inv_aspects, k_cols)
-
-        raw_widths = []
-        for c_idx, col_items in enumerate(cols_data):
-            sum_inv = max(0.1, sum(inv_aspects[i] for i in col_items))
-            col_margin_total = (len(col_items) - 1) * margin
-            col_avail_h = S_h - col_margin_total
-            col_w = max(35, int(round(col_avail_h / sum_inv)))
-            raw_widths.append(col_w)
-
-        # 화면 전체 가용 너비에 정확히 채우기 위한 가로 스케일링
-        avail_w = max(100, S_w - (len(cols_data) - 1) * margin)
-        sum_raw_w = max(1, sum(raw_widths))
-        scale_x = min(1.4, max(0.6, float(avail_w) / float(sum_raw_w)))
-        final_widths = [max(35, int(round(w * scale_x))) for w in raw_widths]
-        diff_w = avail_w - sum(final_widths)
-        if final_widths:
-            final_widths[-1] = max(35, final_widths[-1] + diff_w)
-
-        cur_x = start_x
-        for c_idx, col_items in enumerate(cols_data):
-            col_w = final_widths[c_idx]
-            col_margin_total = (len(col_items) - 1) * margin
-            col_avail_h = S_h - col_margin_total
-            sum_inv = max(0.1, sum(inv_aspects[i] for i in col_items))
-
-            # 각 아이템의 높이를 가용 세로 높이에 맞춰 비례 분배 (하단 빈틈 방지)
-            item_heights = [max(35, int(round(col_avail_h * (inv_aspects[i] / sum_inv)))) for i in col_items]
-            h_diff = col_avail_h - sum(item_heights)
-            if item_heights:
-                item_heights[-1] = max(35, item_heights[-1] + h_diff)
-
-            cur_y = start_y
-            for r_idx, itm in enumerate(col_items):
-                itm_h = item_heights[r_idx]
-                positions[itm] = (cur_x, cur_y, col_w, itm_h)
-                cur_y += itm_h + margin
-            cur_x += col_w + margin
+            pairs.append((i, asp))
+        for orig_i, x, y, iw, ih in _sub_layout_justified_cols(pairs, (start_x, start_y, S_w, S_h), margin):
+            positions[orig_i] = (x, y, iw, ih)
     else:
         # 고정 격자 (crop_fill, fit_inside)
         for idx in range(count):

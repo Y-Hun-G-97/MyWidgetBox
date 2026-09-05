@@ -5649,7 +5649,7 @@ class MasterController(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("위젯 컨트롤러")
+        self.setWindowTitle("MyWidgetBox v6.0 - 위젯 컨트롤러")
         self._fast_startup_mode = bool(self._fast_startup_enabled())
         self.app_icon = self._resolve_app_icon()
         from mywidgetbox_core import apply_windows_dark_title_bar, render_vector_icon
@@ -8373,7 +8373,10 @@ class MasterController(QMainWindow):
         for idx, item_path in enumerate(item_paths):
             item_name = os.path.basename(item_path)
             pos_x, pos_y, item_w, item_h = positions[idx]
-            media_fit_mode = 1 if fit_strategy in ("auto_aspect", "fullscreen_autofill", "grid_span", "crop_fill", "modular_tetris", "treemap_collage", "justified_rows") else 0
+            media_fit_mode = 1 if fit_strategy in (
+                "auto_aspect", "fullscreen_autofill", "grid_span", "crop_fill",
+                "modular_tetris", "treemap_collage", "justified_rows", "justified_columns"
+            ) else 0
 
             if idx == 0 and target_widget:
                 target_widget.profile_name = item_name

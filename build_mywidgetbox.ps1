@@ -80,4 +80,19 @@ if (Test-Path -LiteralPath $assetsSourcePath) {
     Write-Host "[build] copied assets: $distAssetsPath"
 }
 
+$guideTxtSource = Join-Path $root "README.txt"
+$distGuideTxt = Join-Path $root "dist\MyWidgetBox\README.txt"
+if (Test-Path -LiteralPath $guideTxtSource) {
+    Copy-Item -LiteralPath $guideTxtSource -Destination $distGuideTxt -Force
+    Write-Host "[build] copied guide text: $distGuideTxt"
+}
+
+Write-Host "[build] creating distribution zip package..."
+$zipPath = Join-Path $root "dist\MyWidgetBox_v6.0.zip"
+if (Test-Path -LiteralPath $zipPath) {
+    Remove-Item -LiteralPath $zipPath -Force
+}
+Compress-Archive -Path (Join-Path $targetDist "*") -DestinationPath $zipPath -Force
+Write-Host "[build] created release zip: $zipPath"
+
 Write-Host "[build] done: $exePath"
