@@ -153,6 +153,7 @@ class GuideDialog(QDialog):
         self.nav_list.setObjectName("guideNav")
 
         chapters = [
+            ("💡 자주 찾는 핵심 사용법", "chapter_0"),
             ("📁 세트 & 위젯 기본 구조", "chapter_1"),
             ("⊞ 스프레드 (폴더 일괄 배치)", "chapter_2"),
             ("🎮 바로가기 (명조/게임 연동)", "chapter_3"),
@@ -174,6 +175,7 @@ class GuideDialog(QDialog):
         content_pane_layout.setSpacing(12)
 
         self.stack = QStackedWidget()
+        self._build_chapter_0()
         self._build_chapter_1()
         self._build_chapter_2()
         self._build_chapter_3()
@@ -265,11 +267,118 @@ class GuideDialog(QDialog):
         blayout.addWidget(c_lbl)
         return box
 
-    # ---------------- 챕터 1: 세트 & 위젯 기본 구조 ----------------
+    # ---------------- 챕터 1: 자주 찾는 핵심 사용법 (초간편 Q&A) ----------------
+    def _build_chapter_0(self):
+        page, layout = self._create_scrollable_page()
+
+        title = QLabel("1. 💡 자주 찾는 핵심 사용법 (초간편 Q&A)")
+        title.setObjectName("guideMainTitle")
+        sub = QLabel("설명서를 길게 읽지 않아도, 사용자들이 가장 많이 원하는 5가지 핵심 동작을 30초 만에 따라 하실 수 있습니다.")
+        sub.setObjectName("guideSubTitle")
+        sub.setWordWrap(True)
+        layout.addWidget(title)
+        layout.addWidget(sub)
+
+        # Q1: 배경화면처럼 쓰기
+        card1 = QFrame()
+        card1.setObjectName("guideCard")
+        clayout1 = QVBoxLayout(card1)
+        clayout1.setSpacing(6)
+        q1 = QLabel("🖥️ Q1. 위젯을 움직이지 않는 바탕화면 배경처럼 쓰고 싶어요")
+        q1.setObjectName("guideSectionTitle")
+        a1 = QLabel("""
+1) <b>화면 가득 채우기</b>: 위젯 위에서 마우스 우클릭 ➔ <b>[ 화면 크기에 맞춤 ]</b>을 누르면 모니터 전체에 꽉 찹니다.<br>
+2) <b>바탕화면 배경 레이어로 내리기</b>: 위젯 위에서 <code>Alt + 마우스 휠 아래</code>로 굴리면 <b>[바탕화면 배경]</b> 레이어로 이동하여 아이콘 뒤로 쏙 들어갑니다.<br>
+3) <b>클릭 간섭 없애기</b>: 위젯 위에서 <code>Alt + 마우스 좌클릭</code>을 누르면 <b>[위치 및 클릭 잠금]</b>이 활성화되어 마우스가 위젯을 투과하므로 바탕화면 아이콘을 마음껏 쓸 수 있습니다.
+        """)
+        a1.setObjectName("guideBodyText")
+        a1.setWordWrap(True)
+        clayout1.addWidget(q1)
+        clayout1.addWidget(a1)
+        layout.addWidget(card1)
+
+        # Q2: 슬라이드쇼
+        card2 = QFrame()
+        card2.setObjectName("guideCard")
+        clayout2 = QVBoxLayout(card2)
+        clayout2.setSpacing(6)
+        q2 = QLabel("🎞️ Q2. 위젯 하나에서 여러 사진/영상이 슬라이드로 바뀌게 하고 싶어요")
+        q2.setObjectName("guideSectionTitle")
+        a2 = QLabel("""
+1) <b>슬라이드 위젯 생성</b>: 상단 <b>[ 새로운 위젯 추가 ]</b> ➔ <b>[ 폴더 열기 ]</b> ➔ 팝업에서 <b>[ 단일 위젯 (슬라이드쇼) ]</b>를 선택합니다.<br>
+2) <b>전환 시간 & 효과 설정</b>: 위젯 우클릭 ➔ <b>[ 상세 설정 ]</b> ➔ <b>[미디어 & 재생]</b> 탭에서 <b>슬라이드 전환 시간(초)</b>과 부드러운 <b>듀얼 페이드</b> 전환 효과를 원하는 대로 설정할 수 있습니다.
+        """)
+        a2.setObjectName("guideBodyText")
+        a2.setWordWrap(True)
+        clayout2.addWidget(q2)
+        clayout2.addWidget(a2)
+        layout.addWidget(card2)
+
+        # Q3: 스프레드 일괄 펼치기
+        card3 = QFrame()
+        card3.setObjectName("guideCard")
+        clayout3 = QVBoxLayout(card3)
+        clayout3.setSpacing(6)
+        q3 = QLabel("⊞ Q3. 폴더 안의 수많은 미디어를 화면에 한 번에 쫘악 펼치고 싶어요")
+        q3.setObjectName("guideSectionTitle")
+        a3 = QLabel("""
+1) <b>스프레드 전개</b>: 상단 <b>[ 새로운 위젯 추가 ]</b> ➔ <b>[ 폴더 열기 ]</b> ➔ 팝업에서 <b>[ ⊞ 스프레드 방식 ]</b>을 선택합니다.<br>
+2) <b>원하는 정렬 선택</b>:<br>
+   • <b>🧩 빈칸 자동 채우기</b>: 각 미디어의 원본 비율을 100% 보존하며 빈자리에 순서대로 쏙쏙 채웁니다. (권장)<br>
+   • <b>📏 가로 줄 맞춤</b>: 가로 줄마다 높이를 균일하게 맞춰 잡지나 앨범처럼 반듯하게 채웁니다. (와이드 짤 최적)<br>
+   • <b>📐 세로 줄 맞춤</b>: 세로 열마다 너비를 균일하게 맞춰 세로 일러스트가 시원하게 돋보입니다. (세로 짤 최적)<br>
+3) <b>[ 위젯 생성 ]</b>을 누르면 화면 전체에 모니터 해상도에 최적화된 콜라주로 자동 배치됩니다.
+        """)
+        a3.setObjectName("guideBodyText")
+        a3.setWordWrap(True)
+        clayout3.addWidget(q3)
+        clayout3.addWidget(a3)
+        layout.addWidget(card3)
+
+        # Q4: 게임/프로그램 연동 바로가기
+        card4 = QFrame()
+        card4.setObjectName("guideCard")
+        clayout4 = QVBoxLayout(card4)
+        clayout4.setSpacing(6)
+        q4 = QLabel("🎮 Q4. 위젯을 누르면 게임(명조/스팀)이나 프로그램/웹사이트가 바로 켜지게 하고 싶어요")
+        q4.setObjectName("guideSectionTitle")
+        a4 = QLabel("""
+1) <b>실행 파일 연동</b>: 위젯 우클릭 ➔ <b>[ 상세 설정 ]</b> ➔ <b>[연동 & 시스템]</b> 탭 ➔ <b>[ 실행 파일 ]</b> 버튼을 누릅니다.<br>
+2) <b>대상 선택</b>: 실행하려는 게임/프로그램(<code>.exe</code>), 바탕화면 바로가기(<code>.lnk</code>), 스팀/웹사이트 바로가기(<code>.url</code>)를 선택합니다.<br>
+3) <b>원클릭 실행 & 포커싱</b>: 위젯을 클릭하면 해당 프로그램/게임이 즉시 실행되며, 이미 켜져 있다면 작업 창을 화면 맨 앞으로 즉시 띄워줍니다.
+        """)
+        a4.setObjectName("guideBodyText")
+        a4.setWordWrap(True)
+        clayout4.addWidget(q4)
+        clayout4.addWidget(a4)
+        layout.addWidget(card4)
+
+        # Q5: GPU 절전 및 성능 보호
+        card5 = QFrame()
+        card5.setObjectName("guideCard")
+        clayout5 = QVBoxLayout(card5)
+        clayout5.setSpacing(6)
+        q5 = QLabel("⚡ Q5. 게임하거나 다른 작업할 때 렉 안 걸리게 위젯을 자동으로 멈추고 싶어요")
+        q5.setObjectName("guideSectionTitle")
+        a5 = QLabel("""
+1) <b>성능 보호 켜기</b>: 위젯 컨트롤러 창 상단 우측의 <b>[ GPU ]</b> 버튼을 클릭하여 활성화해 두면 끝입니다.<br>
+2) <b>스마트 자동 감지</b>: 고사양 3D 게임 플레이, 작업 창 최대화(작업관리자, 웹 브라우저 등), 전체화면 앱 실행 시 백그라운드 위젯의 디코딩과 애니메이션이 자동으로 일시 정지되어 불필요한 GPU/CPU 리소스 소모를 방지하고 쾌적한 PC 성능을 유지합니다.
+        """)
+        a5.setObjectName("guideBodyText")
+        a5.setWordWrap(True)
+        clayout5.addWidget(q5)
+        clayout5.addWidget(a5)
+        layout.addWidget(card5)
+
+        layout.addWidget(self._create_tip_box("원클릭 복원 팁", "위젯 위치를 잘못 건드렸거나 정렬이 꼬였을 때는 컨트롤러 창에서 <b>[ 세트 적용 ]</b> 버튼을 다시 누르면 세트에 저장되어 있던 원래 위치와 상태로 즉시 깨끗하게 복원됩니다."))
+        layout.addStretch(1)
+        self.stack.addWidget(page)
+
+    # ---------------- 챕터 2: 세트 & 위젯 기본 구조 ----------------
     def _build_chapter_1(self):
         page, layout = self._create_scrollable_page()
 
-        title = QLabel("1. 세트 & 위젯 기본 구조")
+        title = QLabel("2. 세트 & 위젯 기본 구조")
         title.setObjectName("guideMainTitle")
         sub = QLabel("MyWidgetBox의 세트(부모)와 위젯(자식) 계층 구조 및 기본 조작법을 알아봅니다.")
         sub.setObjectName("guideSubTitle")
@@ -312,11 +421,11 @@ class GuideDialog(QDialog):
         layout.addStretch(1)
         self.stack.addWidget(page)
 
-    # ---------------- 챕터 2: 스프레드 (폴더 일괄 배치) ----------------
+    # ---------------- 챕터 3: 스프레드 (폴더 일괄 배치) ----------------
     def _build_chapter_2(self):
         page, layout = self._create_scrollable_page()
 
-        title = QLabel("2. 스프레드 (폴더 일괄 배치)")
+        title = QLabel("3. 스프레드 (폴더 일괄 배치)")
         title.setObjectName("guideMainTitle")
         sub = QLabel("폴더 안의 수많은 이미지/GIF들을 클릭 한 번으로 바둑판식으로 화면에 자동 정렬합니다.")
         sub.setObjectName("guideSubTitle")
@@ -365,11 +474,11 @@ class GuideDialog(QDialog):
         layout.addStretch(1)
         self.stack.addWidget(page)
 
-    # ---------------- 챕터 3: 바로가기 연동 (명조/게임 실행) ----------------
+    # ---------------- 챕터 4: 바로가기 연동 (명조/게임 실행) ----------------
     def _build_chapter_3(self):
         page, layout = self._create_scrollable_page()
 
-        title = QLabel("3. 바로가기 연동 (게임/프로그램 실행)")
+        title = QLabel("4. 바로가기 연동 (게임/프로그램 실행)")
         title.setObjectName("guideMainTitle")
         sub = QLabel("바탕화면 위젯을 클릭했을 때 명조, 스팀, 디스코드 등 원하는 게임이나 프로그램을 즉시 실행합니다.")
         sub.setObjectName("guideSubTitle")
@@ -404,11 +513,11 @@ class GuideDialog(QDialog):
         layout.addStretch(1)
         self.stack.addWidget(page)
 
-    # ---------------- 챕터 4: 일괄 조작 & 임시 그룹 ----------------
+    # ---------------- 챕터 5: 일괄 조작 & 임시 그룹 ----------------
     def _build_chapter_4(self):
         page, layout = self._create_scrollable_page()
 
-        title = QLabel("4. 일괄 조작 & 임시 그룹")
+        title = QLabel("5. 일괄 조작 & 임시 그룹 관리")
         title.setObjectName("guideMainTitle")
         sub = QLabel("여러 위젯을 동시에 체크하여 한 번에 실행/정지/설정/삭제하고, 바탕화면에서 함께 이동합니다.")
         sub.setObjectName("guideSubTitle")
@@ -451,11 +560,11 @@ class GuideDialog(QDialog):
         layout.addStretch(1)
         self.stack.addWidget(page)
 
-    # ---------------- 챕터 5: 상세 설정 & 단축키 안내 ----------------
+    # ---------------- 챕터 6: 상세 설정 & 단축키 안내 ----------------
     def _build_chapter_5(self):
         page, layout = self._create_scrollable_page()
 
-        title = QLabel("5. 상세 설정 & 단축키 안내")
+        title = QLabel("6. 상세 설정 & 유용한 단축키 안내")
         title.setObjectName("guideMainTitle")
         sub = QLabel("알아두면 유용한 단축키와 고급 기능들을 한눈에 확인하세요.")
         sub.setObjectName("guideSubTitle")
@@ -493,9 +602,9 @@ class GuideDialog(QDialog):
         body3.setObjectName("guideBodyText")
         body3.setWordWrap(True)
 
-        sec4 = QLabel("⚡ GPU 성능 보호 & 창 최대화/전체화면 자동 감지")
+        sec4 = QLabel("⚡ 스마트 GPU 절전 & 성능 보호")
         sec4.setObjectName("guideSectionTitle")
-        body4 = QLabel("상단 우측의 <b>[ GPU ]</b> 버튼에서 성능 보호를 켜면 고사양 게임, 창 최대화(브라우저, 작업관리자 등), 듀얼 모니터 및 Lossless Scaling(LSFG) 환경에서도 작업 창 뒤로 위젯이 가려졌을 때 애니메이션/영상 디코딩을 자동으로 일시 정지하여 <b>GPU 점유율 0%</b>로 완벽하게 성능을 보존합니다.")
+        body4 = QLabel("상단 우측의 <b>[ GPU ]</b> 버튼에서 성능 보호를 켜면 고사양 게임, 창 최대화(브라우저, 작업관리자 등), 듀얼 모니터 및 Lossless Scaling(LSFG) 환경에서도 작업 창 뒤로 위젯이 가려졌을 때 애니메이션/영상 디코딩을 자동으로 일시 정지하여 <b>불필요한 GPU/CPU 리소스 소모를 방지</b>하고 쾌적한 작업 환경을 보존합니다.")
         body4.setObjectName("guideBodyText")
         body4.setWordWrap(True)
 

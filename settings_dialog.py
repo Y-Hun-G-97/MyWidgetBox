@@ -2435,12 +2435,8 @@ QDialog#settingsDialog {
         system_form.addRow("포커싱 대상:", self.focus_binding_label)
         system_form.addRow("", self._focus_bind_row_widget)
 
-        _add_section_header(system_form, "오디오 및 성능 보호")
+        _add_section_header(system_form, "오디오")
         system_form.addRow("음소거:", self.mute_checkbox)
-        self.gpu_guard_info_lbl = QLabel("전체화면 및 GPU 과부하 시 미디어 일시정지는\n위젯 컨트롤러(상단 GPU 버튼)에서 전체 위젯에 통합 적용됩니다.")
-        self.gpu_guard_info_lbl.setStyleSheet("color: #7d96b8; font-size: 11px; line-height: 1.3;")
-        self.gpu_guard_info_lbl.setWordWrap(True)
-        system_form.addRow("성능 보호:", self.gpu_guard_info_lbl)
 
         _add_section_header(system_form, "저장 공간 관리")
         system_form.addRow("영상 캐시:", self.video_cache_usage_label)
@@ -3133,7 +3129,7 @@ QDialog#settingsDialog {
         self._set_folder_help_panel_visible(False)
 
     def select_exec(self):
-        path, _ = QFileDialog.getOpenFileName(self, "파일 선택", "", "실행 파일 (*.exe *.lnk);;모든 파일 (*)")
+        path, _ = QFileDialog.getOpenFileName(self, "파일 선택", "", "실행 파일 및 바로가기 (*.exe *.lnk *.url);;모든 파일 (*)")
         if path: self.exec_path = path; self.exec_label.setText(os.path.basename(path))
 
     def _refresh_focus_binding_label(self):
