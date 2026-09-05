@@ -42,10 +42,10 @@ def startup_shortcut_icon_path(exe_path):
         return ""
     exe_dir = os.path.dirname(exe)
     exe_name = os.path.splitext(os.path.basename(exe))[0]
-    icon_names = ["icon.ico"]
+    icon_names = []
     if exe_name:
         icon_names.append(f"{exe_name}.ico")
-    icon_names.extend(["MyWidgetBox.ico", "MyCanvas.ico"])
+    icon_names.extend(["MyWidgetBox.ico", "icon.ico", "MyCanvas.ico"])
     seen = set()
     for name in icon_names:
         candidate = os.path.join(exe_dir, name)
