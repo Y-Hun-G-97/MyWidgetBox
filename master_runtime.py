@@ -292,14 +292,15 @@ exit 0
 
 
 def _remove_legacy_startup_shortcut(controller, exe_path=""):
-    shortcut_path = startup_shortcut_path(controller, exe_path=exe_path or frozen_executable_path())
-    if not shortcut_path:
-        return
-    try:
-        if os.path.isfile(shortcut_path):
-            os.remove(shortcut_path)
-    except Exception:
-        pass
+    startup_dir = windows_startup_folder_path()
+    if startup_dir:
+        for name in ("MyWidgetBox.lnk", "MyCanvas.lnk"):
+            p = os.path.join(startup_dir, name)
+            try:
+                if os.path.isfile(p):
+                    os.remove(p)
+            except Exception:
+                pass
 
 
 def ensure_windows_startup_shortcut(controller, force=False):
@@ -319,6 +320,10 @@ def ensure_windows_startup_shortcut(controller, force=False):
     script = f"""
 $ErrorActionPreference = 'Stop'
 Import-Module ScheduledTasks -ErrorAction Stop
+$legacyTask = Get-ScheduledTask -TaskName 'MyCanvas Auto Start' -ErrorAction SilentlyContinue
+if ($null -ne $legacyTask) {{
+    Unregister-ScheduledTask -TaskName 'MyCanvas Auto Start' -Confirm:$false | Out-Null
+}}
 $action = New-ScheduledTaskAction -Execute '{_ps_single_quote(exe_path)}' -WorkingDirectory '{_ps_single_quote(working_dir)}'
 $trigger = New-ScheduledTaskTrigger -AtLogOn
 try {{
@@ -365,9 +370,11 @@ def remove_windows_startup_shortcut(controller):
     script = f"""
 $ErrorActionPreference = 'Stop'
 Import-Module ScheduledTasks -ErrorAction Stop
-$task = Get-ScheduledTask -TaskName '{_ps_single_quote(task_name)}' -ErrorAction SilentlyContinue
-if ($null -ne $task) {{
-    Unregister-ScheduledTask -TaskName '{_ps_single_quote(task_name)}' -Confirm:$false | Out-Null
+foreach ($tname in @('{_ps_single_quote(task_name)}', 'MyCanvas Auto Start')) {{
+    $task = Get-ScheduledTask -TaskName $tname -ErrorAction SilentlyContinue
+    if ($null -ne $task) {{
+        Unregister-ScheduledTask -TaskName $tname -Confirm:$false | Out-Null
+    }}
 }}
 exit 0
 """
