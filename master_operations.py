@@ -554,22 +554,54 @@ def _linear_partition_indices(seq, k):
     return ranges
 
 
-def _sub_layout_justified_rows(pairs, bounds, margin=10):
+def _sub_layout_justified_rows(pairs, bounds, margin=10, weights=None):
     import math
     bx, by, bw, bh = bounds
     count = len(pairs)
     if count == 0:
         return []
     aspects = [max(0.2, min(5.0, float(p[1]))) for p in pairs]
-    total_aspect = max(0.1, sum(aspects))
-    ideal_rows = max(1, int(round(math.sqrt((float(bh) * total_aspect) / float(bw)))))
+    if weights and len(weights) == count:
+        seq = [aspects[i] * max(0.4, min(2.5, float(weights[i]))) for i in range(count)]
+    else:
+        seq = aspects
+    total_seq = max(0.1, sum(seq))
+    ideal_rows = max(1, int(round(math.sqrt((float(bh) * total_seq) / float(bw)))))
     k_rows = min(count, ideal_rows)
-    rows_data = _linear_partition_indices(aspects, k_rows)
+    rows_data = _linear_partition_indices(seq, k_rows)
 
+    is_small = [
+        bool(weights and len(weights) == count and weights[i] <= 0.78 and 0.6 <= aspects[i] <= 1.6)
+        for i in range(count)
+    ]
+
+    out = []
     raw_heights = []
+    row_units = []
+
     for row_items in rows_data:
-        sum_asp = max(0.1, sum(aspects[i] for i in row_items))
-        row_margin_total = (len(row_items) - 1) * margin
+        units = []
+        i = 0
+        while i < len(row_items):
+            itm = row_items[i]
+            if is_small[itm] and i + 1 < len(row_items) and is_small[row_items[i + 1]]:
+                units.append(('stack2', itm, row_items[i + 1]))
+                i += 2
+            else:
+                units.append(('single', itm))
+                i += 1
+        row_units.append(units)
+
+        sum_asp = 0.0
+        for u in units:
+            if u[0] == 'single':
+                sum_asp += aspects[u[1]]
+            else:
+                asp_sub = max(aspects[u[1]], aspects[u[2]]) * 0.5
+                sum_asp += asp_sub
+        sum_asp = max(0.1, sum_asp)
+
+        row_margin_total = (len(units) - 1) * margin
         row_avail_w = max(50, bw - row_margin_total)
         row_h = max(35, int(round(row_avail_w / sum_asp)))
         raw_heights.append(row_h)
@@ -582,45 +614,95 @@ def _sub_layout_justified_rows(pairs, bounds, margin=10):
     if final_heights:
         final_heights[-1] = max(35, final_heights[-1] + diff)
 
-    out = []
     cur_y = by
-    for r_idx, row_items in enumerate(rows_data):
+    for r_idx, units in enumerate(row_units):
         row_h = final_heights[r_idx]
-        row_margin_total = (len(row_items) - 1) * margin
+        row_margin_total = (len(units) - 1) * margin
         row_avail_w = max(50, bw - row_margin_total)
-        sum_asp = max(0.1, sum(aspects[i] for i in row_items))
 
-        item_widths = [max(35, int(round(row_avail_w * (aspects[i] / sum_asp)))) for i in row_items]
-        w_diff = row_avail_w - sum(item_widths)
-        if item_widths:
-            item_widths[-1] = max(35, item_widths[-1] + w_diff)
+        sum_asp = 0.0
+        unit_asps = []
+        for u in units:
+            if u[0] == 'single':
+                a = aspects[u[1]]
+            else:
+                a = max(aspects[u[1]], aspects[u[2]]) * 0.5
+            unit_asps.append(a)
+            sum_asp += a
+        sum_asp = max(0.1, sum_asp)
+
+        unit_widths = [max(35, int(round(row_avail_w * (a / sum_asp)))) for a in unit_asps]
+        w_diff = row_avail_w - sum(unit_widths)
+        if unit_widths:
+            unit_widths[-1] = max(35, unit_widths[-1] + w_diff)
 
         cur_x = bx
-        for c_idx, itm_idx in enumerate(row_items):
-            itm_w = item_widths[c_idx]
-            orig_idx = pairs[itm_idx][0]
-            out.append((orig_idx, cur_x, cur_y, itm_w, row_h))
-            cur_x += itm_w + margin
+        for u_idx, u in enumerate(units):
+            uw = unit_widths[u_idx]
+            if u[0] == 'single':
+                orig_idx = pairs[u[1]][0]
+                out.append((orig_idx, cur_x, cur_y, uw, row_h))
+            else:
+                orig_1 = pairs[u[1]][0]
+                orig_2 = pairs[u[2]][0]
+                sub_h = max(35, (row_h - margin) // 2)
+                sub_h2 = max(35, row_h - sub_h - margin)
+                out.append((orig_1, cur_x, cur_y, uw, sub_h))
+                out.append((orig_2, cur_x, cur_y + sub_h + margin, uw, sub_h2))
+            cur_x += uw + margin
         cur_y += row_h + margin
     return out
 
 
-def _sub_layout_justified_cols(pairs, bounds, margin=10):
+def _sub_layout_justified_cols(pairs, bounds, margin=10, weights=None):
     import math
     bx, by, bw, bh = bounds
     count = len(pairs)
     if count == 0:
         return []
-    inv_aspects = [1.0 / max(0.2, min(5.0, float(p[1]))) for p in pairs]
-    total_inv = max(0.1, sum(inv_aspects))
+    aspects = [max(0.2, min(5.0, float(p[1]))) for p in pairs]
+    inv_aspects = [1.0 / a for a in aspects]
+    if weights and len(weights) == count:
+        seq = [inv_aspects[i] * max(0.4, min(2.5, float(weights[i]))) for i in range(count)]
+    else:
+        seq = inv_aspects
+    total_inv = max(0.1, sum(seq))
     ideal_cols = max(1, int(round(math.sqrt((float(bw) * total_inv) / float(bh)))))
     k_cols = min(count, ideal_cols)
-    cols_data = _linear_partition_indices(inv_aspects, k_cols)
+    cols_data = _linear_partition_indices(seq, k_cols)
 
+    is_small = [
+        bool(weights and len(weights) == count and weights[i] <= 0.78 and 0.6 <= aspects[i] <= 1.6)
+        for i in range(count)
+    ]
+
+    out = []
     raw_widths = []
+    col_units = []
+
     for col_items in cols_data:
-        sum_inv = max(0.1, sum(inv_aspects[i] for i in col_items))
-        col_margin_total = (len(col_items) - 1) * margin
+        units = []
+        i = 0
+        while i < len(col_items):
+            itm = col_items[i]
+            if is_small[itm] and i + 1 < len(col_items) and is_small[col_items[i + 1]]:
+                units.append(('pair_h', itm, col_items[i + 1]))
+                i += 2
+            else:
+                units.append(('single', itm))
+                i += 1
+        col_units.append(units)
+
+        sum_inv = 0.0
+        for u in units:
+            if u[0] == 'single':
+                sum_inv += inv_aspects[u[1]]
+            else:
+                inv_sub = max(inv_aspects[u[1]], inv_aspects[u[2]]) * 0.5
+                sum_inv += inv_sub
+        sum_inv = max(0.1, sum_inv)
+
+        col_margin_total = (len(units) - 1) * margin
         col_avail_h = max(50, bh - col_margin_total)
         col_w = max(35, int(round(col_avail_h / sum_inv)))
         raw_widths.append(col_w)
@@ -633,25 +715,47 @@ def _sub_layout_justified_cols(pairs, bounds, margin=10):
     if final_widths:
         final_widths[-1] = max(35, final_widths[-1] + diff_w)
 
-    out = []
     cur_x = bx
-    for c_idx, col_items in enumerate(cols_data):
+    for c_idx, units in enumerate(col_units):
         col_w = final_widths[c_idx]
-        col_margin_total = (len(col_items) - 1) * margin
+        col_margin_total = (len(units) - 1) * margin
         col_avail_h = max(50, bh - col_margin_total)
-        sum_inv = max(0.1, sum(inv_aspects[i] for i in col_items))
 
-        item_heights = [max(35, int(round(col_avail_h * (inv_aspects[i] / sum_inv)))) for i in col_items]
-        h_diff = col_avail_h - sum(item_heights)
-        if item_heights:
-            item_heights[-1] = max(35, item_heights[-1] + h_diff)
+        sum_inv = 0.0
+        unit_invs = []
+        for u in units:
+            if u[0] == 'single':
+                inv = inv_aspects[u[1]]
+            else:
+                inv = max(inv_aspects[u[1]], inv_aspects[u[2]]) * 0.5
+            unit_invs.append(inv)
+            sum_inv += inv
+        sum_inv = max(0.1, sum_inv)
+
+        unit_heights = [max(35, int(round(col_avail_h * (inv / sum_inv)))) for inv in unit_invs]
+        h_diff = col_avail_h - sum(unit_heights)
+        if unit_heights:
+            unit_heights[-1] = max(35, unit_heights[-1] + h_diff)
 
         cur_y = by
-        for r_idx, itm_idx in enumerate(col_items):
-            itm_h = item_heights[r_idx]
-            orig_idx = pairs[itm_idx][0]
-            out.append((orig_idx, cur_x, cur_y, col_w, itm_h))
-            cur_y += itm_h + margin
+        for u_idx, u in enumerate(units):
+            uh = unit_heights[u_idx]
+            if u[0] == 'single':
+                orig_idx = pairs[u[1]][0]
+                if is_small[u[1]]:
+                    sub_w = max(35, (col_w - margin) // 2)
+                    sub_h = max(35, int(round(sub_w * inv_aspects[u[1]])))
+                    out.append((orig_idx, cur_x + (col_w - sub_w) // 2, cur_y + (uh - sub_h) // 2, sub_w, sub_h))
+                else:
+                    out.append((orig_idx, cur_x, cur_y, col_w, uh))
+            else:
+                orig_1 = pairs[u[1]][0]
+                orig_2 = pairs[u[2]][0]
+                sub_w = max(35, (col_w - margin) // 2)
+                sub_w2 = max(35, col_w - sub_w - margin)
+                out.append((orig_1, cur_x, cur_y, sub_w, uh))
+                out.append((orig_2, cur_x + sub_w + margin, cur_y, sub_w2, uh))
+            cur_y += uh + margin
         cur_x += col_w + margin
     return out
 
@@ -690,6 +794,32 @@ def calculate_spread_layout(
     cols = max(1, int(cols))
     rows = max(1, int(rows))
     margin = max(0, int(margin))
+    smart_weight = bool(kwargs.get("smart_weight", True))
+
+    item_sizes = [get_media_native_size(p) if p else None for p in item_paths]
+    areas = []
+    for sz in item_sizes:
+        if sz and len(sz) == 2 and sz[0] > 0 and sz[1] > 0:
+            areas.append(float(sz[0] * sz[1]))
+        else:
+            areas.append(2000000.0)
+
+    sorted_areas = sorted(areas) if areas else []
+    median_area = max(100000.0, sorted_areas[len(sorted_areas) // 2]) if sorted_areas else 2000000.0
+
+    if smart_weight:
+        weights = [max(0.5, min(2.2, (a / median_area) ** 0.28)) for a in areas]
+    else:
+        weights = [1.0] * count
+
+    is_small = [
+        bool(
+            smart_weight
+            and weights[i] <= 0.78
+            and 0.65 <= (item_sizes[i][0] / max(1, item_sizes[i][1]) if item_sizes[i] and item_sizes[i][1] > 0 else 1.0) <= 1.45
+        )
+        for i in range(count)
+    ]
 
     if not screen_geo:
         screen = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
@@ -721,8 +851,8 @@ def calculate_spread_layout(
     if fit_strategy == "auto_aspect":
         # 1. 아이템별 원본 비율 크기 및 열 Span 산출
         item_data = []
-        for p in item_paths:
-            sz = get_media_native_size(p) if p else None
+        for i, p in enumerate(item_paths):
+            sz = item_sizes[i]
             if sz and len(sz) == 2 and sz[0] > 0 and sz[1] > 0:
                 aspect = sz[0] / max(1, sz[1])
             else:
@@ -756,6 +886,43 @@ def calculate_spread_layout(
             else:
                 best_c = min(range(cols), key=lambda c: col_heights[c])
                 min_h = col_heights[best_c]
+
+            # 스마트 가중치: 작은 SD/치비 짤 2개가 있으면 열 너비 안에 좌우 나란히(하프 블록) 배치
+            if smart_weight and any(is_small):
+                small_candidates = [i for i in unplaced if is_small[i]]
+                if len(small_candidates) >= 2:
+                    i1 = small_candidates[0]
+                    i2 = small_candidates[1]
+                    unplaced.remove(i1)
+                    unplaced.remove(i2)
+
+                    sub_w = max(35, (w - margin) // 2)
+                    sub_w2 = max(35, w - sub_w - margin)
+                    asp1 = item_sizes[i1][0] / max(1, item_sizes[i1][1]) if item_sizes[i1] and item_sizes[i1][1] > 0 else 1.0
+                    asp2 = item_sizes[i2][0] / max(1, item_sizes[i2][1]) if item_sizes[i2] and item_sizes[i2][1] > 0 else 1.0
+                    sub_h1 = max(35, int(round(sub_w / asp1)))
+                    sub_h2 = max(35, int(round(sub_w2 / asp2)))
+                    block_h = max(sub_h1, sub_h2)
+
+                    if "bottom" in spread_direction:
+                        pos_y1 = col_heights[best_c] - sub_h1
+                        pos_y2 = col_heights[best_c] - sub_h2
+                        col_heights[best_c] -= (block_h + margin)
+                    else:
+                        pos_y1 = col_heights[best_c]
+                        pos_y2 = col_heights[best_c]
+                        col_heights[best_c] += (block_h + margin)
+
+                    if "right" in spread_direction:
+                        pos_x1 = start_x - (best_c * (w + margin)) - sub_w
+                        pos_x2 = pos_x1 - sub_w2 - margin
+                    else:
+                        pos_x1 = col_xs[best_c]
+                        pos_x2 = col_xs[best_c] + sub_w + margin
+
+                    positions[i1] = (pos_x1, pos_y1, sub_w, sub_h1)
+                    positions[i2] = (pos_x2, pos_y2, sub_w2, sub_h2)
+                    continue
 
             chosen_idx = None
             wide_candidates = [i for i in unplaced if item_data[i][0] == 2]
@@ -802,13 +969,23 @@ def calculate_spread_layout(
                 unplaced.remove(chosen_idx)
                 span_cols, item_w, item_h = item_data[chosen_idx]
 
+                if smart_weight and is_small and is_small[chosen_idx]:
+                    sub_w = max(35, (w - margin) // 2)
+                    asp = item_sizes[chosen_idx][0] / max(1, item_sizes[chosen_idx][1]) if item_sizes[chosen_idx] and item_sizes[chosen_idx][1] > 0 else 1.0
+                    sub_h = max(35, int(round(sub_w / asp)))
+                    item_w = sub_w
+                    item_h = sub_h
+                    offset_x = (w - item_w) // 2
+                else:
+                    offset_x = 0
+
                 if span_cols == 1:
                     if "bottom" in spread_direction:
-                        pos_x = start_x - (best_c * (w + margin)) - item_w if "right" in spread_direction else col_xs[best_c]
+                        pos_x = (start_x - (best_c * (w + margin)) - w + offset_x) if "right" in spread_direction else (col_xs[best_c] + offset_x)
                         pos_y = col_heights[best_c] - item_h
                         col_heights[best_c] -= (item_h + margin)
                     else:
-                        pos_x = start_x - (best_c * (w + margin)) - item_w if "right" in spread_direction else col_xs[best_c]
+                        pos_x = (start_x - (best_c * (w + margin)) - w + offset_x) if "right" in spread_direction else (col_xs[best_c] + offset_x)
                         pos_y = col_heights[best_c]
                         col_heights[best_c] += (item_h + margin)
                 else:
@@ -914,7 +1091,7 @@ def calculate_spread_layout(
             # 여유 칸이 있으면 원본 비율에 맞춰 2x2 대형 대표 짤, 2x1 가로 짤, 1x2 세로 짤로 승격
             if diff >= 3 and count >= 8 and R >= 2 and C >= 2:
                 for idx in range(count):
-                    if diff >= 3 and 0.85 <= aspects[idx] <= 1.15:
+                    if diff >= 3 and 0.85 <= aspects[idx] <= 1.15 and (not smart_weight or weights[idx] >= 0.9):
                         item_spans[idx] = [2, 2]
                         diff -= 3
                     if diff < 3:
@@ -1078,19 +1255,19 @@ def calculate_spread_layout(
         # 📏 가로 줄 맞춤 (단정한 앨범형, 행 단위 균등 분배)
         pairs = []
         for i, p in enumerate(item_paths):
-            sz = get_media_native_size(p) if p else None
+            sz = item_sizes[i]
             asp = (sz[0] / max(1, sz[1])) if (sz and len(sz) == 2 and sz[0] > 0 and sz[1] > 0) else 1.0
             pairs.append((i, asp))
-        for orig_i, x, y, iw, ih in _sub_layout_justified_rows(pairs, (start_x, start_y, S_w, S_h), margin):
+        for orig_i, x, y, iw, ih in _sub_layout_justified_rows(pairs, (start_x, start_y, S_w, S_h), margin, weights=weights if smart_weight else None):
             positions[orig_i] = (x, y, iw, ih)
     elif fit_strategy == "justified_columns":
         # 📐 세로 줄 맞춤 (열 단위 정돈, 세로 짤 돋보임)
         pairs = []
         for i, p in enumerate(item_paths):
-            sz = get_media_native_size(p) if p else None
+            sz = item_sizes[i]
             asp = (sz[0] / max(1, sz[1])) if (sz and len(sz) == 2 and sz[0] > 0 and sz[1] > 0) else 1.0
             pairs.append((i, asp))
-        for orig_i, x, y, iw, ih in _sub_layout_justified_cols(pairs, (start_x, start_y, S_w, S_h), margin):
+        for orig_i, x, y, iw, ih in _sub_layout_justified_cols(pairs, (start_x, start_y, S_w, S_h), margin, weights=weights if smart_weight else None):
             positions[orig_i] = (x, y, iw, ih)
     else:
         # 고정 격자 (crop_fill, fit_inside)

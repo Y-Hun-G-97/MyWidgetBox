@@ -6339,6 +6339,13 @@ class MasterController(QMainWindow):
         self._fullscreen_paused = False
         self.pause_on_fullscreen_cb.setChecked(self._pause_on_fullscreen)
         self.pause_on_fullscreen_cb.toggled.connect(self._on_pause_on_fullscreen_toggled)
+        self._session_notification_registered = False
+        self._power_notification_handle = None
+        self._session_locked = False
+        self._power_suspended = False
+        self._display_off = False
+        self._system_power_paused = False
+        self._register_system_power_and_session_events()
         self._gpu_guard_timer = QTimer(self)
         self._gpu_guard_timer.setInterval(1000)
         self._gpu_guard_timer.timeout.connect(self._poll_gpu_guard)
@@ -8008,6 +8015,7 @@ class MasterController(QMainWindow):
                 margin=spread_relayout_cfg["margin"],
                 fit_strategy=spread_relayout_cfg["fit_strategy"],
                 spread_direction=spread_relayout_cfg["direction"],
+                smart_weight=bool(spread_relayout_cfg.get("smart_weight", True)),
             )
 
             for idx, pid in enumerate(checked_ids):
@@ -8368,6 +8376,7 @@ class MasterController(QMainWindow):
             spread_direction=spread_direction,
             start_x=start_x,
             start_y=start_y,
+            smart_weight=bool(spread_config.get("smart_weight", True)),
         )
 
         for idx, item_path in enumerate(item_paths):
@@ -8704,8 +8713,148 @@ class MasterController(QMainWindow):
             pass
         return False
 
+    def _register_system_power_and_session_events(self):
+        try:
+            hwnd = int(self.winId())
+            if hwnd:
+                wtsapi32 = ctypes.windll.wtsapi32
+                wtsapi32.WTSRegisterSessionNotification.argtypes = [wintypes.HWND, wintypes.DWORD]
+                wtsapi32.WTSRegisterSessionNotification.restype = wintypes.BOOL
+                # NOTIFY_FOR_THIS_SESSION = 0
+                if wtsapi32.WTSRegisterSessionNotification(hwnd, 0):
+                    self._session_notification_registered = True
+        except Exception:
+            pass
+
+        try:
+            hwnd = int(self.winId())
+            if hwnd:
+                class _GUID(ctypes.Structure):
+                    _fields_ = [
+                        ("Data1", wintypes.DWORD),
+                        ("Data2", wintypes.WORD),
+                        ("Data3", wintypes.WORD),
+                        ("Data4", ctypes.c_ubyte * 8),
+                    ]
+                # GUID_CONSOLE_DISPLAY_STATE: 6fe69556-704a-47a0-8f24-c28d936fda47
+                guid = _GUID(
+                    0x6FE69556, 0x704A, 0x47A0,
+                    (ctypes.c_ubyte * 8)(0x8F, 0x24, 0xC2, 0x8D, 0x93, 0x6F, 0xDA, 0x47)
+                )
+                user32 = ctypes.windll.user32
+                user32.RegisterPowerSettingNotification.argtypes = [wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD]
+                user32.RegisterPowerSettingNotification.restype = wintypes.HANDLE
+                # DEVICE_NOTIFY_WINDOW_HANDLE = 0
+                h_notify = user32.RegisterPowerSettingNotification(hwnd, ctypes.byref(guid), 0)
+                if h_notify:
+                    self._power_notification_handle = h_notify
+        except Exception:
+            pass
+
+    def _unregister_system_power_and_session_events(self):
+        try:
+            if getattr(self, "_session_notification_registered", False):
+                hwnd = int(self.winId())
+                ctypes.windll.wtsapi32.WTSUnRegisterSessionNotification.argtypes = [wintypes.HWND]
+                ctypes.windll.wtsapi32.WTSUnRegisterSessionNotification.restype = wintypes.BOOL
+                ctypes.windll.wtsapi32.WTSUnRegisterSessionNotification(hwnd)
+                self._session_notification_registered = False
+        except Exception:
+            pass
+        try:
+            h_notify = getattr(self, "_power_notification_handle", None)
+            if h_notify:
+                ctypes.windll.user32.UnregisterPowerSettingNotification.argtypes = [wintypes.HANDLE]
+                ctypes.windll.user32.UnregisterPowerSettingNotification.restype = wintypes.BOOL
+                ctypes.windll.user32.UnregisterPowerSettingNotification(h_notify)
+                self._power_notification_handle = None
+        except Exception:
+            pass
+
+    def _apply_system_power_state_pause(self):
+        should_pause = bool(
+            getattr(self, "_session_locked", False)
+            or getattr(self, "_power_suspended", False)
+            or getattr(self, "_display_off", False)
+        )
+        reason = ""
+        if getattr(self, "_session_locked", False):
+            reason = "화면 잠금"
+        elif getattr(self, "_power_suspended", False):
+            reason = "절전 모드"
+        elif getattr(self, "_display_off", False):
+            reason = "모니터 꺼짐"
+
+        self._system_power_paused = should_pause
+        for w in self.widgets.values():
+            if isinstance(w, DesktopWidget) or hasattr(w, "set_performance_paused"):
+                if should_pause:
+                    w.set_performance_paused(True, reason=reason, force=True)
+                else:
+                    if not (getattr(self, "_fullscreen_paused", False) or getattr(self, "_gpu_guard_paused", False)):
+                        w.set_performance_paused(False, reason="화면 복귀")
+
+    def nativeEvent(self, eventType, message):
+        try:
+            msg = wintypes.MSG.from_address(int(message))
+            u_msg = int(msg.message)
+
+            # WM_WTSSESSION_CHANGE (0x02B1)
+            if u_msg == 0x02B1:
+                wparam = int(msg.wParam)
+                # WTS_SESSION_LOCK = 0x7
+                if wparam == 0x7:
+                    self._session_locked = True
+                    self._apply_system_power_state_pause()
+                # WTS_SESSION_UNLOCK = 0x8
+                elif wparam == 0x8:
+                    self._session_locked = False
+                    self._apply_system_power_state_pause()
+
+            # WM_POWERBROADCAST (0x0218)
+            elif u_msg == 0x0218:
+                wparam = int(msg.wParam)
+                # PBT_APMSUSPEND = 0x4
+                if wparam == 0x4:
+                    self._power_suspended = True
+                    self._apply_system_power_state_pause()
+                # PBT_APMRESUMESUSPEND = 0x7, PBT_APMRESUMEAUTOMATIC = 0x12
+                elif wparam in (0x7, 0x12):
+                    self._power_suspended = False
+                    self._apply_system_power_state_pause()
+                # PBT_POWERSETTINGCHANGE = 0x8013
+                elif wparam == 0x8013:
+                    try:
+                        class _PBS(ctypes.Structure):
+                            _fields_ = [
+                                ("Data1", wintypes.DWORD),
+                                ("Data2", wintypes.WORD),
+                                ("Data3", wintypes.WORD),
+                                ("Data4", ctypes.c_ubyte * 8),
+                                ("DataLength", wintypes.DWORD),
+                                ("Data", ctypes.c_ubyte * 1),
+                            ]
+                        pbs = _PBS.from_address(int(msg.lParam))
+                        if pbs.Data1 == 0x6FE69556:
+                            disp_state = int(pbs.Data[0])
+                            if disp_state == 0:
+                                self._display_off = True
+                            elif disp_state in (1, 2):
+                                self._display_off = False
+                            self._apply_system_power_state_pause()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        return False, 0
+
     def _poll_gpu_guard(self):
-        # 0. 다른 앱 전체화면 일시정지 감지 및 처리
+        # 0. 시스템 절전/화면 잠금/모니터 OFF 상태 시 미디어 정지 유지
+        if getattr(self, "_system_power_paused", False):
+            return
+
+        # 0-1. 다른 앱 전체화면 일시정지 감지 및 처리
         if getattr(self, "_pause_on_fullscreen", True):
             is_fs = self._is_other_app_fullscreen()
             if is_fs:
@@ -8911,6 +9060,7 @@ class MasterController(QMainWindow):
         super().closeEvent(event)
 
     def quit_app(self):
+        self._unregister_system_power_and_session_events()
         if hasattr(self, "_alt_click_poll_timer"):
             self._alt_click_poll_timer.stop()
         if hasattr(self, "_gpu_guard_timer"):

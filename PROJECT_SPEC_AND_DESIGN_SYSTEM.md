@@ -211,15 +211,21 @@ MyWidgetBox는 Windows 데스크톱 환경을 위한 고성능 멀티미디어 �
   - **시작프로그램 등록 이중화 fallback**: Windows 계정 권한/버전별 작업 스케줄러 등록 실패 시 시작프로그램 폴더(`.lnk`) 자동 fallback 보장.
 
 ### 3.6 백그라운드 성능 보호 및 배터리 절약 시스템
-1. **GPU 가드 (GPU Guard)**:
-   - 1초마다 Windows PDH 카운터로 전역 GPU 사용률을 폴링.
-   - 사용률이 `gpu_guard_high_pct`(기본 90%)를 초과하여 연속 N회 지속되면 등록된 위젯들의 재생을 일시정지.
-   - 사용률이 `gpu_guard_low_pct`(기본 70%) 이하로 안정화되면 자동 재생 재개.
-2. **다른 앱 전체화면 시 미디어 자동 일시정지 (Pause on Fullscreen)**:
+1. **유니버설 멀티 GPU 가드 (GPU Guard - NVML / ADL / PDH 삼중화)**:
+   - **NVIDIA**: NVML(`nvml.dll`) ASIC 카운터로 3D 코어뿐만 아니라 하드웨어 비디오 디코더(`NVDEC`) 사용률까지 실시간 통합 수집 (`max(3D, Video Decode)`).
+   - **AMD**: AMD ADL(`atiadlxx.dll` / `atiadlxy.dll`) 드라이버 라이브러리로 멀티 GPU 엔진 활성도를 직접 질의.
+   - **Intel / 기타**: Windows PDH 고속 카운터로 자동 fallback.
+   - 한국어 Windows 환경에서도 로케일 명칭 불일치 없이 0.001ms 미만의 제로 오버헤드로 정확한 수치를 획득.
+   - 사용률이 `gpu_guard_high_pct`를 초과하여 연속 N회 지속되면 등록된 위젯들의 재생을 일시정지하고, `gpu_guard_low_pct` 이하로 안정화되면 자동 재생 재개.
+2. **시스템 절전 / 화면 잠금 / 모니터 OFF 시 자동 미디어 정지 (Power & Session Saver)**:
+   - `Win+L`, 화면 보호기, 절전 전환 시 Windows 세션 잠금(`WTSRegisterSessionNotification`, `WTS_SESSION_LOCK`)을 감지하여 즉시 모든 위젯의 영상 및 GIF 디코딩/재생을 강제 일시정지(`set_performance_paused(True, force=True)`).
+   - 시스템 절전 진입(`WM_POWERBROADCAST`, `PBT_APMSUSPEND`) 및 모니터 전원 꺼짐(`GUID_CONSOLE_DISPLAY_STATE` == 0) 감지 시에도 즉각 미디어를 일시정지하여 VSync 유실로 인한 비디오 디코더 프리런(Free-run) 루프 및 GPU 점유율 급증을 원천 차단.
+   - 사용자가 로그인/잠금 해제(`WTS_SESSION_UNLOCK`), 절전 복귀, 모니터 전원 복구 시 부드럽게 원래 재생 상태로 자동 복원.
+3. **다른 앱 전체화면 시 미디어 자동 일시정지 (Pause on Fullscreen)**:
    - 사용자가 게임, 전체화면 영상(유튜브 F11, OTT 등), 전체화면 작업 창을 띄워 **바탕화면이 완전히 가려졌을 때** 이를 실시간 감지하여 모든 위젯의 GIF 애니메이션 타이머와 비디오 재생을 즉시 일시정지.
    - 전체화면 앱이 최소화되거나 창 모드로 복귀하면 즉시 원래 재생 상태로 자동 복구.
    - 상단 GPU 설정 패널의 `[✓] 다른 앱 전체화면 시 미디어 일시정지` 토글로 언제든 켜고 끌 수 있음.
-3. **Windows 시작프로그램 등록**:
+4. **Windows 시작프로그램 등록**:
    - 일반 단순 레지스트리가 아닌 Windows 작업 스케줄러(`ScheduledTask`) API를 활용하여 관리자 권한 충돌 없이 로그인 시 자동 실행 보장.
 
 ---

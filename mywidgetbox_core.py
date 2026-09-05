@@ -1,3 +1,6 @@
+import ctypes
+from ctypes import wintypes
+import os
 import time
 
 try:
@@ -51,18 +54,135 @@ def _as_bool(value, default=False):
     return default
 
 
+class _NvmlUtilization(ctypes.Structure):
+    _fields_ = [
+        ("gpu", ctypes.c_uint),
+        ("memory", ctypes.c_uint),
+    ]
+
+
+class _ADLPMActivity(ctypes.Structure):
+    _fields_ = [
+        ("iSize", ctypes.c_int),
+        ("iEngineClock", ctypes.c_int),
+        ("iMemoryClock", ctypes.c_int),
+        ("iVddc", ctypes.c_int),
+        ("iActivityPercent", ctypes.c_int),
+        ("iCurrentPerformanceLevel", ctypes.c_int),
+        ("iCurrentBusSpeed", ctypes.c_int),
+        ("iCurrentBusLanes", ctypes.c_int),
+        ("iMaximumBusLanes", ctypes.c_int),
+        ("iReserved", ctypes.c_int),
+    ]
+
+
+_ADL_MALLOC_CALLBACK = ctypes.WINFUNCTYPE(ctypes.c_void_p, ctypes.c_size_t)
+
+
+def _adl_alloc(size):
+    try:
+        return ctypes.windll.kernel32.LocalAlloc(0x0040, size)
+    except Exception:
+        return None
+
+
+_adl_alloc_cb = _ADL_MALLOC_CALLBACK(_adl_alloc)
+
+
 class GpuUsageSampler:
-    """Windows GPU utilization sampler via PDH counters."""
+    """Universal Windows GPU utilization sampler (NVIDIA NVML 3D+NVDEC, AMD ADL, and Windows PDH)."""
 
     def __init__(self):
+        self._nvml = None
+        self._nvml_handles = []
+        self._adl = None
+        self._adl_num_adapters = 0
         self._query = None
         self._counters = []
         self._last_refresh = 0.0
-        self._enabled = win32pdh is not None
-        if self._enabled:
+        self._init_backend()
+
+    @property
+    def _backend(self):
+        backends = []
+        if self._nvml:
+            backends.append("nvml")
+        if self._adl:
+            backends.append("adl")
+        if self._counters:
+            backends.append("pdh")
+        return "+".join(backends) if backends else "none"
+
+    def _init_backend(self):
+        # 1. NVIDIA NVML (Hardware ASIC 3D + Video Decoder, multi-GPU)
+        try:
+            nvml_path = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "nvml.dll")
+            nvml = ctypes.CDLL(nvml_path) if os.path.isfile(nvml_path) else ctypes.CDLL("nvml.dll")
+            if nvml.nvmlInit_v2() == 0:
+                dev_count = ctypes.c_uint(0)
+                handles = []
+                if nvml.nvmlDeviceGetCount_v2(ctypes.byref(dev_count)) == 0 and dev_count.value > 0:
+                    for i in range(dev_count.value):
+                        h = ctypes.c_void_p()
+                        if nvml.nvmlDeviceGetHandleByIndex_v2(i, ctypes.byref(h)) == 0:
+                            handles.append(h)
+                if handles:
+                    self._nvml = nvml
+                    self._nvml_handles = handles
+                else:
+                    try:
+                        nvml.nvmlShutdown()
+                    except Exception:
+                        pass
+        except Exception:
+            self._nvml = None
+            self._nvml_handles = []
+
+        # 2. AMD ADL (AMD Radeon Display Library, multi-GPU)
+        try:
+            adl_dll = None
+            for name in ("atiadlxx.dll", "atiadlxy.dll"):
+                p = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", name)
+                if os.path.isfile(p):
+                    try:
+                        adl_dll = ctypes.CDLL(p)
+                        break
+                    except Exception:
+                        continue
+            if adl_dll is not None and hasattr(adl_dll, "ADL_Main_Control_Create"):
+                if adl_dll.ADL_Main_Control_Create(_adl_alloc_cb, 1) == 0:
+                    num_adapters = ctypes.c_int(0)
+                    try:
+                        if hasattr(adl_dll, "ADL_Adapter_NumberOfAdapters_Get"):
+                            adl_dll.ADL_Adapter_NumberOfAdapters_Get(ctypes.byref(num_adapters))
+                    except Exception:
+                        pass
+                    self._adl = adl_dll
+                    self._adl_num_adapters = max(1, int(num_adapters.value or 1))
+        except Exception:
+            self._adl = None
+            self._adl_num_adapters = 0
+
+        # 3. Windows PDH fallback (Generic / Intel iGPU / other GPUs)
+        if not self._nvml and not self._adl and win32pdh is not None:
             self._rebuild_query()
 
     def close(self):
+        if self._nvml is not None:
+            try:
+                self._nvml.nvmlShutdown()
+            except Exception:
+                pass
+            self._nvml = None
+            self._nvml_handles = []
+        if self._adl is not None:
+            try:
+                if hasattr(self._adl, "ADL_Main_Control_Destroy"):
+                    self._adl.ADL_Main_Control_Destroy()
+            except Exception:
+                pass
+            self._adl = None
+            self._adl_num_adapters = 0
         if self._query is not None and win32pdh is not None:
             try:
                 win32pdh.CloseQuery(self._query)
@@ -72,8 +192,14 @@ class GpuUsageSampler:
         self._counters = []
 
     def _rebuild_query(self):
-        self.close()
-        if not self._enabled or win32pdh is None:
+        if self._query is not None and win32pdh is not None:
+            try:
+                win32pdh.CloseQuery(self._query)
+            except Exception:
+                pass
+        self._query = None
+        self._counters = []
+        if win32pdh is None:
             return
         try:
             query = win32pdh.OpenQuery()
@@ -100,41 +226,91 @@ class GpuUsageSampler:
                 except Exception:
                     pass
         except Exception:
-            self.close()
+            if self._query is not None and win32pdh is not None:
+                try:
+                    win32pdh.CloseQuery(self._query)
+                except Exception:
+                    pass
+            self._query = None
+            self._counters = []
 
     def sample_pct(self):
-        if not self._enabled or win32pdh is None:
-            return None
-        if self._query is None or not self._counters:
-            self._rebuild_query()
-            if self._query is None or not self._counters:
-                return None
-        now = time.monotonic()
-        if now - self._last_refresh > 10.0:
-            self._rebuild_query()
-            if self._query is None or not self._counters:
-                return None
+        max_reported = 0.0
+        sampled_any = False
 
-        try:
-            win32pdh.CollectQueryData(self._query)
-        except Exception:
-            self._rebuild_query()
-            return None
-
-        total = 0.0
-        valid_count = 0
-        for counter in self._counters:
+        # 1. Sample NVIDIA (3D Core + Video Decoder NVDEC across all NVIDIA GPUs)
+        if self._nvml is not None and self._nvml_handles:
             try:
-                v = win32pdh.GetFormattedCounterValue(counter, win32pdh.PDH_FMT_DOUBLE)[1]
-                if v > 0.0:
-                    total += float(v)
-                valid_count += 1
+                for handle in self._nvml_handles:
+                    util = _NvmlUtilization()
+                    gpu_3d = 0.0
+                    gpu_dec = 0.0
+                    if self._nvml.nvmlDeviceGetUtilizationRates(handle, ctypes.byref(util)) == 0:
+                        gpu_3d = float(util.gpu)
+                    dec_val = ctypes.c_uint(0)
+                    sp = ctypes.c_uint(0)
+                    try:
+                        if self._nvml.nvmlDeviceGetDecoderUtilization(handle, ctypes.byref(dec_val), ctypes.byref(sp)) == 0:
+                            gpu_dec = float(dec_val.value)
+                    except Exception:
+                        pass
+                    node_val = max(gpu_3d, gpu_dec)
+                    if node_val > max_reported:
+                        max_reported = node_val
+                    sampled_any = True
             except Exception:
-                continue
-        if valid_count == 0:
-            return None
-        # Normalize to a familiar 0..100 scale.
-        return max(0.0, min(100.0, total))
+                pass
+
+        # 2. Sample AMD (Activity % across all AMD GPUs)
+        if self._adl is not None:
+            try:
+                act = _ADLPMActivity()
+                act.iSize = ctypes.sizeof(_ADLPMActivity)
+                for i in range(max(1, self._adl_num_adapters)):
+                    if hasattr(self._adl, "ADL_Overdrive5_CurrentActivity_Get"):
+                        if self._adl.ADL_Overdrive5_CurrentActivity_Get(i, ctypes.byref(act)) == 0:
+                            p = float(act.iActivityPercent)
+                            if p > max_reported:
+                                max_reported = p
+                            sampled_any = True
+            except Exception:
+                pass
+
+        if sampled_any:
+            return max(0.0, min(100.0, max_reported))
+
+        # 3. Fallback: Windows PDH (Generic / Intel / other GPUs)
+        if win32pdh is not None:
+            if self._query is None or not self._counters:
+                self._rebuild_query()
+                if self._query is None or not self._counters:
+                    return None
+            now = time.monotonic()
+            if now - self._last_refresh > 10.0:
+                self._rebuild_query()
+                if self._query is None or not self._counters:
+                    return None
+
+            try:
+                win32pdh.CollectQueryData(self._query)
+            except Exception:
+                self._rebuild_query()
+                return None
+
+            total = 0.0
+            valid_count = 0
+            for counter in self._counters:
+                try:
+                    v = win32pdh.GetFormattedCounterValue(counter, win32pdh.PDH_FMT_DOUBLE)[1]
+                    if v > 0.0:
+                        total += float(v)
+                    valid_count += 1
+                except Exception:
+                    continue
+            if valid_count > 0:
+                return max(0.0, min(100.0, total))
+
+        return None
 
 
 def get_media_native_size(path):

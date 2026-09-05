@@ -873,6 +873,29 @@ class FolderSpreadDialog(QDialog):
         self.direction_combo.setCurrentIndex(0)
         grid_layout.addWidget(self.direction_combo, 6, 1, 1, 3)
 
+        self.smart_weight_cb = QCheckBox("해상도/크기 기반 스마트 가중치 (고화질 확대 / SD 미니화)")
+        self.smart_weight_cb.setChecked(True)
+        self.smart_weight_cb.setStyleSheet("""
+            QCheckBox {
+                color: #b7cceb;
+                font-size: 11px;
+                font-weight: 600;
+                spacing: 6px;
+            }
+            QCheckBox::indicator {
+                width: 16px;
+                height: 16px;
+                border-radius: 4px;
+                border: 1px solid #48648c;
+                background-color: #121c2b;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #4872d4;
+                border-color: #7397ea;
+            }
+        """)
+        self.smart_weight_cb.setToolTip("짤의 원본 해상도를 분석하여 큰 일러스트는 시원하게 확대하고, 작은 SD/치비/이모티콘은 아기자기하게 묶어 크기 불균형을 자동 조절합니다.")
+        grid_layout.addWidget(self.smart_weight_cb, 7, 0, 1, 4)
 
         layout.addWidget(grid_card)
 
@@ -1065,6 +1088,7 @@ class FolderSpreadDialog(QDialog):
             "bg_color_mode": bg_mode,
             "corner_mode": self.corner_combo.currentIndex() if hasattr(self, "corner_combo") else 0,
             "spread_direction": ["top-left", "top-right", "bottom-left", "bottom-right"][self.direction_combo.currentIndex()] if hasattr(self, "direction_combo") else "top-left",
+            "smart_weight": bool(self.smart_weight_cb.isChecked()) if hasattr(self, "smart_weight_cb") else True,
         }
         self.accept()
 
@@ -1996,6 +2020,30 @@ QDialog#settingsDialog {
             ])
             self.bulk_spread_dir_combo.setCurrentIndex(0)
             bso_layout.addWidget(self.bulk_spread_dir_combo, 4, 3)
+
+            self.bulk_spread_smart_weight_cb = QCheckBox("해상도/크기 기반 스마트 가중치 (고화질 확대 / SD 미니화)")
+            self.bulk_spread_smart_weight_cb.setChecked(True)
+            self.bulk_spread_smart_weight_cb.setStyleSheet("""
+                QCheckBox {
+                    color: #b7cceb;
+                    font-size: 11px;
+                    font-weight: 600;
+                    spacing: 6px;
+                }
+                QCheckBox::indicator {
+                    width: 16px;
+                    height: 16px;
+                    border-radius: 4px;
+                    border: 1px solid #48648c;
+                    background-color: #121c2b;
+                }
+                QCheckBox::indicator:checked {
+                    background-color: #4872d4;
+                    border-color: #7397ea;
+                }
+            """)
+            self.bulk_spread_smart_weight_cb.setToolTip("짤의 원본 해상도를 분석하여 큰 일러스트는 시원하게 확대하고, 작은 SD/치비는 아기자기하게 묶어 크기 불균형을 자동 조절합니다.")
+            bso_layout.addWidget(self.bulk_spread_smart_weight_cb, 5, 0, 1, 4)
 
             bs_layout.addWidget(self.bulk_spread_opts)
             self.bulk_spread_opts.setVisible(False)
@@ -3252,6 +3300,7 @@ QDialog#settingsDialog {
             "direction": dir_map.get(dir_idx, "top-left"),
             "w": int(self.bulk_spread_w_spin.value()),
             "h": int(self.bulk_spread_h_spin.value()),
+            "smart_weight": bool(self.bulk_spread_smart_weight_cb.isChecked()) if hasattr(self, "bulk_spread_smart_weight_cb") else True,
         }
 
 
