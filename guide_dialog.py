@@ -17,8 +17,8 @@ class GuideDialog(QDialog):
         self.setWindowTitle("MyWidgetBox v6.0 사용 설명서")
         self.setWindowIcon(render_vector_icon("help", "#528bf8", 32))
         apply_windows_dark_title_bar(self)
-        self.resize(860, 640)
-        self.setMinimumSize(780, 560)
+        self.resize(1020, 680)
+        self.setMinimumSize(920, 600)
 
         # Assets guide directory path
         base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -140,7 +140,7 @@ class GuideDialog(QDialog):
         # 좌측 사이드바 (목차)
         sidebar = QFrame()
         sidebar.setObjectName("guideSidebar")
-        sidebar.setFixedWidth(230)
+        sidebar.setFixedWidth(240)
         sidebar_layout = QVBoxLayout(sidebar)
         sidebar_layout.setContentsMargins(8, 14, 8, 14)
         sidebar_layout.setSpacing(10)
@@ -273,11 +273,36 @@ class GuideDialog(QDialog):
 
         title = QLabel("1. 💡 자주 찾는 핵심 사용법 (초간편 Q&A)")
         title.setObjectName("guideMainTitle")
-        sub = QLabel("설명서를 길게 읽지 않아도, 사용자들이 가장 많이 원하는 5가지 핵심 동작을 30초 만에 따라 하실 수 있습니다.")
+        sub = QLabel("설명서를 길게 읽지 않아도, 사용자들이 가장 많이 원하는 핵심 동작들을 30초 만에 따라 하실 수 있습니다.")
         sub.setObjectName("guideSubTitle")
         sub.setWordWrap(True)
         layout.addWidget(title)
         layout.addWidget(sub)
+
+        # 최우선 안내: 파일 & 폴더 드래그 앤 드롭
+        drop_card = QFrame()
+        drop_card.setObjectName("guideCard")
+        drop_card.setStyleSheet("""
+            QFrame#guideCard {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #1a2f4c, stop:1 #16263d);
+                border: 1.5px solid #528bf8;
+            }
+        """)
+        dlayout = QVBoxLayout(drop_card)
+        dlayout.setSpacing(6)
+        d_title = QLabel("🎯 제일 먼저 알아두면 좋은 꿀팁: 위젯에 파일이나 폴더를 그냥 끌어다 놓으세요 (Drag & Drop)!")
+        d_title.setStyleSheet("color: #70a5ff; font-size: 14px; font-weight: 800;")
+        d_body = QLabel("""
+메뉴를 찾아 헤맬 필요 없이, 탐색기나 바탕화면에서 파일이나 폴더를 위젯 위로 <b>마우스로 끌어다 놓으면(드롭)</b> 모든 작업이 즉시 해결됩니다!<br><br>
+• <b>이미지 / GIF / 동영상 파일 드롭</b>: 원하는 짤을 위젯 위로 툭 끌어다 놓으면 <b>즉시 해당 미디어로 교체</b>됩니다.<br>
+• <b>폴더 통째로 드롭</b>: 짤이 담긴 폴더를 위젯 위로 끌어다 놓으면 팝업이 뜨며 <b>[ ⊞ 스프레드 (화면 가득 자동 배치) ]</b> 또는 <b>[ 🎞️ 단일 위젯 (슬라이드쇼) ]</b>를 즉시 선택하여 전개할 수 있습니다.<br>
+• <b>게임 / 프로그램 바로가기 드롭</b>: 게임 실행 파일(<code>.exe</code>), 프로그램 바로가기(<code>.lnk</code>), 스팀/웹사이트 바로가기(<code>.url</code>)를 위젯 위로 떨어뜨리면 클릭 시 자동 실행되도록 즉시 연동됩니다.
+        """)
+        d_body.setObjectName("guideBodyText")
+        d_body.setWordWrap(True)
+        dlayout.addWidget(d_title)
+        dlayout.addWidget(d_body)
+        layout.addWidget(drop_card)
 
         # Q1: 배경화면처럼 쓰기
         card1 = QFrame()
