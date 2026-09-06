@@ -313,9 +313,13 @@ class GpuUsageSampler:
         return None
 
 
+_MEDIA_NATIVE_SIZE_CACHE = {}
+
+
 def get_media_native_size(path):
     """
     고속으로 이미지/GIF 및 동영상(MP4, MOV, MKV, WEBM 등)의 실제 픽셀 해상도 (width, height)를 반환합니다.
+    (메모리 캐시를 적용하여 반복 조회 시 0.000ms 즉각 반환)
     """
     if not path or not isinstance(path, str):
         return None
@@ -323,9 +327,20 @@ def get_media_native_size(path):
     if not os.path.isfile(path):
         return None
 
+    cache_key = None
+    try:
+        st = os.stat(path)
+        cache_key = (os.path.abspath(path), st.st_mtime, st.st_size)
+        cached_val = _MEDIA_NATIVE_SIZE_CACHE.get(cache_key)
+        if cached_val is not None:
+            return cached_val
+    except Exception:
+        cache_key = None
+
     ext = os.path.splitext(path)[1].lower()
     video_exts = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".wmv", ".flv", ".ts"}
 
+    res = None
     if ext in video_exts:
         try:
             import cv2
@@ -335,20 +350,21 @@ def get_media_native_size(path):
                 h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
                 cap.release()
                 if w > 0 and h > 0:
-                    return (w, h)
+                    res = (w, h)
         except Exception:
             pass
 
-    try:
-        from PyQt6.QtGui import QImageReader
-        reader = QImageReader(path)
-        sz = reader.size()
-        if sz.isValid() and sz.width() > 0 and sz.height() > 0:
-            return (sz.width(), sz.height())
-    except Exception:
-        pass
+    if res is None:
+        try:
+            from PyQt6.QtGui import QImageReader
+            reader = QImageReader(path)
+            sz = reader.size()
+            if sz.isValid() and sz.width() > 0 and sz.height() > 0:
+                res = (sz.width(), sz.height())
+        except Exception:
+            pass
 
-    if ext in video_exts:
+    if res is None and ext in video_exts:
         try:
             client = _get_win32com_client()
             if client is not None:
@@ -360,11 +376,15 @@ def get_media_native_size(path):
                     if val.isdigit() and int(val) > 0:
                         h_val = str(folder_obj.GetDetailsOf(file_obj, idx + 2) or "").strip()
                         if h_val.isdigit() and int(h_val) > 0:
-                            return (int(val), int(h_val))
+                            res = (int(val), int(h_val))
+                            break
         except Exception:
             pass
 
-    return None
+    if cache_key is not None and res is not None:
+        _MEDIA_NATIVE_SIZE_CACHE[cache_key] = res
+
+    return res
 
 
 def calc_smart_aspect_size(iw, ih, base_w=200, base_h=200, min_size=50, max_size=5000):

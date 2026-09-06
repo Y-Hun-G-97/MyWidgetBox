@@ -135,9 +135,9 @@ class FolderLayoutChoiceDialog(QDialog):
         self.accept()
 
 
-_IMAGE_EXTS = ('.png', '.jpg', '.jpeg', '.bmp', '.webp')
+_IMAGE_EXTS = ('.png', '.jpg', '.jpeg', '.bmp', '.webp', '.ico', '.tiff', '.tif', '.jfif')
 _GIF_EXTS = ('.gif',)
-_VIDEO_EXTS = ('.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v')
+_VIDEO_EXTS = ('.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v', '.wmv', '.flv', '.ts')
 
 
 def _classify_media(path):
@@ -151,6 +151,37 @@ def _classify_media(path):
     return "other"
 
 
+def _get_media_resolution_info(path):
+    from mywidgetbox_core import get_media_native_size
+    sz = get_media_native_size(path)
+    if sz and len(sz) == 2 and sz[0] > 0 and sz[1] > 0:
+        w, h = sz[0], sz[1]
+        if w > h * 1.05:
+            orient = "wide"
+            sym = "↔"
+            kr = "가로형"
+        elif h > w * 1.05:
+            orient = "tall"
+            sym = "↕"
+            kr = "세로형"
+        else:
+            orient = "square"
+            sym = "■"
+            kr = "정사각"
+        return {
+            "size": (w, h),
+            "orient": orient,
+            "tag": f"  ({w}×{h} {sym})",
+            "tip": f"파일: {path}\n해상도: {w} × {h} ({kr})\n종횡비: {w/max(1,h):.2f}:1",
+        }
+    return {
+        "size": None,
+        "orient": "unknown",
+        "tag": "",
+        "tip": path,
+    }
+
+
 class FolderSlideDialog(QDialog):
     def __init__(self, parent=None, folder_path="", media_paths=None, pre_selected_paths=None):
         super().__init__(parent)
@@ -159,8 +190,8 @@ class FolderSlideDialog(QDialog):
         self.setObjectName("folderSlideDialog")
         self.setWindowTitle("슬라이드 미디어 선택")
         self.setWindowIcon(render_vector_icon("media", "#528bf8", 32))
-        self.resize(560, 580)
-        self.setFixedWidth(560)
+        self.setMinimumSize(600, 520)
+        self.resize(650, 620)
         self.folder_path = str(folder_path or "").strip()
         self.media_paths = [str(p) for p in (media_paths or []) if p and os.path.isfile(p)]
         self.pre_selected_paths = list(pre_selected_paths) if pre_selected_paths is not None else None
@@ -168,11 +199,30 @@ class FolderSlideDialog(QDialog):
         self.result_paths = None
         self._current_filter = "all"
         self._filter_btns = {}
+        self._media_info = {}
 
+        # 60개까지는 즉시 동기 해석, 초과 시 백그라운드 QTimer로 부드럽게 점진 해석하여 랙 0% 보장
+        immediate_limit = 60
+        for i, path in enumerate(self.media_paths):
+            if i < immediate_limit:
+                self._media_info[path] = _get_media_resolution_info(path)
+            else:
+                self._media_info[path] = {
+                    "size": None,
+                    "orient": "unknown",
+                    "tag": "",
+                    "tip": path,
+                }
+        if len(self.media_paths) > immediate_limit:
+            self._pending_probe_indices = list(range(immediate_limit, len(self.media_paths)))
+            QTimer.singleShot(20, self._probe_next_chunk)
+
+        all_count = len(self.media_paths)
         img_count = sum(1 for p in self.media_paths if _classify_media(p) == "image")
         gif_count = sum(1 for p in self.media_paths if _classify_media(p) == "gif")
         vid_count = sum(1 for p in self.media_paths if _classify_media(p) == "video")
-        all_count = len(self.media_paths)
+        wide_count = sum(1 for p in self.media_paths if self._media_info.get(p, {}).get("orient") == "wide")
+        tall_count = sum(1 for p in self.media_paths if self._media_info.get(p, {}).get("orient") == "tall")
 
         self.setStyleSheet("""
             QDialog#folderSlideDialog {
@@ -276,7 +326,7 @@ class FolderSlideDialog(QDialog):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 18)
-        layout.setSpacing(12)
+        layout.setSpacing(10)
 
         header_row = QHBoxLayout()
         title_col = QVBoxLayout()
@@ -309,34 +359,66 @@ class FolderSlideDialog(QDialog):
             ("image", f"이미지 ({img_count})", img_count),
             ("gif", f"GIF ({gif_count})", gif_count),
             ("video", f"영상 ({vid_count})", vid_count),
+            ("wide", f"↔ 가로 ({wide_count})", wide_count),
+            ("tall", f"↕ 세로 ({tall_count})", tall_count),
         ]:
             btn = QPushButton(cat_name)
             btn.setProperty("kind", "filterBtn")
             btn.setProperty("active", "true" if cat_key == "all" else "false")
-            if cat_cnt == 0:
+            if cat_cnt == 0 and cat_key not in ("wide", "tall"):
                 btn.setEnabled(False)
             btn.clicked.connect(lambda _, k=cat_key: self._apply_filter(k))
             self._filter_btns[cat_key] = btn
             filter_row.addWidget(btn)
 
         filter_row.addStretch(1)
+        layout.addLayout(filter_row)
+
+        select_row = QHBoxLayout()
+        select_row.setSpacing(6)
+        select_label = QLabel("선택:")
+        select_label.setObjectName("sectionHeader")
+        select_row.addWidget(select_label)
+
         select_all_btn = QPushButton("전체 선택")
         select_all_btn.setObjectName("secondaryBtn")
+        select_all_btn.setToolTip("현재 표시된 모든 미디어를 선택합니다.")
+        select_all_btn.clicked.connect(lambda: self._set_filtered_checked(True))
+
+        select_wide_btn = QPushButton("↔ 가로짤만")
+        select_wide_btn.setObjectName("secondaryBtn")
+        select_wide_btn.setToolTip("가로형(W > H) 짤만 선택하고 세로/정사각 짤은 선택 해제합니다.")
+        select_wide_btn.clicked.connect(lambda: self._select_only_orientation("wide"))
+
+        select_tall_btn = QPushButton("↕ 세로짤만")
+        select_tall_btn.setObjectName("secondaryBtn")
+        select_tall_btn.setToolTip("세로형(H > W) 짤만 선택하고 가로/정사각 짤은 선택 해제합니다.")
+        select_tall_btn.clicked.connect(lambda: self._select_only_orientation("tall"))
+
         clear_btn = QPushButton("선택 해제")
         clear_btn.setObjectName("secondaryBtn")
-        filter_row.addWidget(select_all_btn)
-        filter_row.addWidget(clear_btn)
-        layout.addLayout(filter_row)
+        clear_btn.setToolTip("모든 미디어의 선택을 해제합니다.")
+        clear_btn.clicked.connect(lambda: self._set_filtered_checked(False))
+
+        select_row.addWidget(select_all_btn)
+        select_row.addWidget(select_wide_btn)
+        select_row.addWidget(select_tall_btn)
+        select_row.addWidget(clear_btn)
+        select_row.addStretch(1)
+        layout.addLayout(select_row)
 
         self.list_widget = QListWidget()
         self.list_widget.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         for path in self.media_paths:
             cat = _classify_media(path)
             prefix = "[IMG] " if cat == "image" else ("[GIF] " if cat == "gif" else "[VID] ")
-            item = QListWidgetItem(f"{prefix}{os.path.basename(path)}")
-            item.setToolTip(path)
+            info = self._media_info.get(path, {})
+            item = QListWidgetItem(f"{prefix}{os.path.basename(path)}{info.get('tag', '')}")
+            item.setToolTip(info.get("tip", path))
             item.setData(Qt.ItemDataRole.UserRole, path)
             item.setData(Qt.ItemDataRole.UserRole + 1, cat)
+            item.setData(Qt.ItemDataRole.UserRole + 2, info.get("orient", "unknown"))
+            item.setData(Qt.ItemDataRole.UserRole + 3, info.get("size"))
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             if self._pre_set is not None:
                 norm_p = os.path.normcase(os.path.normpath(path))
@@ -359,8 +441,6 @@ class FolderSlideDialog(QDialog):
         action_row.addWidget(apply_btn)
         layout.addLayout(action_row)
 
-        select_all_btn.clicked.connect(lambda: self._set_filtered_checked(True))
-        clear_btn.clicked.connect(lambda: self._set_filtered_checked(False))
         cancel_btn.clicked.connect(self.reject)
         apply_btn.clicked.connect(self._accept_if_valid)
 
@@ -369,6 +449,62 @@ class FolderSlideDialog(QDialog):
         self._refresh_status()
 
         QTimer.singleShot(0, lambda: apply_windows_dark_title_bar(self))
+
+    def _probe_next_chunk(self):
+        if not hasattr(self, "_pending_probe_indices") or not self._pending_probe_indices:
+            return
+        chunk = self._pending_probe_indices[:40]
+        self._pending_probe_indices = self._pending_probe_indices[40:]
+        for idx in chunk:
+            if idx < len(self.media_paths):
+                path = self.media_paths[idx]
+                info = _get_media_resolution_info(path)
+                self._media_info[path] = info
+                if idx < self.list_widget.count():
+                    item = self.list_widget.item(idx)
+                    cat = str(item.data(Qt.ItemDataRole.UserRole + 1) or "")
+                    prefix = "[IMG] " if cat == "image" else ("[GIF] " if cat == "gif" else "[VID] ")
+                    item.setText(f"{prefix}{os.path.basename(path)}{info['tag']}")
+                    item.setToolTip(info['tip'])
+                    item.setData(Qt.ItemDataRole.UserRole + 2, info['orient'])
+                    item.setData(Qt.ItemDataRole.UserRole + 3, info['size'])
+        self._update_filter_button_counts()
+        self._refresh_status()
+        if self._pending_probe_indices:
+            QTimer.singleShot(20, self._probe_next_chunk)
+
+    def _update_filter_button_counts(self):
+        all_count = len(self.media_paths)
+        img_count = sum(1 for p in self.media_paths if _classify_media(p) == "image")
+        gif_count = sum(1 for p in self.media_paths if _classify_media(p) == "gif")
+        vid_count = sum(1 for p in self.media_paths if _classify_media(p) == "video")
+        wide_count = sum(1 for p in self.media_paths if self._media_info.get(p, {}).get("orient") == "wide")
+        tall_count = sum(1 for p in self.media_paths if self._media_info.get(p, {}).get("orient") == "tall")
+
+        counts = {
+            "all": f"전체 ({all_count})",
+            "image": f"이미지 ({img_count})",
+            "gif": f"GIF ({gif_count})",
+            "video": f"영상 ({vid_count})",
+            "wide": f"↔ 가로 ({wide_count})",
+            "tall": f"↕ 세로 ({tall_count})",
+        }
+        for k, text in counts.items():
+            if k in self._filter_btns:
+                self._filter_btns[k].setText(text)
+                try:
+                    num = int(text.split("(")[1].split(")")[0])
+                    self._filter_btns[k].setEnabled(num > 0)
+                except Exception:
+                    pass
+
+    def _select_only_orientation(self, target_orient):
+        for idx in range(self.list_widget.count()):
+            item = self.list_widget.item(idx)
+            if not item.isHidden():
+                orient = item.data(Qt.ItemDataRole.UserRole + 2)
+                item.setCheckState(Qt.CheckState.Checked if orient == target_orient else Qt.CheckState.Unchecked)
+        self._refresh_status()
 
     def _open_folder_in_explorer(self):
         if self.folder_path and os.path.isdir(self.folder_path):
@@ -390,10 +526,15 @@ class FolderSlideDialog(QDialog):
         for idx in range(self.list_widget.count()):
             item = self.list_widget.item(idx)
             cat = str(item.data(Qt.ItemDataRole.UserRole + 1) or "")
-            if self._current_filter == "all" or cat == self._current_filter:
+            orient = str(item.data(Qt.ItemDataRole.UserRole + 2) or "")
+            if self._current_filter == "all":
                 item.setHidden(False)
+            elif self._current_filter in ("image", "gif", "video"):
+                item.setHidden(cat != self._current_filter)
+            elif self._current_filter in ("wide", "tall", "square"):
+                item.setHidden(orient != self._current_filter)
             else:
-                item.setHidden(True)
+                item.setHidden(False)
         self._refresh_status()
 
     def _set_filtered_checked(self, checked):
@@ -413,9 +554,18 @@ class FolderSlideDialog(QDialog):
         return [p for p in paths if p]
 
     def _refresh_status(self):
-        selected = len(self._checked_paths())
+        paths = self._checked_paths()
+        selected = len(paths)
         total = len(self.media_paths)
-        self.status_label.setText(f"선택 {selected}개 / 전체 {total}개")
+        wide_sel = sum(1 for p in paths if self._media_info.get(p, {}).get("orient") == "wide")
+        tall_sel = sum(1 for p in paths if self._media_info.get(p, {}).get("orient") == "tall")
+        parts = []
+        if wide_sel > 0:
+            parts.append(f"가로 {wide_sel}개")
+        if tall_sel > 0:
+            parts.append(f"세로 {tall_sel}개")
+        detail_str = f" [{', '.join(parts)}]" if parts else ""
+        self.status_label.setText(f"선택 {selected}개{detail_str} / 전체 {total}개")
         self.status_label.setStyleSheet("color: #8cc3ff; font-weight: 600;")
 
     def _accept_if_valid(self):
@@ -458,10 +608,28 @@ class FolderSpreadDialog(QDialog):
         init_cols = max(1, math.ceil(math.sqrt(count))) if count > 0 else 2
         init_rows = max(1, math.ceil(count / init_cols)) if count > 0 else 2
 
+        self._media_info = {}
+        immediate_limit = 60
+        for i, path in enumerate(self.media_paths):
+            if i < immediate_limit:
+                self._media_info[path] = _get_media_resolution_info(path)
+            else:
+                self._media_info[path] = {
+                    "size": None,
+                    "orient": "unknown",
+                    "tag": "",
+                    "tip": path,
+                }
+        if len(self.media_paths) > immediate_limit:
+            self._pending_probe_indices = list(range(immediate_limit, len(self.media_paths)))
+            QTimer.singleShot(20, self._probe_next_chunk)
+
+        all_count = len(self.media_paths)
         img_count = sum(1 for p in self.media_paths if _classify_media(p) == "image")
         gif_count = sum(1 for p in self.media_paths if _classify_media(p) == "gif")
         vid_count = sum(1 for p in self.media_paths if _classify_media(p) == "video")
-        all_count = len(self.media_paths)
+        wide_count = sum(1 for p in self.media_paths if self._media_info.get(p, {}).get("orient") == "wide")
+        tall_count = sum(1 for p in self.media_paths if self._media_info.get(p, {}).get("orient") == "tall")
 
         self.setStyleSheet("""
             QDialog#folderSpreadDialog {
@@ -911,34 +1079,66 @@ class FolderSpreadDialog(QDialog):
             ("image", f"이미지 ({img_count})", img_count),
             ("gif", f"GIF ({gif_count})", gif_count),
             ("video", f"영상 ({vid_count})", vid_count),
+            ("wide", f"↔ 가로 ({wide_count})", wide_count),
+            ("tall", f"↕ 세로 ({tall_count})", tall_count),
         ]:
             btn = QPushButton(cat_name)
             btn.setProperty("kind", "filterBtn")
             btn.setProperty("active", "true" if cat_key == "all" else "false")
-            if cat_cnt == 0:
+            if cat_cnt == 0 and cat_key not in ("wide", "tall"):
                 btn.setEnabled(False)
             btn.clicked.connect(lambda _, k=cat_key: self._apply_filter(k))
             self._filter_btns[cat_key] = btn
             filter_row.addWidget(btn)
 
         filter_row.addStretch(1)
+        layout.addLayout(filter_row)
+
+        select_row = QHBoxLayout()
+        select_row.setSpacing(6)
+        select_label = QLabel("선택:")
+        select_label.setObjectName("sectionHeader")
+        select_row.addWidget(select_label)
+
         select_all_btn = QPushButton("전체 선택")
         select_all_btn.setObjectName("secondaryBtn")
+        select_all_btn.setToolTip("현재 표시된 모든 미디어를 선택합니다.")
+        select_all_btn.clicked.connect(lambda: self._set_filtered_checked(True))
+
+        select_wide_btn = QPushButton("↔ 가로짤만")
+        select_wide_btn.setObjectName("secondaryBtn")
+        select_wide_btn.setToolTip("가로형(W > H) 짤만 선택하고 세로/정사각 짤은 선택 해제합니다.")
+        select_wide_btn.clicked.connect(lambda: self._select_only_orientation("wide"))
+
+        select_tall_btn = QPushButton("↕ 세로짤만")
+        select_tall_btn.setObjectName("secondaryBtn")
+        select_tall_btn.setToolTip("세로형(H > W) 짤만 선택하고 가로/정사각 짤은 선택 해제합니다.")
+        select_tall_btn.clicked.connect(lambda: self._select_only_orientation("tall"))
+
         clear_btn = QPushButton("선택 해제")
         clear_btn.setObjectName("secondaryBtn")
-        filter_row.addWidget(select_all_btn)
-        filter_row.addWidget(clear_btn)
-        layout.addLayout(filter_row)
+        clear_btn.setToolTip("모든 미디어의 선택을 해제합니다.")
+        clear_btn.clicked.connect(lambda: self._set_filtered_checked(False))
+
+        select_row.addWidget(select_all_btn)
+        select_row.addWidget(select_wide_btn)
+        select_row.addWidget(select_tall_btn)
+        select_row.addWidget(clear_btn)
+        select_row.addStretch(1)
+        layout.addLayout(select_row)
 
         self.list_widget = QListWidget()
         self.list_widget.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         for path in self.media_paths:
             cat = _classify_media(path)
             prefix = "[IMG] " if cat == "image" else ("[GIF] " if cat == "gif" else "[VID] ")
-            item = QListWidgetItem(f"{prefix}{os.path.basename(path)}")
-            item.setToolTip(path)
+            info = self._media_info.get(path, {})
+            item = QListWidgetItem(f"{prefix}{os.path.basename(path)}{info.get('tag', '')}")
+            item.setToolTip(info.get("tip", path))
             item.setData(Qt.ItemDataRole.UserRole, path)
             item.setData(Qt.ItemDataRole.UserRole + 1, cat)
+            item.setData(Qt.ItemDataRole.UserRole + 2, info.get("orient", "unknown"))
+            item.setData(Qt.ItemDataRole.UserRole + 3, info.get("size"))
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(Qt.CheckState.Checked)
             self.list_widget.addItem(item)
@@ -1009,6 +1209,62 @@ class FolderSpreadDialog(QDialog):
         state = item.checkState()
         item.setCheckState(Qt.CheckState.Unchecked if state == Qt.CheckState.Checked else Qt.CheckState.Checked)
 
+    def _probe_next_chunk(self):
+        if not hasattr(self, "_pending_probe_indices") or not self._pending_probe_indices:
+            return
+        chunk = self._pending_probe_indices[:40]
+        self._pending_probe_indices = self._pending_probe_indices[40:]
+        for idx in chunk:
+            if idx < len(self.media_paths):
+                path = self.media_paths[idx]
+                info = _get_media_resolution_info(path)
+                self._media_info[path] = info
+                if idx < self.list_widget.count():
+                    item = self.list_widget.item(idx)
+                    cat = str(item.data(Qt.ItemDataRole.UserRole + 1) or "")
+                    prefix = "[IMG] " if cat == "image" else ("[GIF] " if cat == "gif" else "[VID] ")
+                    item.setText(f"{prefix}{os.path.basename(path)}{info['tag']}")
+                    item.setToolTip(info['tip'])
+                    item.setData(Qt.ItemDataRole.UserRole + 2, info['orient'])
+                    item.setData(Qt.ItemDataRole.UserRole + 3, info['size'])
+        self._update_filter_button_counts()
+        self._refresh_status()
+        if self._pending_probe_indices:
+            QTimer.singleShot(20, self._probe_next_chunk)
+
+    def _update_filter_button_counts(self):
+        all_count = len(self.media_paths)
+        img_count = sum(1 for p in self.media_paths if _classify_media(p) == "image")
+        gif_count = sum(1 for p in self.media_paths if _classify_media(p) == "gif")
+        vid_count = sum(1 for p in self.media_paths if _classify_media(p) == "video")
+        wide_count = sum(1 for p in self.media_paths if self._media_info.get(p, {}).get("orient") == "wide")
+        tall_count = sum(1 for p in self.media_paths if self._media_info.get(p, {}).get("orient") == "tall")
+
+        counts = {
+            "all": f"전체 ({all_count})",
+            "image": f"이미지 ({img_count})",
+            "gif": f"GIF ({gif_count})",
+            "video": f"영상 ({vid_count})",
+            "wide": f"↔ 가로 ({wide_count})",
+            "tall": f"↕ 세로 ({tall_count})",
+        }
+        for k, text in counts.items():
+            if k in self._filter_btns:
+                self._filter_btns[k].setText(text)
+                try:
+                    num = int(text.split("(")[1].split(")")[0])
+                    self._filter_btns[k].setEnabled(num > 0)
+                except Exception:
+                    pass
+
+    def _select_only_orientation(self, target_orient):
+        for idx in range(self.list_widget.count()):
+            item = self.list_widget.item(idx)
+            if not item.isHidden():
+                orient = item.data(Qt.ItemDataRole.UserRole + 2)
+                item.setCheckState(Qt.CheckState.Checked if orient == target_orient else Qt.CheckState.Unchecked)
+        self._refresh_status()
+
     def _apply_filter(self, category):
         self._current_filter = str(category)
         for cat_key, btn in self._filter_btns.items():
@@ -1018,10 +1274,15 @@ class FolderSpreadDialog(QDialog):
         for idx in range(self.list_widget.count()):
             item = self.list_widget.item(idx)
             cat = str(item.data(Qt.ItemDataRole.UserRole + 1) or "")
-            if self._current_filter == "all" or cat == self._current_filter:
+            orient = str(item.data(Qt.ItemDataRole.UserRole + 2) or "")
+            if self._current_filter == "all":
                 item.setHidden(False)
+            elif self._current_filter in ("image", "gif", "video"):
+                item.setHidden(cat != self._current_filter)
+            elif self._current_filter in ("wide", "tall", "square"):
+                item.setHidden(orient != self._current_filter)
             else:
-                item.setHidden(True)
+                item.setHidden(False)
         self._refresh_status()
 
     def _set_filtered_checked(self, checked):
@@ -1041,13 +1302,23 @@ class FolderSpreadDialog(QDialog):
         return [path for path in paths if path]
 
     def _refresh_status(self):
-        selected = len(self._checked_paths())
+        paths = self._checked_paths()
+        selected = len(paths)
+        wide_sel = sum(1 for p in paths if self._media_info.get(p, {}).get("orient") == "wide")
+        tall_sel = sum(1 for p in paths if self._media_info.get(p, {}).get("orient") == "tall")
+        parts = []
+        if wide_sel > 0:
+            parts.append(f"가로 {wide_sel}")
+        if tall_sel > 0:
+            parts.append(f"세로 {tall_sel}")
+        detail_str = f" ({', '.join(parts)})" if parts else ""
+
         cells = int(self.rows_input.value()) * int(self.cols_input.value())
         if selected > cells:
-            self.status_label.setText(f"선택 {selected}개 / 배치 공간 {cells}칸 ({int(self.cols_input.value())}x{int(self.rows_input.value())})  ⚠️ 공간이 부족합니다 (행/열을 늘려주세요)")
+            self.status_label.setText(f"선택 {selected}개{detail_str} / 배치 공간 {cells}칸 ({int(self.cols_input.value())}x{int(self.rows_input.value())})  ⚠️ 공간이 부족합니다 (행/열을 늘려주세요)")
             self.status_label.setStyleSheet("color: #ff9b9b; font-weight: 700;")
         else:
-            self.status_label.setText(f"선택 {selected}개 / 배치 공간 {cells}칸 ({int(self.cols_input.value())}x{int(self.rows_input.value())})")
+            self.status_label.setText(f"선택 {selected}개{detail_str} / 배치 공간 {cells}칸 ({int(self.cols_input.value())}x{int(self.rows_input.value())})")
             self.status_label.setStyleSheet("color: #8cc3ff; font-weight: 600;")
 
     def _accept_if_valid(self):
