@@ -5649,7 +5649,7 @@ class MasterController(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("MyWidgetBox v6.0 - 위젯 컨트롤러")
+        self.setWindowTitle("MyWidgetBox v2.0 - 위젯 컨트롤러")
         self._fast_startup_mode = bool(self._fast_startup_enabled())
         self.app_icon = self._resolve_app_icon()
         from mywidgetbox_core import apply_windows_dark_title_bar, render_vector_icon
@@ -5741,19 +5741,16 @@ class MasterController(QMainWindow):
                 color: #b8c9e6;
                 font-size: 10px;
             }
+            QCheckBox#gpuGuardMasterToggle,
             QCheckBox#startupToggle,
-            QCheckBox#fullscreenPauseToggle {
-                color: #e4ecfb;
+            QCheckBox#fullscreenPauseToggle,
+            QCheckBox#monitorGuardToggle,
+            QCheckBox#randomSetToggle {
+                color: #ffffff;
                 font-size: 11px;
                 font-weight: 600;
                 spacing: 6px;
                 min-height: 22px;
-            }
-            QCheckBox#startupToggle:hover,
-            QCheckBox#fullscreenPauseToggle:hover,
-            QCheckBox#monitorGuardToggle:hover,
-            QCheckBox#randomSetToggle:hover {
-                color: #ffffff;
             }
             QToolButton#gpuCfgBtn {
                 min-width: 50px;

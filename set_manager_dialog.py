@@ -209,20 +209,6 @@ class RandomSetChooserDialog(QDialog):
                 font-weight: 600;
                 spacing: 8px;
             }
-            QCheckBox::indicator {
-                width: 18px;
-                height: 18px;
-                border-radius: 4px;
-                border: 1px solid #4a678f;
-                background-color: #111a27;
-            }
-            QCheckBox::indicator:hover {
-                border-color: #60a5fa;
-            }
-            QCheckBox::indicator:checked {
-                background-color: #2563eb;
-                border-color: #60a5fa;
-            }
             QLabel#setCountBadge {
                 color: #7ea3d4;
                 background-color: #101c2e;

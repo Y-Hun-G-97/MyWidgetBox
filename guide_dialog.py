@@ -14,7 +14,7 @@ class GuideDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("guideDialog")
-        self.setWindowTitle("MyWidgetBox v6.0 사용 설명서")
+        self.setWindowTitle("MyWidgetBox v2.0 사용 설명서")
         self.setWindowIcon(render_vector_icon("help", "#528bf8", 32))
         apply_windows_dark_title_bar(self)
         self.resize(1020, 680)
@@ -145,7 +145,7 @@ class GuideDialog(QDialog):
         sidebar_layout.setContentsMargins(8, 14, 8, 14)
         sidebar_layout.setSpacing(10)
 
-        app_title = QLabel("📖 사용 설명서 (v6.0)")
+        app_title = QLabel("📖 사용 설명서 (v2.0)")
         app_title.setStyleSheet("color: #eef3ff; font-size: 15px; font-weight: 800; padding: 4px 10px;")
         sidebar_layout.addWidget(app_title)
 

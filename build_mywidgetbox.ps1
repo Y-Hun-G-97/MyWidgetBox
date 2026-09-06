@@ -88,7 +88,7 @@ if (Test-Path -LiteralPath $guideTxtSource) {
 }
 
 Write-Host "[build] creating distribution zip package..."
-$zipPath = Join-Path $root "dist\MyWidgetBox_v6.0.zip"
+$zipPath = Join-Path $root "dist\MyWidgetBox_v2.0.zip"
 if (Test-Path -LiteralPath $zipPath) {
     Remove-Item -LiteralPath $zipPath -Force
 }
