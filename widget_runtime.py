@@ -143,6 +143,8 @@ def flush_settings_sync(widget):
 
 
 def save_all_settings(widget, sync=None):
+    if bool(getattr(widget, "_suppress_pos_save", False)):
+        return
     settings = widget.settings
     settings.setValue("folder_path", widget.folder_path)
     settings.setValue("folder_item_paths", list(getattr(widget, "folder_item_paths", []) or []))
@@ -1207,4 +1209,5 @@ def prepare_close(widget):
         widget._settings_sync_timer.stop()
 
     skip_sync = bool(getattr(widget.manager, "_bulk_set_switch_active", False))
-    widget.save_all_settings(sync=(not skip_sync))
+    if not bool(getattr(widget, "_suppress_pos_save", False)):
+        widget.save_all_settings(sync=(not skip_sync))

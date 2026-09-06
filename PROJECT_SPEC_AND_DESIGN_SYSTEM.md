@@ -81,14 +81,17 @@ MyWidgetBox는 Windows 데스크톱 환경을 위한 고성능 멀티미디어 �
 
 ### 1) 마스터 컨트롤러 전역 설정 (`QSettings("MyHomeApp", "MasterSettings")`)
 - `current_set_id` (str): 메인 UI에서 현재 선택되어 관리 중인 세트 ID
-- `applied_set_id` (str): 바탕화면에 실제로 적용되어 실행 중인 세트 ID
+- `applied_set_id` (str): 바탕화면에 실제로 적용되어 실행 중인 세트 ID (세트 종료 시 `""` 빈 문자열로 미적용 상태 유지)
 - `set_ids` (list[str]): 세트들의 정렬 순서 목록 (예: `['1', '2', '3']`)
 - `sets/{sid}/name` (str): 세트의 사용자 지정 이름 (기본값: `세트{sid}`)
 - `sets/{sid}/profiles` (list[str]): 해당 세트에 속한 프로필 ID 목록 (예: `['1', '2']`)
 - `gpu_guard_high_pct` (int/float): GPU 가드 일시정지 임계치 (기본값: `90.0`)
 - `gpu_guard_low_pct` (int/float): GPU 가드 재개 임계치 (기본값: `70.0`)
-- `gpu_guard_panel_expanded` (bool): 상단 GPU 설정 패널의 펼침/접힘 상태
+- `gpu_guard_panel_expanded` (bool): 상단 설정 패널의 펼침/접힘 상태
 - `pause_on_fullscreen` (bool): 다른 앱 전체화면 실행 시 미디어 자동 일시정지 활성화 여부 (기본값: `True`)
+- `monitor_disconnect_guard_enabled` (bool): 듀얼/다중 모니터 분리 감지 시 위젯 다중 모니터 좌표를 보존하며 세트 자동 종료 활성화 여부 (기본값: `True`)
+- `random_set_on_startup` (bool): 프로그램 시작 시 후보 세트 중 1개 무작위 자동 실행 여부 (기본값: `False`)
+- `random_set_candidates` (list[str]): 프로그램 시작 시 무작위 실행 후보 세트 ID 목록 (비어있을 경우 전체 세트 대상)
 - `startup_shortcut_enabled_v1` (bool): Windows 시작 시 자동 실행(작업 스케줄러) 등록 여부
 
 ### 2) 개별 위젯 프로필 설정 (`QSettings("MyHomeApp", f"Profile_{pid}")`)

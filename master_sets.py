@@ -158,9 +158,16 @@ def load_set_state(controller):
         current_sid = str(controller.master_settings.value("current_set_id", raw_set_ids[0]))
         if current_sid not in set_defs:
             current_sid = raw_set_ids[0]
-        applied_sid = str(controller.master_settings.value("applied_set_id", current_sid))
-        if applied_sid not in set_defs:
+        if not controller.master_settings.contains("applied_set_id"):
             applied_sid = current_sid
+        else:
+            raw_applied = controller.master_settings.value("applied_set_id", "")
+            if raw_applied in (None, ""):
+                applied_sid = ""
+            else:
+                applied_sid = str(raw_applied)
+                if applied_sid not in set_defs:
+                    applied_sid = ""
         controller._set_order = list(raw_set_ids)
         controller._set_defs = set_defs
         controller._current_set_id = current_sid
@@ -232,11 +239,20 @@ def load_set_state(controller):
     controller._set_order = list(raw_set_ids)
     controller._set_defs = set_defs
     controller._current_set_id = current_sid
-    applied_sid = str(controller.master_settings.value("applied_set_id", current_sid))
-    if applied_sid not in set_defs:
+    if not controller.master_settings.contains("applied_set_id"):
         applied_sid = current_sid
         controller.master_settings.setValue("applied_set_id", applied_sid)
         changed = True
+    else:
+        raw_applied = controller.master_settings.value("applied_set_id", "")
+        if raw_applied in (None, ""):
+            applied_sid = ""
+        else:
+            applied_sid = str(raw_applied)
+            if applied_sid not in set_defs:
+                applied_sid = ""
+                controller.master_settings.setValue("applied_set_id", "")
+                changed = True
     controller._applied_set_id = applied_sid
     if changed:
         _sync_master_settings(controller)
@@ -435,7 +451,8 @@ def delete_set(controller, set_id, parent=None):
     sid = str(set_id)
     if sid not in controller._set_defs:
         return False
-    parent_window = parent if parent is not None else controller
+    from PyQt6.QtWidgets import QWidget
+    parent_window = parent if isinstance(parent, QWidget) else (controller if isinstance(controller, QWidget) else None)
     if len(controller._set_order) <= 1:
         QMessageBox.information(parent_window, "세트 삭제", "최소 1개의 세트는 유지되어야 합니다.")
         return False
@@ -556,11 +573,26 @@ def delete_set(controller, set_id, parent=None):
     _sync_master_settings(controller)
 
     selected_sid = controller.selected_set_id()
+    was_applied = (str(getattr(controller, "_applied_set_id", "")) == sid)
+
     if selected_sid == sid:
-        controller.apply_set(absorb_target_sid)
-    elif str(getattr(controller, "_applied_set_id", "")) == sid:
-        fallback_sid = selected_sid if selected_sid in controller._set_defs else absorb_target_sid
-        controller.apply_set(fallback_sid)
+        fallback_sid = absorb_target_sid if absorb_target_sid in controller._set_defs else (controller._set_order[0] if controller._set_order else "")
+        controller._set_current_set_id(fallback_sid, persist=True)
+
+    if was_applied:
+        # Request 2: 세트 삭제 시 첫번째 세트를 무조건 적용하는 게 아니라 세트가 적용되지 않은 상태 유지
+        if hasattr(controller, "stop_applied_set"):
+            controller.stop_applied_set()
+        else:
+            controller._cancel_startup_queue()
+            controller._stop_all_widgets_bulk()
+            controller._applied_set_id = ""
+            controller.master_settings.setValue("applied_set_id", "")
+            _sync_master_settings(controller, immediate=True)
+            controller._refresh_set_ui()
+            controller._sync_temp_group_badges()
+            controller.update_active_status()
+            controller.load_profiles(force_rebuild=True)
     else:
         controller._refresh_set_ui()
         controller._sync_temp_group_badges()

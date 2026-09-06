@@ -62,7 +62,7 @@ from mywidgetbox_ui_primitives import (
     SetNameLabel,
     TreeBranchLine,
 )
-from set_manager_dialog import SetManagerDialog
+from set_manager_dialog import RandomSetChooserDialog, SetManagerDialog
 from settings_dialog import (
     FolderLayoutChoiceDialog,
     FolderSlideDialog,
@@ -5750,7 +5750,9 @@ class MasterController(QMainWindow):
                 min-height: 22px;
             }
             QCheckBox#startupToggle:hover,
-            QCheckBox#fullscreenPauseToggle:hover {
+            QCheckBox#fullscreenPauseToggle:hover,
+            QCheckBox#monitorGuardToggle:hover,
+            QCheckBox#randomSetToggle:hover {
                 color: #ffffff;
             }
             QToolButton#gpuCfgBtn {
@@ -5843,6 +5845,37 @@ class MasterController(QMainWindow):
                 padding: 2px 8px;
                 font-size: 11px;
                 font-weight: 700;
+            }
+            QPushButton#setStopBtn {
+                min-height: 26px;
+                border-radius: 6px;
+                color: #ffd2d2;
+                background-color: #5c1f26;
+                border: 1px solid #8e303c;
+                font-size: 11px;
+                font-weight: 700;
+                padding: 0 10px;
+            }
+            QPushButton#setStopBtn:hover {
+                background-color: #73262f;
+                color: #ffffff;
+                border-color: #b03d4c;
+            }
+            QPushButton#randomSetBtn {
+                min-height: 28px;
+                border-radius: 6px;
+                color: #dbeafe;
+                background-color: #243854;
+                border: 1px solid #3b5a84;
+                font-size: 11px;
+                font-weight: 600;
+                padding: 0 10px;
+                margin-top: 2px;
+            }
+            QPushButton#randomSetBtn:hover {
+                background-color: #2f496e;
+                border-color: #527eb5;
+                color: #ffffff;
             }
             QPushButton#setApplyBtn {
                 min-height: 26px;
@@ -6168,8 +6201,10 @@ class MasterController(QMainWindow):
         self.gpu_cfg_toggle.setObjectName("gpuCfgBtn")
         self.gpu_cfg_toggle.setCheckable(True)
         self.gpu_cfg_toggle.setChecked(False)
-        self.gpu_cfg_toggle.setText("GPU")
-        self.gpu_cfg_toggle.setToolTip("GPU 부하 모니터링 및 자동 정지 설정")
+        self.gpu_cfg_toggle.setText("설정")
+        self.gpu_cfg_toggle.setIcon(render_vector_icon("settings", "#eef3ff", 13))
+        self.gpu_cfg_toggle.setIconSize(QSize(13, 13))
+        self.gpu_cfg_toggle.setToolTip("마스터 환경설정 (세트 자동화, 화면 보호, GPU, 전체화면)")
         self.gpu_cfg_toggle.toggled.connect(self._toggle_gpu_cfg_panel)
 
         title_bar_layout.addWidget(self.guide_btn, 0, Qt.AlignmentFlag.AlignVCenter)
@@ -6255,6 +6290,41 @@ class MasterController(QMainWindow):
         self.fullscreen_pause_hint_lbl.setObjectName("gpuCfgHint")
         self.fullscreen_pause_hint_lbl.setWordWrap(True)
         gpu_cfg_panel_layout.addWidget(self.fullscreen_pause_hint_lbl)
+
+        sep_screen = QFrame()
+        sep_screen.setFrameShape(QFrame.Shape.HLine)
+        sep_screen.setStyleSheet("background-color: #283a54; min-height: 1px; max-height: 1px; border: none; margin: 4px 0;")
+        gpu_cfg_panel_layout.addWidget(sep_screen)
+
+        self.monitor_guard_cb = QCheckBox("모니터 분리 시 세트 자동 종료")
+        self.monitor_guard_cb.setObjectName("monitorGuardToggle")
+        self.monitor_guard_cb.setToolTip(
+            "듀얼/다중 모니터 연결 해제 시 위젯 배치가 엉키지 않도록 좌표를 보존하며 세트를 안전하게 종료합니다."
+        )
+        gpu_cfg_panel_layout.addWidget(self.monitor_guard_cb)
+
+        self.monitor_guard_hint_lbl = QLabel("화면 분리 시 위젯 좌표 덮어쓰기를 방지하고 세트 종료")
+        self.monitor_guard_hint_lbl.setObjectName("gpuCfgHint")
+        self.monitor_guard_hint_lbl.setWordWrap(True)
+        gpu_cfg_panel_layout.addWidget(self.monitor_guard_hint_lbl)
+
+        sep_rand = QFrame()
+        sep_rand.setFrameShape(QFrame.Shape.HLine)
+        sep_rand.setStyleSheet("background-color: #283a54; min-height: 1px; max-height: 1px; border: none; margin: 4px 0;")
+        gpu_cfg_panel_layout.addWidget(sep_rand)
+
+        self.random_set_cb = QCheckBox("프로그램 시작 시 랜덤 세트 실행")
+        self.random_set_cb.setObjectName("randomSetToggle")
+        self.random_set_cb.setToolTip(
+            "프로그램 시작 시 후보 목록에 포함된 세트 중 하나를 무작위로 자동 실행합니다."
+        )
+        gpu_cfg_panel_layout.addWidget(self.random_set_cb)
+
+        self.random_set_btn = QPushButton("랜덤 대상 세트 설정...")
+        self.random_set_btn.setObjectName("randomSetBtn")
+        self.random_set_btn.setToolTip("프로그램 시작 시 무작위로 실행될 후보 세트들을 선택합니다.")
+        self.random_set_btn.clicked.connect(self._open_random_set_chooser)
+        gpu_cfg_panel_layout.addWidget(self.random_set_btn)
         self.gpu_cfg_panel.installEventFilter(self)
 
         # Accordion Tree Scroll Area
@@ -6339,6 +6409,18 @@ class MasterController(QMainWindow):
         self._fullscreen_paused = False
         self.pause_on_fullscreen_cb.setChecked(self._pause_on_fullscreen)
         self.pause_on_fullscreen_cb.toggled.connect(self._on_pause_on_fullscreen_toggled)
+        self._monitor_guard_enabled = _as_bool(self.master_settings.value("monitor_disconnect_guard_enabled", True), True)
+        self.monitor_guard_cb.setChecked(self._monitor_guard_enabled)
+        self.monitor_guard_cb.toggled.connect(self._on_monitor_guard_toggled)
+        self._random_set_enabled = _as_bool(self.master_settings.value("random_set_on_startup", False), False)
+        self.random_set_cb.setChecked(self._random_set_enabled)
+        self.random_set_cb.toggled.connect(self._on_random_set_toggled)
+        self._sync_random_set_btn_text()
+        self._last_screen_count = len(QGuiApplication.screens())
+        app_gui = QGuiApplication.instance()
+        if app_gui:
+            app_gui.screenRemoved.connect(self._on_screen_removed)
+            app_gui.screenAdded.connect(self._on_screen_added)
         self._session_notification_registered = False
         self._power_notification_handle = None
         self._session_locked = False
@@ -6710,6 +6792,20 @@ class MasterController(QMainWindow):
 
     def apply_set(self, set_id):
         _mset_apply_set_impl(self, set_id)
+
+    def stop_applied_set(self, suppress_pos_save=False):
+        self._cancel_startup_queue()
+        if suppress_pos_save:
+            for w in list(self.widgets.values()):
+                setattr(w, "_suppress_pos_save", True)
+        self._stop_all_widgets_bulk()
+        self._applied_set_id = ""
+        self.master_settings.setValue("applied_set_id", "")
+        self.master_settings.sync()
+        self._refresh_set_ui()
+        self._sync_temp_group_badges()
+        self.update_active_status()
+        self.load_profiles(force_rebuild=True)
 
     def create_empty_set(self, name):
         return _mset_create_empty_set_impl(self, name)
@@ -7398,6 +7494,14 @@ class MasterController(QMainWindow):
                 applied_badge = QLabel("적용 중", header)
                 applied_badge.setObjectName("setAppliedBadge")
                 header_layout.addWidget(applied_badge, 0, Qt.AlignmentFlag.AlignVCenter)
+
+                stop_btn = QPushButton("세트 종료", header)
+                stop_btn.setObjectName("setStopBtn")
+                stop_btn.setIcon(render_vector_icon("stop", "#fca5a5", 11))
+                stop_btn.setIconSize(QSize(11, 11))
+                stop_btn.setToolTip(f"'{name}' 세트의 위젯들을 모두 종료합니다 (컨트롤러 유지)")
+                stop_btn.clicked.connect(lambda _, s=sid_str: self.stop_applied_set())
+                header_layout.addWidget(stop_btn, 0, Qt.AlignmentFlag.AlignVCenter)
             else:
                 apply_btn = QPushButton("세트 적용", header)
                 apply_btn.setObjectName("setApplyBtn")
@@ -8637,6 +8741,53 @@ class MasterController(QMainWindow):
                 if isinstance(w, DesktopWidget):
                     w.set_performance_paused(False, reason="fullscreen_disabled")
 
+    def _on_monitor_guard_toggled(self, checked):
+        self._monitor_guard_enabled = bool(checked)
+        self.master_settings.setValue("monitor_disconnect_guard_enabled", self._monitor_guard_enabled)
+        self.master_settings.sync()
+
+    def _on_random_set_toggled(self, checked):
+        self._random_set_enabled = bool(checked)
+        self.master_settings.setValue("random_set_on_startup", self._random_set_enabled)
+        self.master_settings.sync()
+
+    def _sync_random_set_btn_text(self):
+        if not hasattr(self, "random_set_btn"):
+            return
+        raw = self._as_list(self.master_settings.value("random_set_candidates", []))
+        valid = [str(sid) for sid in raw if str(sid) in self._set_defs]
+        total = len(self._set_order)
+        if not raw:
+            self.random_set_btn.setText(f"랜덤 대상 세트: 전체 ({total}개)")
+        else:
+            self.random_set_btn.setText(f"랜덤 대상 세트: {len(valid)}/{total}개 선택됨")
+
+    def _open_random_set_chooser(self):
+        dialog = RandomSetChooserDialog(self)
+        dialog.exec()
+        self._sync_random_set_btn_text()
+
+    def _on_screen_removed(self, screen=None):
+        curr_count = len(QGuiApplication.screens())
+        self._last_screen_count = curr_count
+        self._handle_screen_disconnected()
+
+    def _on_screen_added(self, screen=None):
+        self._last_screen_count = len(QGuiApplication.screens())
+
+    def _handle_screen_disconnected(self):
+        if not _as_bool(self.master_settings.value("monitor_disconnect_guard_enabled", True), True):
+            return
+        if getattr(self, "_applied_set_id", ""):
+            self.stop_applied_set(suppress_pos_save=True)
+            if hasattr(self, "tray_icon") and self.tray_icon.isVisible():
+                self.tray_icon.showMessage(
+                    "MyWidgetBox",
+                    "모니터 연결 해제가 감지되어 위젯 위치를 보존하기 위해 세트를 종료했습니다.",
+                    QSystemTrayIcon.MessageIcon.Information,
+                    4000,
+                )
+
     def _is_other_app_fullscreen(self):
         try:
             import win32gui, win32api, win32con, win32process
@@ -8844,6 +8995,15 @@ class MasterController(QMainWindow):
                             self._apply_system_power_state_pause()
                     except Exception:
                         pass
+
+            # WM_DISPLAYCHANGE (0x007E)
+            elif u_msg == 0x007E:
+                curr_count = len(QGuiApplication.screens())
+                if hasattr(self, "_last_screen_count") and curr_count < self._last_screen_count:
+                    self._last_screen_count = curr_count
+                    self._handle_screen_disconnected()
+                else:
+                    self._last_screen_count = curr_count
         except Exception:
             pass
 
@@ -9002,11 +9162,25 @@ class MasterController(QMainWindow):
 
     def restore_last_session(self):
         self._load_set_state()
-        sid = self.selected_set_id()
-        if not sid and self._set_order:
-            sid = self._set_order[0]
-        if sid:
-            self.apply_set(sid)
+        import random
+
+        random_enabled = _as_bool(self.master_settings.value("random_set_on_startup", False), False)
+        if random_enabled and self._set_order:
+            raw_candidates = self._as_list(self.master_settings.value("random_set_candidates", []))
+            valid_candidates = [str(s) for s in raw_candidates if str(s) in self._set_defs]
+            if not valid_candidates:
+                valid_candidates = list(self._set_order)
+            if valid_candidates:
+                chosen_sid = random.choice(valid_candidates)
+                self._set_current_set_id(chosen_sid, persist=True)
+                self.apply_set(chosen_sid)
+        else:
+            applied_sid = str(getattr(self, "_applied_set_id", "") or "")
+            if applied_sid and applied_sid in self._set_defs:
+                self.apply_set(applied_sid)
+            else:
+                self._applied_set_id = ""
+                self.load_profiles(force_rebuild=True)
 
 
         # Startup visibility policy:
