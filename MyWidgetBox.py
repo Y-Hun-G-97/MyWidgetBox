@@ -59,6 +59,7 @@ from mywidgetbox_ui_primitives import (
     ProfileListWidget,
     ProfileRowWidget,
     ResizeHandleOverlay,
+    SetHeaderWidget,
     SetNameLabel,
     TreeBranchLine,
 )
@@ -392,11 +393,12 @@ class DesktopWidget(QMainWindow):
         self._cursor_inside = False
         self._drag_threshold = 5
         self._axis_snap_threshold = 4
-        self._axis_snap_release = 8
+        self._axis_snap_release = 7
         self._snap_lock_x = None
         self._snap_lock_y = None
         self._snap_origin_pointer_x = None
         self._snap_origin_pointer_y = None
+        self.drag_start_widget_pos = None
         self._shortcut_last_ms = {}
 
 
@@ -3531,6 +3533,7 @@ class DesktopWidget(QMainWindow):
     def cancel_active_interaction(self):
         """Force-clear dragging/resizing transient states (used by lock toggle)."""
         self.start_pos = None
+        self.drag_start_widget_pos = None
         self.is_moving = False
         self.is_resizing = False
         self.resize_corner = None
@@ -3642,13 +3645,30 @@ class DesktopWidget(QMainWindow):
         widgets = getattr(self.manager, "widgets", {})
         if not isinstance(widgets, dict):
             return []
-        return [w for w in widgets.values() if w is not self and isinstance(w, QWidget) and w.isVisible()]
+        temp_group_ids = set()
+        mgr_group = getattr(self.manager, "_temp_group_ids", None)
+        if isinstance(mgr_group, (set, list, tuple)):
+            if str(self.profile_id) in mgr_group:
+                temp_group_ids = {str(gid) for gid in mgr_group}
 
-    def _find_axis_snap_target(self, axis, raw_value):
+        result = []
+        for pid, w in widgets.items():
+            if w is self:
+                continue
+            if str(pid) in temp_group_ids:
+                continue
+            if isinstance(w, QWidget) and w.isVisible():
+                result.append(w)
+        return result
+
+    def _find_axis_snap_target(self, axis, ideal_value):
         best_target = None
+        best_release = 0
         best_dist = 999999
         screen_snap_threshold = 10
+        screen_release_threshold = 14
         other_snap_threshold = getattr(self, "_axis_snap_threshold", 4)
+        other_release_threshold = max(other_snap_threshold + 3, getattr(self, "_axis_snap_release", 7))
         own_span = self.width() if axis == "x" else self.height()
 
         # 1. 모니터 화면 테두리 경계 (작업표시줄 제외 가용 영역) 약한 자석
@@ -3668,10 +3688,11 @@ class DesktopWidget(QMainWindow):
                     geo.bottom() + 1 - own_span,# 화면 하단 가장자리 (작업표시줄 바로 위)
                 )
             for target in screen_candidates:
-                dist = abs(raw_value - target)
+                dist = abs(ideal_value - target)
                 if dist <= screen_snap_threshold and dist < best_dist:
                     best_target = target
                     best_dist = dist
+                    best_release = screen_release_threshold
 
         # 2. 다른 위젯들과의 스냅
         for w in self._other_widgets():
@@ -3685,42 +3706,40 @@ class DesktopWidget(QMainWindow):
                 other_trail - own_span,        # right-right / bottom-bottom
             )
             for target in candidates:
-                dist = abs(raw_value - target)
+                dist = abs(ideal_value - target)
                 if dist <= other_snap_threshold and dist < best_dist:
                     best_target = target
                     best_dist = dist
-        return best_target
+                    best_release = other_release_threshold
 
-    def _apply_axis_snap(self, axis, raw_value, pointer_value):
-        if axis == "x":
-            lock = self._snap_lock_x
-            origin = self._snap_origin_pointer_x
-        else:
-            lock = self._snap_lock_y
-            origin = self._snap_origin_pointer_y
+        return best_target, best_release
 
-        if lock is not None and origin is not None:
-            if abs(pointer_value - origin) > self._axis_snap_release:
+    def _apply_axis_snap(self, axis, ideal_value, pointer_value=None):
+        lock_info = self._snap_lock_x if axis == "x" else self._snap_lock_y
+
+        if lock_info is not None:
+            if isinstance(lock_info, (tuple, list)):
+                target, release_dist = lock_info
+            else:
+                target, release_dist = lock_info, 14
+
+            if abs(ideal_value - target) <= release_dist:
+                return target
+            else:
                 if axis == "x":
                     self._snap_lock_x = None
-                    self._snap_origin_pointer_x = None
                 else:
                     self._snap_lock_y = None
-                    self._snap_origin_pointer_y = None
-            else:
-                return lock
 
-        target = self._find_axis_snap_target(axis, raw_value)
+        target, release_dist = self._find_axis_snap_target(axis, ideal_value)
         if target is not None:
             if axis == "x":
-                self._snap_lock_x = target
-                self._snap_origin_pointer_x = pointer_value
+                self._snap_lock_x = (target, release_dist)
             else:
-                self._snap_lock_y = target
-                self._snap_origin_pointer_y = pointer_value
+                self._snap_lock_y = (target, release_dist)
             return target
 
-        return raw_value
+        return ideal_value
 
     def _as_path_set(self, value):
         if isinstance(value, list):
@@ -3903,6 +3922,8 @@ class DesktopWidget(QMainWindow):
         self.is_locked = _as_bool(self.settings.value("is_locked", False), False)
         self.gpu_guard_enabled = _as_bool(self.settings.value("gpu_guard_enabled", False), False)
         self.quarantined_media = self._as_path_set(self.settings.value("quarantined_media", []))
+        if self.folder_item_paths:
+            self.quarantined_media.difference_update(self.folder_item_paths)
         self.growth_anchor = str(self.settings.value("growth_anchor", "top-left") or "top-left")
         w = int(self.settings.value("w", 200))
         h = int(self.settings.value("h", 200))
@@ -6475,8 +6496,8 @@ class MasterController(QMainWindow):
     def _clone_profile_settings(self, src_pid, dst_pid):
         _mset_clone_profile_settings_impl(self, src_pid, dst_pid)
 
-    def _set_current_set_id(self, set_id, persist=True):
-        _mset_set_current_set_id_impl(self, set_id, persist=persist)
+    def _set_current_set_id(self, set_id, persist=True, refresh=True):
+        _mset_set_current_set_id_impl(self, set_id, persist=persist, refresh=refresh)
 
     def selected_set_id(self):
         return _mset_selected_set_id_impl(self)
@@ -6518,6 +6539,8 @@ class MasterController(QMainWindow):
     def _clear_accordion_layout(self):
         if not hasattr(self, "accordion_layout"):
             return
+        if hasattr(self, "_set_cards"):
+            self._set_cards.clear()
         if hasattr(self, "_set_body_frames"):
             self._set_body_frames.clear()
         if hasattr(self, "_set_headers"):
@@ -6537,6 +6560,12 @@ class MasterController(QMainWindow):
         btn = getattr(self, "_set_toggle_btns", {}).get(sid)
         if body is not None and header is not None and btn is not None:
             new_state = not body.isVisible()
+            if new_state and not getattr(body, "_populated", False):
+                pids = getattr(body, "_pids", None)
+                if pids is None:
+                    pids = [str(p) for p in self._as_list(self._set_defs.get(sid, {}).get("profiles", []))]
+                self._populate_set_body(sid, body, pids)
+                self._sync_bulk_action_ui()
             body.setVisible(new_state)
             self._set_expanded_states[sid] = new_state
             header.setProperty("expanded", "true" if new_state else "false")
@@ -6597,7 +6626,7 @@ class MasterController(QMainWindow):
         sid = self.create_empty_set(name)
         if sid:
             self._set_expanded_states[str(sid)] = True
-            self._set_current_set_id(str(sid), persist=True)
+            self._set_current_set_id(str(sid), persist=True, refresh=False)
             self.load_profiles(force_rebuild=True)
 
     def open_set_manager(self, set_id=None):
@@ -6605,8 +6634,6 @@ class MasterController(QMainWindow):
         sid = str(set_id) if set_id not in (None, "") else self.selected_set_id()
         dialog = SetManagerDialog(self, target_sid=sid)
         dialog.exec()
-        self._refresh_set_ui()
-        self.load_profiles()
 
     def open_guide_dialog(self):
         from guide_dialog import GuideDialog
@@ -6831,7 +6858,7 @@ class MasterController(QMainWindow):
     def apply_set(self, set_id):
         _mset_apply_set_impl(self, set_id)
 
-    def stop_applied_set(self, suppress_pos_save=False):
+    def stop_applied_set(self, suppress_pos_save=False, suppress_refresh=False):
         self._cancel_startup_queue()
         if suppress_pos_save:
             for w in list(self.widgets.values()):
@@ -6842,17 +6869,16 @@ class MasterController(QMainWindow):
                 if hasattr(w, "is_video_widget") and w.is_video_widget:
                     w.video_decode_mode = DesktopWidget.VIDEO_DECODE_AUTO
                     w.settings.setValue("video_decode_mode", int(DesktopWidget.VIDEO_DECODE_AUTO))
-                    w.settings.sync()
             except Exception:
                 pass
         self._stop_all_widgets_bulk()
         self._applied_set_id = ""
         self.master_settings.setValue("applied_set_id", "")
         self.master_settings.sync()
-        self._refresh_set_ui()
-        self._sync_temp_group_badges()
-        self.update_active_status()
-        self.load_profiles(force_rebuild=True)
+        if not suppress_refresh:
+            self._sync_temp_group_badges()
+            self.update_active_status()
+            self.load_profiles(force_rebuild=True)
 
     def create_empty_set(self, name):
         return _mset_create_empty_set_impl(self, name)
@@ -7474,10 +7500,243 @@ class MasterController(QMainWindow):
             self._add_profile_row(pid, str(name), pid in self.widgets)
         self._set_hovered_profile_row(None)
 
+    def _populate_set_body(self, sid_str, body, pids):
+        from mywidgetbox_core import render_vector_icon
+        sid_str = str(sid_str)
+        body_layout = body.layout()
+        if body_layout is None:
+            body_layout = QVBoxLayout(body)
+            body_layout.setContentsMargins(10, 6, 10, 8)
+            body_layout.setSpacing(4)
+
+        # Clear existing items if re-populating
+        while body_layout.count():
+            item = body_layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+            l = item.layout()
+            if l is not None:
+                while l.count():
+                    sub = l.takeAt(0)
+                    if sub.widget():
+                        sub.widget().deleteLater()
+
+        # 세트 내 일괄 제어 툴바 (위젯이 있을 때)
+        if pids:
+            toolbar_row = QHBoxLayout()
+            toolbar_row.setContentsMargins(4, 2, 4, 4)
+            toolbar_row.setSpacing(6)
+
+            select_all_cb = QCheckBox(body)
+            select_all_cb.setObjectName("selectAllCheck")
+            select_all_cb.setToolTip("이 세트의 모든 위젯 선택 / 해제")
+            def _toggle_set_selection(checked, set_pids=pids):
+                for p in set_pids:
+                    sp = str(p)
+                    row_w = self.profile_rows.get(sp)
+                    if row_w and hasattr(row_w, "_checkbox") and row_w._checkbox:
+                        row_w._checkbox.setChecked(bool(checked))
+            select_all_cb.toggled.connect(_toggle_set_selection)
+
+            toolbar_lbl = QLabel("전체 선택", body)
+            toolbar_lbl.setObjectName("groupHeaderLabel")
+
+            toolbar_row.addWidget(select_all_cb, 0, Qt.AlignmentFlag.AlignVCenter)
+            toolbar_row.addWidget(toolbar_lbl, 0, Qt.AlignmentFlag.AlignVCenter)
+            toolbar_row.addStretch(1)
+
+            bulk_run = QPushButton("실행", body)
+            bulk_run.setObjectName("bulkRunBtn")
+            bulk_run.setIcon(render_vector_icon("run", "#58c796", 12))
+            bulk_run.setIconSize(QSize(12, 12))
+            bulk_run.setToolTip("선택한 정지 위젯 일괄 실행")
+            bulk_run.clicked.connect(self.bulk_run_profiles)
+
+            bulk_stop = QPushButton("정지", body)
+            bulk_stop.setObjectName("bulkStopBtn")
+            bulk_stop.setIcon(render_vector_icon("stop", "#cddbf0", 12))
+            bulk_stop.setIconSize(QSize(12, 12))
+            bulk_stop.setToolTip("선택한 실행 위젯 일괄 정지")
+            bulk_stop.clicked.connect(self.bulk_stop_profiles)
+
+            bulk_zorder = QPushButton("레이어 맞춤", body)
+            bulk_zorder.setObjectName("bulkActionBtn")
+            bulk_zorder.setIcon(render_vector_icon("list", "#cddbf0", 12))
+            bulk_zorder.setIconSize(QSize(12, 12))
+            bulk_zorder.setToolTip("목록 순서대로 화면 위젯들의 앞/뒤 레이어(Z-Order)를 실시간 재정렬합니다")
+            bulk_zorder.clicked.connect(lambda _, s=sid_str: self.sync_set_z_order(s))
+
+            bulk_set = QPushButton("설정", body)
+            bulk_set.setObjectName("bulkActionBtn")
+            bulk_set.setIcon(render_vector_icon("settings", "#cddbf0", 12))
+            bulk_set.setIconSize(QSize(12, 12))
+            bulk_set.setToolTip("선택한 위젯 일괄 설정")
+            bulk_set.clicked.connect(self.open_bulk_settings)
+
+            bulk_del = QPushButton("삭제", body)
+            bulk_del.setObjectName("bulkDeleteBtn")
+            bulk_del.setIcon(render_vector_icon("trash", "#f87171", 12))
+            bulk_del.setIconSize(QSize(12, 12))
+            bulk_del.setToolTip("선택한 위젯 일괄 삭제")
+            bulk_del.clicked.connect(self.delete_checked_profiles)
+
+            toolbar_row.addWidget(bulk_run)
+            toolbar_row.addWidget(bulk_stop)
+            toolbar_row.addWidget(bulk_zorder)
+            toolbar_row.addWidget(bulk_set)
+            toolbar_row.addWidget(bulk_del)
+
+            self._set_toolbars[sid_str] = {
+                'select_all': select_all_cb,
+                'run': bulk_run,
+                'stop': bulk_stop,
+                'set': bulk_set,
+                'del': bulk_del,
+                'pids': pids
+            }
+
+            body_layout.addLayout(toolbar_row)
+
+        for idx, pid in enumerate(pids):
+            spid = str(pid)
+            p_cfg = QSettings("MyHomeApp", f"Profile_{spid}")
+            p_name = str(p_cfg.value("name", f"위젯 {spid}"))
+            is_running = bool(spid in self.widgets or (int(spid) in self.widgets if spid.isdigit() else False))
+
+            media_mode = str(p_cfg.value("media_mode", "file") or "file").lower()
+            img_path = str(p_cfg.value("image_path", "") or "")
+            ext = os.path.splitext(img_path)[1].lower()
+            if media_mode == "slide":
+                badge_text = "SLIDE"
+            elif ext in (".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"):
+                badge_text = "VID"
+            elif ext == ".gif":
+                badge_text = "GIF"
+            else:
+                badge_text = "IMG"
+
+            row = ProfileRowWidget(body)
+            row.setObjectName("treeChildRow")
+            row.setProperty("running", "true" if is_running else "false")
+            row._pid = spid
+            row._sid = sid_str
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(6, 4, 8, 4)
+            row_layout.setSpacing(6)
+
+            # 들여쓰기 트리 브랜치 선 (마지막 행은 L자형)
+            branch = TreeBranchLine(is_last=(idx == len(pids) - 1), parent=row)
+
+            # 드래그 앤 드롭 이동 그립 핸들
+            grip_lbl = QLabel(row)
+            grip_lbl.setObjectName("rowGripHandle")
+            grip_lbl.setPixmap(render_vector_icon("grip", "#546e94", 12).pixmap(12, 12))
+            grip_lbl.setToolTip("마우스로 위아래로 끌어서 위젯 순서 이동 (Drag & Drop)")
+            grip_lbl.setCursor(Qt.CursorShape.OpenHandCursor)
+            grip_lbl.setFixedSize(14, 20)
+
+            # 임시 그룹 연동 체크박스
+            cb = QCheckBox(row)
+            cb.setObjectName("profileCheck")
+            cb.setChecked(spid in self._temp_group_ids)
+            cb.toggled.connect(lambda checked, p=spid: self._on_row_checkbox_changed(p, checked))
+
+            status_dot = QLabel(row)
+            status_dot.setObjectName("statusDot")
+            status_dot.setFixedSize(4, 18)
+            status_dot.setProperty("running", "true" if is_running else "false")
+
+            # 위젯 이름 (긴 파일명 자동 말줄임표 ... 적용)
+            name_lbl = ElidedLabel(p_name, row)
+            name_lbl.setObjectName("profileName")
+            name_lbl.setToolTip(p_name)
+
+            badge_lbl = QLabel(badge_text, row)
+            badge_lbl.setObjectName("mediaBadge")
+            badge_lbl.setStyleSheet("""
+                QLabel#mediaBadge {
+                    color: #7da5dc;
+                    background-color: #101c2e;
+                    border: 1px solid #233752;
+                    border-radius: 4px;
+                    padding: 1px 5px;
+                    font-size: 10px;
+                    font-weight: 700;
+                }
+            """)
+
+            btn_run = QPushButton(row)
+            btn_stop = QPushButton(row)
+            btn_set = QPushButton(row)
+            btn_del = QPushButton(row)
+
+            for b in (btn_run, btn_stop, btn_set, btn_del):
+                b.setProperty("kind", "rowAction")
+                b.setFixedSize(24, 24)
+                b.setIconSize(QSize(12, 12))
+
+            btn_run.setIcon(render_vector_icon("run", "#58c796", 12))
+            btn_run.setToolTip("위젯 실행")
+            btn_stop.setIcon(render_vector_icon("stop", "#f87171", 12))
+            btn_stop.setToolTip("위젯 정지")
+            btn_set.setIcon(render_vector_icon("settings", "#93c5fd", 12))
+            btn_set.setToolTip("위젯 상세 설정")
+            btn_del.setIcon(render_vector_icon("trash", "#f87171", 12))
+            btn_del.setToolTip("위젯 삭제")
+
+            btn_run.setEnabled(not is_running)
+            btn_stop.setEnabled(is_running)
+
+            btn_run.clicked.connect(lambda _, p=spid, n=p_name: self.run_widget(p, n))
+            btn_stop.clicked.connect(lambda _, p=spid: self.stop_widget(p))
+            btn_set.clicked.connect(lambda _, p=spid: self.open_widget_settings(p))
+            btn_del.clicked.connect(lambda _, p=spid: self.delete_profile(p))
+
+            row_layout.addWidget(branch, 0, Qt.AlignmentFlag.AlignVCenter)
+            row_layout.addWidget(grip_lbl, 0, Qt.AlignmentFlag.AlignVCenter)
+            row_layout.addWidget(cb, 0, Qt.AlignmentFlag.AlignVCenter)
+            row_layout.addWidget(status_dot, 0, Qt.AlignmentFlag.AlignVCenter)
+            row_layout.addWidget(name_lbl, 1, Qt.AlignmentFlag.AlignVCenter)
+            row_layout.addWidget(badge_lbl, 0, Qt.AlignmentFlag.AlignVCenter)
+            row_layout.addWidget(btn_run, 0, Qt.AlignmentFlag.AlignVCenter)
+            row_layout.addWidget(btn_stop, 0, Qt.AlignmentFlag.AlignVCenter)
+            row_layout.addWidget(btn_set, 0, Qt.AlignmentFlag.AlignVCenter)
+            row_layout.addWidget(btn_del, 0, Qt.AlignmentFlag.AlignVCenter)
+
+            row._checkbox = cb
+            row._branch = branch
+            row.reorderRequested.connect(self._on_row_reorder_requested)
+            row.clicked.connect(lambda p: self.highlight_widget(p))
+            row.doubleClicked.connect(lambda p: self.rename_profile(p))
+
+            body_layout.addWidget(row)
+            self.profile_rows[spid] = row
+
+        # 이 세트에 위젯 추가 행
+        add_row = QWidget(body)
+        add_row_layout = QHBoxLayout(add_row)
+        add_row_layout.setContentsMargins(6, 8, 8, 4)
+        add_row_layout.setSpacing(6)
+
+        add_btn = QPushButton("새로운 위젯 추가", add_row)
+        add_btn.setObjectName("addTreeWidgetBtn")
+        add_btn.setIcon(render_vector_icon("plus", "#8da8cb", 12))
+        add_btn.setIconSize(QSize(12, 12))
+        add_btn.clicked.connect(lambda _, s=sid_str: self.add_profile(target_set_id=s))
+
+        add_row_layout.addStretch(1)
+        add_row_layout.addWidget(add_btn, 0, Qt.AlignmentFlag.AlignCenter)
+        add_row_layout.addStretch(1)
+        body_layout.addWidget(add_row)
+
+        body._populated = True
+
     def load_profiles(self, force_rebuild=False):
         self._clear_accordion_layout()
         self.profile_rows = {}
         self._set_toolbars.clear()
+        self._set_cards = {}
         from mywidgetbox_core import render_vector_icon
 
         applied_sid = str(getattr(self, "_applied_set_id", "") or "")
@@ -7503,10 +7762,14 @@ class MasterController(QMainWindow):
             card_layout.setContentsMargins(0, 0, 0, 0)
             card_layout.setSpacing(0)
 
-            # 세트 헤더
-            header = QFrame(set_card)
+            # 세트 헤더 (드래그 앤 드롭 순서 이동 지원)
+            header = SetHeaderWidget(set_card)
             header.setObjectName("setGroupHeader")
             header.setProperty("expanded", "true" if is_expanded else "false")
+            header._sid = sid_str
+            header.reorderRequested.connect(self.reorder_set)
+            header.doubleClicked.connect(lambda s: self.rename_set(s))
+
             header_layout = QHBoxLayout(header)
             header_layout.setContentsMargins(10, 8, 10, 8)
             header_layout.setSpacing(6)
@@ -7520,6 +7783,14 @@ class MasterController(QMainWindow):
             toggle_btn.setToolTip("세트 접기 / 펼치기")
             toggle_btn.clicked.connect(lambda _, s=sid_str: self._toggle_set_expanded(s))
 
+            # 세트 순서 드래그 앤 드롭 이동 그립 핸들
+            set_grip = QLabel(header)
+            set_grip.setObjectName("setGripHandle")
+            set_grip.setPixmap(render_vector_icon("grip", "#546e94", 12).pixmap(12, 12))
+            set_grip.setToolTip("마우스로 위아래로 끌어서 세트 순서 이동 (Drag & Drop)")
+            set_grip.setCursor(Qt.CursorShape.OpenHandCursor)
+            set_grip.setFixedSize(14, 20)
+
             # 세트 폴더 아이콘
             folder_icon_lbl = QLabel(header)
             folder_icon_lbl.setPixmap(render_vector_icon("folder", "#528bf8" if is_applied else "#8da8cb", 16).pixmap(16, 16))
@@ -7529,14 +7800,12 @@ class MasterController(QMainWindow):
             title_lbl.setObjectName("setGroupTitle")
             title_lbl.setToolTip(f"세트: {name} (더블클릭하여 이름 변경)")
 
-            # 세트 헤더 더블클릭 시 세트 이름 즉시 변경
-            header.mouseDoubleClickEvent = lambda e, s=sid_str: self.rename_set(s) if e.button() == Qt.MouseButton.LeftButton else None
-
             # 위젯 개수 뱃지
             count_badge = QLabel(f"{len(pids)}개", header)
             count_badge.setObjectName("setCountBadge")
 
             header_layout.addWidget(toggle_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+            header_layout.addWidget(set_grip, 0, Qt.AlignmentFlag.AlignVCenter)
             header_layout.addWidget(folder_icon_lbl, 0, Qt.AlignmentFlag.AlignVCenter)
             header_layout.addWidget(title_lbl, 1, Qt.AlignmentFlag.AlignVCenter)
             header_layout.addWidget(count_badge, 0, Qt.AlignmentFlag.AlignVCenter)
@@ -7562,27 +7831,6 @@ class MasterController(QMainWindow):
                 apply_btn.clicked.connect(lambda _, s=sid_str: self._on_apply_set_clicked(s))
                 header_layout.addWidget(apply_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
-            # 세트 순서 이동 버튼 (▲ / ▼)
-            btn_set_up = QPushButton(header)
-            btn_set_up.setProperty("kind", "rowAction")
-            btn_set_up.setFixedSize(26, 26)
-            btn_set_up.setIconSize(QSize(12, 12))
-            btn_set_up.setIcon(render_vector_icon("chevron_up", "#8da8cb", 12))
-            btn_set_up.setToolTip("세트를 위로 이동")
-            btn_set_up.setEnabled(s_idx > 0)
-            btn_set_up.clicked.connect(lambda _, s=sid_str: self.move_set_up(s))
-            header_layout.addWidget(btn_set_up, 0, Qt.AlignmentFlag.AlignVCenter)
-
-            btn_set_down = QPushButton(header)
-            btn_set_down.setProperty("kind", "rowAction")
-            btn_set_down.setFixedSize(26, 26)
-            btn_set_down.setIconSize(QSize(12, 12))
-            btn_set_down.setIcon(render_vector_icon("chevron_down", "#8da8cb", 12))
-            btn_set_down.setToolTip("세트를 아래로 이동")
-            btn_set_down.setEnabled(s_idx < len(self._set_order) - 1)
-            btn_set_down.clicked.connect(lambda _, s=sid_str: self.move_set_down(s))
-            header_layout.addWidget(btn_set_down, 0, Qt.AlignmentFlag.AlignVCenter)
-
             menu_btn = QPushButton(header)
             menu_btn.setProperty("kind", "rowAction")
             menu_btn.setFixedSize(26, 26)
@@ -7593,220 +7841,26 @@ class MasterController(QMainWindow):
             header_layout.addWidget(menu_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
             card_layout.addWidget(header)
+            self._set_cards[sid_str] = set_card
             self._set_headers[sid_str] = header
             self._set_toggle_btns[sid_str] = toggle_btn
 
-            # 자식 위젯 영역 (상시 생성 후 visible 토글로 0ms 반응속도 보장)
+            # 자식 위젯 영역 (지연 로딩으로 초기 생성/세트 추가/삭제 0ms 보장)
             body = QFrame(set_card)
             body.setObjectName("setGroupBody")
             body_layout = QVBoxLayout(body)
             body_layout.setContentsMargins(10, 6, 10, 8)
             body_layout.setSpacing(4)
+            body._pids = pids
+            body._sid = sid_str
 
-            # 세트 내 일괄 제어 툴바 (위젯이 있을 때)
-            if pids:
-                toolbar_row = QHBoxLayout()
-                toolbar_row.setContentsMargins(4, 2, 4, 4)
-                toolbar_row.setSpacing(6)
+            if is_expanded:
+                self._populate_set_body(sid_str, body, pids)
+                body.setVisible(True)
+            else:
+                body._populated = False
+                body.setVisible(False)
 
-                select_all_cb = QCheckBox(body)
-                select_all_cb.setObjectName("selectAllCheck")
-                select_all_cb.setToolTip("이 세트의 모든 위젯 선택 / 해제")
-                def _toggle_set_selection(checked, set_pids=pids):
-                    for p in set_pids:
-                        sp = str(p)
-                        row_w = self.profile_rows.get(sp)
-                        if row_w and hasattr(row_w, "_checkbox") and row_w._checkbox:
-                            row_w._checkbox.setChecked(bool(checked))
-                select_all_cb.toggled.connect(_toggle_set_selection)
-
-                toolbar_lbl = QLabel("전체 선택", body)
-                toolbar_lbl.setObjectName("groupHeaderLabel")
-
-                toolbar_row.addWidget(select_all_cb, 0, Qt.AlignmentFlag.AlignVCenter)
-                toolbar_row.addWidget(toolbar_lbl, 0, Qt.AlignmentFlag.AlignVCenter)
-                toolbar_row.addStretch(1)
-
-                bulk_run = QPushButton("실행", body)
-                bulk_run.setObjectName("bulkRunBtn")
-                bulk_run.setIcon(render_vector_icon("run", "#58c796", 12))
-                bulk_run.setIconSize(QSize(12, 12))
-                bulk_run.setToolTip("선택한 정지 위젯 일괄 실행")
-                bulk_run.clicked.connect(self.bulk_run_profiles)
-
-                bulk_stop = QPushButton("정지", body)
-                bulk_stop.setObjectName("bulkStopBtn")
-                bulk_stop.setIcon(render_vector_icon("stop", "#cddbf0", 12))
-                bulk_stop.setIconSize(QSize(12, 12))
-                bulk_stop.setToolTip("선택한 실행 위젯 일괄 정지")
-                bulk_stop.clicked.connect(self.bulk_stop_profiles)
-
-                bulk_set = QPushButton("설정", body)
-                bulk_set.setObjectName("bulkActionBtn")
-                bulk_set.setIcon(render_vector_icon("settings", "#cddbf0", 12))
-                bulk_set.setIconSize(QSize(12, 12))
-                bulk_set.setToolTip("선택한 위젯 일괄 설정")
-                bulk_set.clicked.connect(self.open_bulk_settings)
-
-                bulk_del = QPushButton("삭제", body)
-                bulk_del.setObjectName("bulkDeleteBtn")
-                bulk_del.setIcon(render_vector_icon("trash", "#f87171", 12))
-                bulk_del.setIconSize(QSize(12, 12))
-                bulk_del.setToolTip("선택한 위젯 일괄 삭제")
-                bulk_del.clicked.connect(self.delete_checked_profiles)
-
-                toolbar_row.addWidget(bulk_run)
-                toolbar_row.addWidget(bulk_stop)
-                toolbar_row.addWidget(bulk_set)
-                toolbar_row.addWidget(bulk_del)
-
-                self._set_toolbars[sid_str] = {
-                    'select_all': select_all_cb,
-                    'run': bulk_run,
-                    'stop': bulk_stop,
-                    'set': bulk_set,
-                    'del': bulk_del,
-                    'pids': pids
-                }
-
-                body_layout.addLayout(toolbar_row)
-
-            for idx, pid in enumerate(pids):
-                spid = str(pid)
-                p_cfg = QSettings("MyHomeApp", f"Profile_{spid}")
-                p_name = str(p_cfg.value("name", f"위젯 {spid}"))
-                is_running = bool(spid in self.widgets or (int(spid) in self.widgets if spid.isdigit() else False))
-
-                media_mode = str(p_cfg.value("media_mode", "file") or "file").lower()
-                img_path = str(p_cfg.value("image_path", "") or "")
-                ext = os.path.splitext(img_path)[1].lower()
-                if media_mode == "slide":
-                    badge_text = "SLIDE"
-                elif ext in (".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"):
-                    badge_text = "VID"
-                elif ext == ".gif":
-                    badge_text = "GIF"
-                else:
-                    badge_text = "IMG"
-
-                row = ProfileRowWidget(body)
-                row.setObjectName("treeChildRow")
-                row.setProperty("running", "true" if is_running else "false")
-                row._pid = spid
-                row_layout = QHBoxLayout(row)
-                row_layout.setContentsMargins(6, 4, 8, 4)
-                row_layout.setSpacing(6)
-
-                # 들여쓰기 트리 브랜치 선
-                branch = TreeBranchLine(is_last=False, parent=row)
-
-                # 임시 그룹 연동 체크박스
-                cb = QCheckBox(row)
-                cb.setObjectName("profileCheck")
-                cb.setChecked(spid in self._temp_group_ids)
-                cb.toggled.connect(lambda checked, p=spid: self._on_row_checkbox_changed(p, checked))
-
-                status_dot = QLabel(row)
-                status_dot.setObjectName("statusDot")
-                status_dot.setFixedSize(4, 18)
-                status_dot.setProperty("running", "true" if is_running else "false")
-
-                # 위젯 이름 (긴 파일명 자동 말줄임표 ... 적용)
-                name_lbl = ElidedLabel(p_name, row)
-                name_lbl.setObjectName("profileName")
-                name_lbl.setToolTip(p_name)
-
-                badge_lbl = QLabel(badge_text, row)
-                badge_lbl.setObjectName("mediaBadge")
-                badge_lbl.setStyleSheet("""
-                    QLabel#mediaBadge {
-                        color: #7da5dc;
-                        background-color: #101c2e;
-                        border: 1px solid #233752;
-                        border-radius: 4px;
-                        padding: 1px 5px;
-                        font-size: 10px;
-                        font-weight: 700;
-                    }
-                """)
-
-                btn_up = QPushButton(row)
-                btn_down = QPushButton(row)
-                btn_run = QPushButton(row)
-                btn_stop = QPushButton(row)
-                btn_set = QPushButton(row)
-                btn_del = QPushButton(row)
-
-                for b in (btn_up, btn_down, btn_run, btn_stop, btn_set, btn_del):
-                    b.setProperty("kind", "rowAction")
-                    b.setFixedSize(24, 24)
-                    b.setIconSize(QSize(12, 12))
-
-                btn_up.setIcon(render_vector_icon("chevron_up", "#9cb5d8", 12))
-                btn_up.setToolTip("위로 이동 (로딩 순서 올림)")
-                btn_down.setIcon(render_vector_icon("chevron_down", "#9cb5d8", 12))
-                btn_down.setToolTip("아래로 이동 (로딩 순서 내림)")
-
-                btn_up.setEnabled(idx > 0)
-                btn_down.setEnabled(idx < len(pids) - 1)
-
-                btn_up.clicked.connect(lambda _, p=spid, s=sid_str: self.move_profile_up(p, s))
-                btn_down.clicked.connect(lambda _, p=spid, s=sid_str: self.move_profile_down(p, s))
-
-                btn_run.setIcon(render_vector_icon("run", "#58c796", 12))
-                btn_run.setToolTip("위젯 실행")
-                btn_stop.setIcon(render_vector_icon("stop", "#f87171", 12))
-                btn_stop.setToolTip("위젯 정지")
-                btn_set.setIcon(render_vector_icon("settings", "#93c5fd", 12))
-                btn_set.setToolTip("위젯 상세 설정")
-                btn_del.setIcon(render_vector_icon("trash", "#f87171", 12))
-                btn_del.setToolTip("위젯 삭제")
-
-                btn_run.setEnabled(not is_running)
-                btn_stop.setEnabled(is_running)
-
-                btn_run.clicked.connect(lambda _, p=spid, n=p_name: self.run_widget(p, n))
-                btn_stop.clicked.connect(lambda _, p=spid: self.stop_widget(p))
-                btn_set.clicked.connect(lambda _, p=spid: self.open_widget_settings(p))
-                btn_del.clicked.connect(lambda _, p=spid: self.delete_profile(p))
-
-                row_layout.addWidget(branch, 0, Qt.AlignmentFlag.AlignVCenter)
-                row_layout.addWidget(cb, 0, Qt.AlignmentFlag.AlignVCenter)
-                row_layout.addWidget(status_dot, 0, Qt.AlignmentFlag.AlignVCenter)
-                row_layout.addWidget(name_lbl, 1, Qt.AlignmentFlag.AlignVCenter)
-                row_layout.addWidget(badge_lbl, 0, Qt.AlignmentFlag.AlignVCenter)
-                row_layout.addWidget(btn_up, 0, Qt.AlignmentFlag.AlignVCenter)
-                row_layout.addWidget(btn_down, 0, Qt.AlignmentFlag.AlignVCenter)
-                row_layout.addWidget(btn_run, 0, Qt.AlignmentFlag.AlignVCenter)
-                row_layout.addWidget(btn_stop, 0, Qt.AlignmentFlag.AlignVCenter)
-                row_layout.addWidget(btn_set, 0, Qt.AlignmentFlag.AlignVCenter)
-                row_layout.addWidget(btn_del, 0, Qt.AlignmentFlag.AlignVCenter)
-
-                row._checkbox = cb
-                row.clicked.connect(lambda p: self.highlight_widget(p))
-                row.doubleClicked.connect(lambda p: self.rename_profile(p))
-
-                body_layout.addWidget(row)
-                self.profile_rows[spid] = row
-
-            # 이 세트에 위젯 추가 행
-            add_row = QWidget(body)
-            add_row_layout = QHBoxLayout(add_row)
-            add_row_layout.setContentsMargins(6, 8, 8, 4)
-            add_row_layout.setSpacing(6)
-
-            add_btn = QPushButton("새로운 위젯 추가", add_row)
-            add_btn.setObjectName("addTreeWidgetBtn")
-            add_btn.setIcon(render_vector_icon("plus", "#8da8cb", 12))
-            add_btn.setIconSize(QSize(12, 12))
-            add_btn.clicked.connect(lambda _, s=sid_str: self.add_profile(target_set_id=s))
-
-            add_row_layout.addStretch(1)
-            add_row_layout.addWidget(add_btn, 0, Qt.AlignmentFlag.AlignCenter)
-            add_row_layout.addStretch(1)
-            body_layout.addWidget(add_row)
-
-            body.setVisible(is_expanded)
             card_layout.addWidget(body)
             self._set_body_frames[sid_str] = body
 
@@ -7900,6 +7954,67 @@ class MasterController(QMainWindow):
         self.update_active_status()
         self.load_profiles()
 
+    def _on_row_reorder_requested(self, source_sid, source_pid, target_pid, drop_pos):
+        self.reorder_profile(source_sid, source_pid, target_pid=target_pid, drop_pos=drop_pos)
+
+    def reorder_profile(self, sid, pid, target_idx=None, target_pid=None, drop_pos="above"):
+        sid = str(sid)
+        spid = str(pid)
+        if sid not in self._set_defs:
+            return
+        pids = [str(p) for p in self._as_list(self._set_defs[sid].get("profiles", []))]
+        if spid not in pids:
+            return
+        old_idx = pids.index(spid)
+
+        if target_idx is None and target_pid is not None:
+            tpid = str(target_pid)
+            if tpid not in pids or tpid == spid:
+                return
+            t_idx = pids.index(tpid)
+            if drop_pos == "above":
+                final_idx = t_idx if old_idx > t_idx else (t_idx - 1)
+            else:
+                final_idx = (t_idx + 1) if old_idx > t_idx else t_idx
+            target_idx = final_idx
+
+        if target_idx is None:
+            return
+
+        target_idx = max(0, min(len(pids) - 1, int(target_idx)))
+        if old_idx == target_idx:
+            return
+
+        # 프로필 순서 갱신 및 QSettings 동기화
+        pids.insert(target_idx, pids.pop(old_idx))
+        self._set_defs[sid]["profiles"] = pids
+        self.master_settings.setValue(self._set_key(sid, "profiles"), pids)
+        if hasattr(self.master_settings, "sync"):
+            self.master_settings.sync()
+
+        if sid in self._set_toolbars:
+            self._set_toolbars[sid]['pids'] = list(pids)
+
+        # 0ms 인플레이스 레이아웃 재배치 (DOM 재생성 렉 완전 제거)
+        body_frame = self._set_body_frames.get(sid)
+        if body_frame and hasattr(body_frame, "layout") and body_frame.layout():
+            b_layout = body_frame.layout()
+            row_widget = self.profile_rows.get(spid)
+            if row_widget:
+                b_layout.removeWidget(row_widget)
+                has_toolbar = bool(sid in self._set_toolbars)
+                layout_insert_idx = (1 if has_toolbar else 0) + target_idx
+                b_layout.insertWidget(layout_insert_idx, row_widget)
+
+        # 세트 내 모든 행의 브랜치 라인(L자형) 즉시 갱신
+        for idx, p in enumerate(pids):
+            r = self.profile_rows.get(str(p))
+            if r is not None and hasattr(r, "_branch") and r._branch:
+                r._branch.set_is_last(idx == len(pids) - 1)
+
+        # 실시간 바탕화면 위젯 Z-Order 동기화 (드래그 즉시 화면 깊이 재정렬)
+        self.sync_set_z_order(sid)
+
     def move_profile_up(self, pid, sid=None):
         spid = str(pid)
         if not sid:
@@ -7916,11 +8031,7 @@ class MasterController(QMainWindow):
         if idx <= 0:
             return
 
-        pids[idx], pids[idx - 1] = pids[idx - 1], pids[idx]
-        self._set_defs[sid]["profiles"] = pids
-        self.master_settings.setValue(self._set_key(sid, "profiles"), pids)
-        self.master_settings.sync()
-        self.load_profiles(force_rebuild=True)
+        self.reorder_profile(sid, spid, target_idx=idx - 1)
 
     def move_profile_down(self, pid, sid=None):
         spid = str(pid)
@@ -7938,11 +8049,83 @@ class MasterController(QMainWindow):
         if idx < 0 or idx >= len(pids) - 1:
             return
 
-        pids[idx], pids[idx + 1] = pids[idx + 1], pids[idx]
-        self._set_defs[sid]["profiles"] = pids
-        self.master_settings.setValue(self._set_key(sid, "profiles"), pids)
-        self.master_settings.sync()
-        self.load_profiles(force_rebuild=True)
+        self.reorder_profile(sid, spid, target_idx=idx + 1)
+
+    def sync_set_z_order(self, set_id=None):
+        """
+        바탕화면 위젯들의 Z-Order(앞/뒤 깊이)를 목록 순서에 맞추어 실시간 동기화.
+        원칙: 목록 위쪽(빠른 번호) = 바닥(뒤), 목록 아래쪽(늦은 번호) = 위(앞).
+        """
+        try:
+            import win32gui, win32con
+        except Exception:
+            return
+
+        if not set_id:
+            set_id = getattr(self, "_applied_set_id", None) or self.selected_set_id()
+        sid = str(set_id or "")
+        if sid not in self._set_defs:
+            return
+
+        pids = [str(p) for p in self._as_list(self._set_defs[sid].get("profiles", []))]
+        if not pids:
+            return
+
+        back_widgets = []
+        normal_widgets = []
+        top_widgets = []
+
+        for pid in pids:
+            w = self.widgets.get(pid)
+            if w is not None and w.isVisible():
+                layer = int(getattr(w, "layer_mode", 1))
+                if layer == int(getattr(w, "LAYER_BACK", 0)):
+                    back_widgets.append(w)
+                elif layer == int(getattr(w, "LAYER_TOPMOST", 2)):
+                    top_widgets.append(w)
+                else:
+                    normal_widgets.append(w)
+
+        flags = win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE
+
+        # 순서대로 HWND_TOP을 적용하면, 먼저 호출된 창이 아래에 깔리고 나중에 호출된 창이 위로 올라옴
+        for w in (back_widgets + normal_widgets + top_widgets):
+            try:
+                hwnd = int(w.winId())
+                if win32gui.IsWindow(hwnd):
+                    win32gui.SetWindowPos(hwnd, win32con.HWND_TOP, 0, 0, 0, 0, flags)
+            except Exception:
+                pass
+
+    def reorder_set(self, source_sid, target_sid, drop_pos):
+        ssid = str(source_sid)
+        tsid = str(target_sid)
+        if ssid not in self._set_order or tsid not in self._set_order or ssid == tsid:
+            return
+
+        old_idx = self._set_order.index(ssid)
+        t_idx = self._set_order.index(tsid)
+
+        if drop_pos == "above":
+            target_idx = t_idx if old_idx > t_idx else (t_idx - 1)
+        else:
+            target_idx = (t_idx + 1) if old_idx > t_idx else t_idx
+
+        target_idx = max(0, min(len(self._set_order) - 1, int(target_idx)))
+        if old_idx == target_idx:
+            return
+
+        # 1. 세트 순서 리스트 갱신 및 QSettings 저장
+        self._set_order.insert(target_idx, self._set_order.pop(old_idx))
+        self.master_settings.setValue("set_ids", list(self._set_order))
+        if hasattr(self.master_settings, "sync"):
+            self.master_settings.sync()
+
+        # 2. 전체 DOM 재생성 없는 0ms 인플레이스 레이아웃 재배치
+        set_card = getattr(self, "_set_cards", {}).get(ssid)
+        if set_card and hasattr(self, "accordion_layout") and self.accordion_layout:
+            self.accordion_layout.removeWidget(set_card)
+            self.accordion_layout.insertWidget(target_idx, set_card)
 
     def move_set_up(self, set_id):
         sid = str(set_id)
@@ -7951,11 +8134,7 @@ class MasterController(QMainWindow):
         idx = self._set_order.index(sid)
         if idx <= 0:
             return
-        self._set_order[idx], self._set_order[idx - 1] = self._set_order[idx - 1], self._set_order[idx]
-        self.master_settings.setValue("set_ids", list(self._set_order))
-        if hasattr(self.master_settings, "sync"):
-            self.master_settings.sync()
-        self.load_profiles(force_rebuild=True)
+        self.reorder_set(sid, self._set_order[idx - 1], "above")
 
     def move_set_down(self, set_id):
         sid = str(set_id)
@@ -7964,11 +8143,7 @@ class MasterController(QMainWindow):
         idx = self._set_order.index(sid)
         if idx < 0 or idx >= len(self._set_order) - 1:
             return
-        self._set_order[idx], self._set_order[idx + 1] = self._set_order[idx + 1], self._set_order[idx]
-        self.master_settings.setValue("set_ids", list(self._set_order))
-        if hasattr(self.master_settings, "sync"):
-            self.master_settings.sync()
-        self.load_profiles(force_rebuild=True)
+        self.reorder_set(sid, self._set_order[idx + 1], "below")
 
     def bulk_stop_profiles(self):
         if not self._check_set_applied_for_action("일괄 정지"):

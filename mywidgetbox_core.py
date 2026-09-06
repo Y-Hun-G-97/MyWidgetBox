@@ -358,6 +358,7 @@ def get_media_native_size(path):
         try:
             from PyQt6.QtGui import QImageReader
             reader = QImageReader(path)
+            reader.setAllocationLimit(0)
             sz = reader.size()
             if sz.isValid() and sz.width() > 0 and sz.height() > 0:
                 res = (sz.width(), sz.height())
@@ -385,6 +386,94 @@ def get_media_native_size(path):
         _MEDIA_NATIVE_SIZE_CACHE[cache_key] = res
 
     return res
+
+
+def load_safe_static_pixmap(file_path, max_dim=3840):
+    """
+    초고해상도(100MP+) 이미지, 대형 용량 이미지 및 일반 이미지를
+    메모리 초과(Qt 256MB allocation limit) 없이 안전하고 고품질로 로드합니다.
+    """
+    if not file_path:
+        return None
+    import os
+    if not os.path.isfile(file_path):
+        return None
+
+    # 1. QImageReader with allocationLimit(0) & autoTransform
+    try:
+        from PyQt6.QtGui import QImageReader, QPixmap, QImage
+        from PyQt6.QtCore import QSize
+
+        reader = QImageReader(file_path)
+        reader.setAutoTransform(True)
+        reader.setAllocationLimit(0)  # Qt 기본 256MB 제한 해제
+
+        orig_sz = reader.size()
+        if orig_sz.isValid() and max_dim > 0 and (orig_sz.width() > max_dim or orig_sz.height() > max_dim):
+            scale = min(1.0, float(max_dim) / float(max(orig_sz.width(), orig_sz.height())))
+            scaled_w = max(1, int(round(orig_sz.width() * scale)))
+            scaled_h = max(1, int(round(orig_sz.height() * scale)))
+            reader.setScaledSize(QSize(scaled_w, scaled_h))
+
+        qimg = reader.read()
+        if not qimg.isNull():
+            return QPixmap.fromImage(qimg)
+
+        # setScaledSize로 실패했을 경우 전체 해상도 단독 재시도
+        if reader.scaledSize().isValid():
+            reader2 = QImageReader(file_path)
+            reader2.setAutoTransform(True)
+            reader2.setAllocationLimit(0)
+            qimg2 = reader2.read()
+            if not qimg2.isNull():
+                return QPixmap.fromImage(qimg2)
+    except Exception:
+        pass
+
+    # 2. QPixmap 직접 로드 시도
+    try:
+        from PyQt6.QtGui import QPixmap
+        pix = QPixmap(file_path)
+        if not pix.isNull():
+            return pix
+    except Exception:
+        pass
+
+    # 3. OpenCV imdecode (Windows 한글 경로 및 특수 압축 이미지 방어)
+    try:
+        import cv2
+        import numpy as np
+        from PyQt6.QtGui import QImage, QPixmap
+
+        data = np.fromfile(file_path, dtype=np.uint8)
+        bgr = cv2.imdecode(data, cv2.IMREAD_UNCHANGED)
+        if bgr is not None and bgr.size > 0:
+            h, w = bgr.shape[:2]
+            if max_dim > 0 and (w > max_dim or h > max_dim):
+                scale = min(1.0, float(max_dim) / float(max(w, h)))
+                nw = max(1, int(round(w * scale)))
+                nh = max(1, int(round(h * scale)))
+                bgr = cv2.resize(bgr, (nw, nh), interpolation=cv2.INTER_AREA)
+                h, w = nh, nw
+
+            if len(bgr.shape) == 2:
+                fmt = QImage.Format.Format_Grayscale8
+                qimg = QImage(bgr.data, w, h, bgr.strides[0], fmt).copy()
+            elif bgr.shape[2] == 4:
+                rgba = cv2.cvtColor(bgr, cv2.COLOR_BGRA2RGBA)
+                fmt = QImage.Format.Format_RGBA8888
+                qimg = QImage(rgba.data, w, h, rgba.strides[0], fmt).copy()
+            else:
+                rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                fmt = QImage.Format.Format_RGB888
+                qimg = QImage(rgb.data, w, h, rgb.strides[0], fmt).copy()
+
+            if not qimg.isNull():
+                return QPixmap.fromImage(qimg)
+    except Exception:
+        pass
+
+    return None
 
 
 def calc_smart_aspect_size(iw, ih, base_w=200, base_h=200, min_size=50, max_size=5000):
@@ -823,6 +912,14 @@ def render_vector_icon(name, color="#a4bedc", size=16):
             QPointF(s * 0.38, s - pad),
         ])
         painter.drawPolyline(poly)
+
+    elif name in ("drag_handle", "grip", "handle"):
+        painter.setBrush(QBrush(c))
+        r = max(1.0, s * 0.075)
+        for y_pct in (0.28, 0.50, 0.72):
+            cy = s * y_pct
+            painter.drawEllipse(QPointF(s * 0.38, cy), r, r)
+            painter.drawEllipse(QPointF(s * 0.62, cy), r, r)
 
     else:
         painter.setBrush(QBrush(c))

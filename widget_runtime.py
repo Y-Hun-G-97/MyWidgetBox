@@ -303,6 +303,14 @@ def apply_settings_dialog_result(widget, dialog, old_folder, old_exec):
     widget._sync_current_media_cycle_policy()
 
     if source_changed:
+        if getattr(widget, "folder_item_paths", None):
+            for p in widget.folder_item_paths:
+                if hasattr(widget, "quarantined_media"):
+                    widget.quarantined_media.discard(p)
+                if hasattr(widget, "media_fail_counts"):
+                    widget.media_fail_counts.pop(p, None)
+            if hasattr(widget, "_save_quarantined_media"):
+                widget._save_quarantined_media()
         widget.update_playlist()
         widget.current_idx = -1
         widget.next_media()
@@ -410,14 +418,21 @@ def next_media(widget, prefer_preload=True):
             return
 
         widget.stack.setCurrentIndex(1)
-        pix = QPixmap(runtime_path)
-        if pix.isNull():
+        from mywidgetbox_core import load_safe_static_pixmap
+        pix = load_safe_static_pixmap(runtime_path)
+        if pix is None or pix.isNull():
             widget._record_media_failure(source_path, "invalid_image")
             if source_path in widget.quarantined_media:
                 widget.playlist.pop(widget.current_idx)
                 widget.current_idx -= 1
             attempts -= 1
             continue
+
+        if source_path in getattr(widget, "media_fail_counts", {}):
+            widget.media_fail_counts.pop(source_path, None)
+        if hasattr(widget, "quarantined_media") and source_path in widget.quarantined_media:
+            widget.quarantined_media.discard(source_path)
+            widget._save_quarantined_media()
 
         widget.current_static_pixmap = pix
         update_static_pixmap_size(widget)
@@ -710,6 +725,7 @@ def mouse_press_event(widget, e):
                 widget._refresh_resize_ui()
                 return
         widget.start_pos = e.globalPosition().toPoint()
+        widget.drag_start_widget_pos = widget.pos()
         widget.is_moving = False
 
 
@@ -763,17 +779,19 @@ def mouse_move_event(widget, e):
     widget._refresh_resize_ui()
     if widget.start_pos is not None:
         current_global = e.globalPosition().toPoint()
-        delta = current_global - widget.start_pos
-        if delta.manhattanLength() >= _drag_start_threshold(widget):
+        total_delta = current_global - widget.start_pos
+        if total_delta.manhattanLength() >= _drag_start_threshold(widget):
             if not widget.is_moving:
                 widget._set_drag_topmost(True)
             widget.is_moving = True
+            if getattr(widget, "drag_start_widget_pos", None) is None:
+                widget.drag_start_widget_pos = widget.pos()
             prev_x = widget.x()
             prev_y = widget.y()
-            raw_x = widget.x() + delta.x()
-            raw_y = widget.y() + delta.y()
-            snap_x = widget._apply_axis_snap("x", raw_x, current_global.x())
-            snap_y = widget._apply_axis_snap("y", raw_y, current_global.y())
+            ideal_x = widget.drag_start_widget_pos.x() + total_delta.x()
+            ideal_y = widget.drag_start_widget_pos.y() + total_delta.y()
+            snap_x = widget._apply_axis_snap("x", ideal_x, current_global.x())
+            snap_y = widget._apply_axis_snap("y", ideal_y, current_global.y())
             widget._move_exact((snap_x, snap_y))
             moved_dx = widget.x() - prev_x
             moved_dy = widget.y() - prev_y
@@ -781,7 +799,6 @@ def mouse_move_event(widget, e):
                 if hasattr(widget, "manager") and widget.manager and hasattr(widget.manager, "move_temp_group_by_delta"):
                     widget.manager.move_temp_group_by_delta(widget.profile_id, moved_dx, moved_dy)
             widget._show_size_hud()
-            widget.start_pos = current_global
 
 
 def mouse_release_event(widget, e):
@@ -812,6 +829,7 @@ def mouse_release_event(widget, e):
                 widget._launch_or_focus_exec(widget.exec_path)
     widget._set_drag_topmost(False)
     widget.start_pos = None
+    widget.drag_start_widget_pos = None
     widget.is_moving = False
     widget._reset_axis_snap()
     widget._hide_size_hud()

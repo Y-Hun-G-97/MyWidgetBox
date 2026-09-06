@@ -90,6 +90,8 @@ def run_next_startup_item(controller):
             controller._sync_all_widget_video_viewports()
         if hasattr(controller, "_bootstrap_all_desktop_icon_overlays"):
             controller._bootstrap_all_desktop_icon_overlays()
+        if hasattr(controller, "sync_set_z_order"):
+            controller.sync_set_z_order()
         controller.update_active_status()
         controller.load_profiles()
         controller._refresh_apply_button_state()
@@ -108,6 +110,8 @@ def run_next_startup_item(controller):
             controller._sync_all_widget_video_viewports()
         if hasattr(controller, "_bootstrap_all_desktop_icon_overlays"):
             controller._bootstrap_all_desktop_icon_overlays()
+        if hasattr(controller, "sync_set_z_order"):
+            controller.sync_set_z_order()
         controller.update_active_status(sync=True)
         controller.load_profiles()
         controller._refresh_apply_button_state()

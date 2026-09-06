@@ -1,7 +1,7 @@
 # Consolidated master set store and apply logic
 import os
 
-from PyQt6.QtCore import QSettings
+from PyQt6.QtCore import QSettings, Qt, QTimer
 from PyQt6.QtWidgets import QMessageBox
 
 from mywidgetbox_core import _as_bool
@@ -109,7 +109,7 @@ def clone_profile_settings(_controller, src_pid, dst_pid):
     dst.sync()
 
 
-def set_current_set_id(controller, set_id, persist=True):
+def set_current_set_id(controller, set_id, persist=True, refresh=True):
     sid = str(set_id)
     if sid not in controller._set_defs:
         sid = controller._set_order[0] if controller._set_order else ""
@@ -117,7 +117,8 @@ def set_current_set_id(controller, set_id, persist=True):
     if persist and sid:
         controller.master_settings.setValue("current_set_id", sid)
         _sync_master_settings(controller)
-    controller._refresh_set_ui()
+    if refresh:
+        controller._refresh_set_ui()
 
 
 def selected_set_id(controller):
@@ -515,16 +516,13 @@ def delete_set(controller, set_id, parent=None):
             }
         """)
         choice_box.setDefaultButton(absorb_btn)
-        from mywidgetbox_core import apply_windows_dark_title_bar, ask_dark_confirm
+        from mywidgetbox_core import apply_windows_dark_title_bar
         QTimer.singleShot(0, lambda: apply_windows_dark_title_bar(choice_box))
-        choice_box.show()
-        choice_box.raise_()
-        choice_box.activateWindow()
         choice_box.exec()
         clicked = choice_box.clickedButton()
-        if clicked is cancel_btn:
+        if clicked is None or clicked is cancel_btn:
             return False
-        delete_profiles = clicked is purge_btn
+        delete_profiles = (clicked is purge_btn)
     else:
         from mywidgetbox_core import ask_dark_confirm
         if not ask_dark_confirm(
@@ -577,27 +575,22 @@ def delete_set(controller, set_id, parent=None):
 
     if selected_sid == sid:
         fallback_sid = absorb_target_sid if absorb_target_sid in controller._set_defs else (controller._set_order[0] if controller._set_order else "")
-        controller._set_current_set_id(fallback_sid, persist=True)
+        controller._set_current_set_id(fallback_sid, persist=True, refresh=False)
 
     if was_applied:
         # Request 2: 세트 삭제 시 첫번째 세트를 무조건 적용하는 게 아니라 세트가 적용되지 않은 상태 유지
         if hasattr(controller, "stop_applied_set"):
-            controller.stop_applied_set()
+            controller.stop_applied_set(suppress_refresh=True)
         else:
             controller._cancel_startup_queue()
             controller._stop_all_widgets_bulk()
             controller._applied_set_id = ""
             controller.master_settings.setValue("applied_set_id", "")
             _sync_master_settings(controller, immediate=True)
-            controller._refresh_set_ui()
-            controller._sync_temp_group_badges()
-            controller.update_active_status()
-            controller.load_profiles(force_rebuild=True)
-    else:
-        controller._refresh_set_ui()
-        controller._sync_temp_group_badges()
-        controller.update_active_status()
-        controller.load_profiles(force_rebuild=True)
+
+    controller._sync_temp_group_badges()
+    controller.update_active_status()
+    controller.load_profiles(force_rebuild=True)
     return True
 
 
@@ -696,6 +689,8 @@ def sort_profiles_by_screen_pos(controller, set_id):
     controller.master_settings.setValue(controller._set_key(sid, "profiles"), sorted_profiles)
     _sync_master_settings(controller)
     controller.load_profiles(force_rebuild=True)
+    if hasattr(controller, "sync_set_z_order"):
+        controller.sync_set_z_order(sid)
     return True
 
 

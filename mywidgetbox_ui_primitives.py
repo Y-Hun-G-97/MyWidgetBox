@@ -1,5 +1,5 @@
-from PyQt6.QtCore import QCoreApplication, QEvent, QObject, QPoint, QRect, Qt, pyqtSignal, QThread
-from PyQt6.QtGui import QBrush, QColor, QPainter, QPen, QPolygon
+from PyQt6.QtCore import QCoreApplication, QEvent, QObject, QPoint, QRect, Qt, pyqtSignal, QThread, QMimeData
+from PyQt6.QtGui import QBrush, QColor, QPainter, QPen, QPolygon, QDrag, QPixmap
 from PyQt6.QtWidgets import (
     QAbstractScrollArea,
     QAbstractSpinBox,
@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
+    QPushButton,
     QSlider,
     QWidget,
 )
@@ -190,6 +191,7 @@ class TreeBranchLine(QWidget):
 class ProfileRowWidget(QFrame):
     clicked = pyqtSignal(str)
     doubleClicked = pyqtSignal(str)
+    reorderRequested = pyqtSignal(str, str, str, str)  # source_sid, source_pid, target_pid, drop_position
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -197,7 +199,11 @@ class ProfileRowWidget(QFrame):
         self._selected = False
         self._action_buttons = []
         self._pid = ""
+        self._sid = ""
+        self._drag_start_pos = None
+        self._drop_position = None
         self.setMouseTracking(True)
+        self.setAcceptDrops(True)
 
     def set_action_buttons(self, buttons):
         self._action_buttons = list(buttons)
@@ -235,6 +241,56 @@ class ProfileRowWidget(QFrame):
             style.polish(self)
         self.update()
 
+    def mousePressEvent(self, event):
+        super().mousePressEvent(event)
+        if event.button() == Qt.MouseButton.LeftButton:
+            pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+            action_wrap = getattr(self, "_action_wrap", None)
+            cb = getattr(self, "_checkbox", None)
+            if action_wrap and action_wrap.isVisible() and action_wrap.geometry().contains(pos):
+                self._drag_start_pos = None
+                return
+            if cb and cb.geometry().contains(pos):
+                self._drag_start_pos = None
+                return
+            self._drag_start_pos = pos
+
+    def mouseMoveEvent(self, event):
+        super().mouseMoveEvent(event)
+        if (
+            self._drag_start_pos is not None
+            and bool(event.buttons() & Qt.MouseButton.LeftButton)
+            and self._pid
+            and self._sid
+        ):
+            pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+            if (pos - self._drag_start_pos).manhattanLength() >= QApplication.startDragDistance():
+                self._start_row_drag()
+                self._drag_start_pos = None
+
+    def _start_row_drag(self):
+        drag = QDrag(self)
+        mime = QMimeData()
+        payload = f"{self._sid}:{self._pid}".encode("utf-8")
+        mime.setData("application/x-mywidgetbox-profile-reorder", payload)
+        drag.setMimeData(mime)
+
+        pixmap = self.grab()
+        if not pixmap.isNull():
+            preview = QPixmap(pixmap.size())
+            preview.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(preview)
+            painter.setOpacity(0.78)
+            painter.drawPixmap(0, 0, pixmap)
+            painter.end()
+            drag.setPixmap(preview)
+            if self._drag_start_pos:
+                drag.setHotSpot(self._drag_start_pos)
+            else:
+                drag.setHotSpot(QPoint(int(self.width() / 4), int(self.height() / 2)))
+
+        drag.exec(Qt.DropAction.MoveAction)
+
     def mouseDoubleClickEvent(self, event):
         super().mouseDoubleClickEvent(event)
         if event.button() == Qt.MouseButton.LeftButton:
@@ -245,6 +301,7 @@ class ProfileRowWidget(QFrame):
         super().mouseReleaseEvent(event)
         if event.button() == Qt.MouseButton.LeftButton:
             pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+            self._drag_start_pos = None
             action_wrap = getattr(self, "_action_wrap", None)
             cb = getattr(self, "_checkbox", None)
             if action_wrap and action_wrap.isVisible() and action_wrap.geometry().contains(pos):
@@ -255,6 +312,200 @@ class ProfileRowWidget(QFrame):
                 cb.setChecked(not cb.isChecked())
             if self._pid:
                 self.clicked.emit(self._pid)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasFormat("application/x-mywidgetbox-profile-reorder"):
+            data = bytes(event.mimeData().data("application/x-mywidgetbox-profile-reorder")).decode("utf-8")
+            parts = data.split(":")
+            if len(parts) == 2 and parts[0] == self._sid:
+                event.acceptProposedAction()
+                return
+        super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasFormat("application/x-mywidgetbox-profile-reorder"):
+            data = bytes(event.mimeData().data("application/x-mywidgetbox-profile-reorder")).decode("utf-8")
+            parts = data.split(":")
+            if len(parts) == 2 and parts[0] == self._sid:
+                source_pid = parts[1]
+                if source_pid == self._pid:
+                    if self._drop_position is not None:
+                        self._drop_position = None
+                        self.update()
+                    event.acceptProposedAction()
+                    return
+                pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+                new_pos = "above" if pos.y() < int(self.height() / 2) else "below"
+                if self._drop_position != new_pos:
+                    self._drop_position = new_pos
+                    self.update()
+                event.acceptProposedAction()
+                return
+        super().dragMoveEvent(event)
+
+    def dragLeaveEvent(self, event):
+        if self._drop_position is not None:
+            self._drop_position = None
+            self.update()
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event):
+        if event.mimeData().hasFormat("application/x-mywidgetbox-profile-reorder"):
+            data = bytes(event.mimeData().data("application/x-mywidgetbox-profile-reorder")).decode("utf-8")
+            parts = data.split(":")
+            if len(parts) == 2 and parts[0] == self._sid:
+                source_sid, source_pid = parts[0], parts[1]
+                drop_pos = self._drop_position
+                self._drop_position = None
+                self.update()
+                if source_pid != self._pid and drop_pos in ("above", "below"):
+                    event.acceptProposedAction()
+                    self.reorderRequested.emit(source_sid, source_pid, self._pid, drop_pos)
+                    return
+        super().dropEvent(event)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self._drop_position in ("above", "below"):
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            pen = QPen(QColor("#3b82f6"), 2)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(pen)
+            y = 1 if self._drop_position == "above" else (self.height() - 2)
+            painter.drawLine(6, y, self.width() - 6, y)
+            painter.setBrush(QBrush(QColor("#3b82f6")))
+            painter.drawEllipse(QPoint(6, y), 3, 3)
+            painter.end()
+
+
+class SetHeaderWidget(QFrame):
+    reorderRequested = pyqtSignal(str, str, str)  # source_sid, target_sid, drop_position ('above' | 'below')
+    doubleClicked = pyqtSignal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._sid = ""
+        self._drag_start_pos = None
+        self._drop_position = None
+        self.setMouseTracking(True)
+        self.setAcceptDrops(True)
+
+    def mousePressEvent(self, event):
+        super().mousePressEvent(event)
+        if event.button() == Qt.MouseButton.LeftButton:
+            pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+            child = self.childAt(pos)
+            if isinstance(child, QPushButton):
+                self._drag_start_pos = None
+                return
+            self._drag_start_pos = pos
+
+    def mouseMoveEvent(self, event):
+        super().mouseMoveEvent(event)
+        if (
+            self._drag_start_pos is not None
+            and bool(event.buttons() & Qt.MouseButton.LeftButton)
+            and self._sid
+        ):
+            pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+            if (pos - self._drag_start_pos).manhattanLength() >= QApplication.startDragDistance():
+                self._start_set_drag()
+                self._drag_start_pos = None
+
+    def _start_set_drag(self):
+        drag = QDrag(self)
+        mime = QMimeData()
+        payload = str(self._sid).encode("utf-8")
+        mime.setData("application/x-mywidgetbox-set-reorder", payload)
+        drag.setMimeData(mime)
+
+        pixmap = self.grab()
+        if not pixmap.isNull():
+            preview = QPixmap(pixmap.size())
+            preview.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(preview)
+            painter.setOpacity(0.78)
+            painter.drawPixmap(0, 0, pixmap)
+            painter.end()
+            drag.setPixmap(preview)
+            if self._drag_start_pos:
+                drag.setHotSpot(self._drag_start_pos)
+            else:
+                drag.setHotSpot(QPoint(int(self.width() / 4), int(self.height() / 2)))
+
+        drag.exec(Qt.DropAction.MoveAction)
+
+    def mouseDoubleClickEvent(self, event):
+        super().mouseDoubleClickEvent(event)
+        if event.button() == Qt.MouseButton.LeftButton:
+            pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+            child = self.childAt(pos)
+            if not isinstance(child, QPushButton) and self._sid:
+                self.doubleClicked.emit(self._sid)
+
+    def mouseReleaseEvent(self, event):
+        super().mouseReleaseEvent(event)
+        self._drag_start_pos = None
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasFormat("application/x-mywidgetbox-set-reorder"):
+            source_sid = bytes(event.mimeData().data("application/x-mywidgetbox-set-reorder")).decode("utf-8")
+            if source_sid != str(self._sid):
+                event.acceptProposedAction()
+                return
+        super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasFormat("application/x-mywidgetbox-set-reorder"):
+            source_sid = bytes(event.mimeData().data("application/x-mywidgetbox-set-reorder")).decode("utf-8")
+            if source_sid != str(self._sid):
+                pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+                new_pos = "above" if pos.y() < int(self.height() / 2) else "below"
+                if self._drop_position != new_pos:
+                    self._drop_position = new_pos
+                    self.update()
+                event.acceptProposedAction()
+                return
+            else:
+                if self._drop_position is not None:
+                    self._drop_position = None
+                    self.update()
+                event.acceptProposedAction()
+                return
+        super().dragMoveEvent(event)
+
+    def dragLeaveEvent(self, event):
+        if self._drop_position is not None:
+            self._drop_position = None
+            self.update()
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event):
+        if event.mimeData().hasFormat("application/x-mywidgetbox-set-reorder"):
+            source_sid = bytes(event.mimeData().data("application/x-mywidgetbox-set-reorder")).decode("utf-8")
+            drop_pos = self._drop_position
+            self._drop_position = None
+            self.update()
+            if source_sid and source_sid != str(self._sid) and drop_pos in ("above", "below"):
+                event.acceptProposedAction()
+                self.reorderRequested.emit(source_sid, str(self._sid), drop_pos)
+                return
+        super().dropEvent(event)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self._drop_position in ("above", "below"):
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            pen = QPen(QColor("#3b82f6"), 2)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(pen)
+            y = 1 if self._drop_position == "above" else (self.height() - 2)
+            painter.drawLine(6, y, self.width() - 6, y)
+            painter.setBrush(QBrush(QColor("#3b82f6")))
+            painter.drawEllipse(QPoint(6, y), 3, 3)
+            painter.end()
 
 
 class ProfileListWidget(QListWidget):

@@ -94,8 +94,15 @@ class SetManagerDialog(QDialog):
         row1.setSpacing(6)
         self.copy_btn = QPushButton("다른 세트 복사")
         self.copy_btn.setObjectName("copyBtn")
-        self.delete_btn = QPushButton("현재 세트 삭제")
+        self.copy_btn.setIcon(render_vector_icon("file", "#d7e4fb", 12))
+        self.copy_btn.setIconSize(QSize(12, 12))
+
+        self.delete_btn = QPushButton("세트삭제")
         self.delete_btn.setObjectName("deleteBtn")
+        self.delete_btn.setIcon(render_vector_icon("trash", "#ffe4e9", 12))
+        self.delete_btn.setIconSize(QSize(12, 12))
+        self.delete_btn.setToolTip("현재 세트를 삭제합니다")
+
         row1.addWidget(self.copy_btn)
         row1.addWidget(self.delete_btn)
         card_layout.addLayout(row1)
@@ -146,7 +153,12 @@ class SetManagerDialog(QDialog):
         name = str(data.get("name", f"세트{sid}" if sid else "세트"))
         count = len(data.get("profiles", []))
         self.info_label.setText(f"대상 세트: {name}  |  위젯 {count}개")
-        self.delete_btn.setEnabled(len(self.master._set_order) > 1)
+        has_multiple = (len(getattr(self.master, "_set_order", [])) > 1)
+        self.delete_btn.setEnabled(True)
+        if not has_multiple:
+            self.delete_btn.setToolTip("최소 1개의 세트는 유지되어야 합니다 (새 세트 추가 후 삭제 가능)")
+        else:
+            self.delete_btn.setToolTip(f"'{name}' 세트를 삭제합니다")
 
     def _copy_set(self):
         items = self.master.get_set_items()
@@ -173,6 +185,9 @@ class SetManagerDialog(QDialog):
     def _delete_set(self):
         sid = str(self.target_sid) if self.target_sid else str(self.master.selected_set_id() or "")
         if not sid:
+            return
+        if len(getattr(self.master, "_set_order", [])) <= 1:
+            QMessageBox.information(self, "세트 삭제", "최소 1개의 세트는 유지되어야 합니다.\n(새로운 세트를 먼저 추가하신 후 삭제를 진행해 주세요.)")
             return
         if self.master.delete_set(sid, parent=self):
             self.accept()
