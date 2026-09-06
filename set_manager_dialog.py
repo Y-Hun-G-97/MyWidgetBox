@@ -25,7 +25,7 @@ class SetManagerDialog(QDialog):
         self.setWindowTitle("세트 관리")
         from mywidgetbox_core import render_vector_icon
         self.setWindowIcon(render_vector_icon("widget", "#528bf8", 32))
-        self.setFixedSize(360, 198)
+        self.setFixedSize(380, 275)
         self.setStyleSheet("""
             QDialog#setManagerDialog { background-color: #162233; }
             QFrame#setCard {
@@ -53,6 +53,13 @@ class SetManagerDialog(QDialog):
                 border: 1px solid #4a6591;
             }
             QPushButton:hover { background-color: #35527d; }
+            QPushButton#actionBtn {
+                background-color: #233752;
+                border: 1px solid #3b567d;
+                text-align: left;
+                padding-left: 12px;
+            }
+            QPushButton#actionBtn:hover { background-color: #2f4769; }
             QPushButton#copyBtn {
                 background-color: #2b5664;
                 border: 1px solid #41798b;
@@ -92,6 +99,18 @@ class SetManagerDialog(QDialog):
         row1.addWidget(self.copy_btn)
         row1.addWidget(self.delete_btn)
         card_layout.addLayout(row1)
+
+        self.sort_pos_btn = QPushButton("📐  화면 위치순으로 위젯 순서 재정렬")
+        self.sort_pos_btn.setObjectName("actionBtn")
+        self.sort_pos_btn.setToolTip("위젯들을 화면의 실제 위치(좌상단 ➔ 우하단) 순서대로 목록 순서를 재정렬합니다.")
+        self.sort_pos_btn.clicked.connect(self._sort_profiles_by_screen_pos)
+        card_layout.addWidget(self.sort_pos_btn)
+
+        self.clear_cache_btn = QPushButton("🧹  이 세트의 영상 캐시 정리")
+        self.clear_cache_btn.setObjectName("actionBtn")
+        self.clear_cache_btn.setToolTip("이 세트에 포함된 영상 위젯들의 디코딩 프록시 캐시 파일을 정리합니다.")
+        self.clear_cache_btn.clicked.connect(self._clear_set_video_cache)
+        card_layout.addWidget(self.clear_cache_btn)
 
         row2 = QHBoxLayout()
         row2.setSpacing(6)
@@ -157,6 +176,53 @@ class SetManagerDialog(QDialog):
             return
         if self.master.delete_set(sid, parent=self):
             self.accept()
+
+    def _sort_profiles_by_screen_pos(self):
+        sid = str(self.target_sid) if self.target_sid else str(self.master.selected_set_id() or "")
+        if not sid:
+            return
+        data = self.master._set_defs.get(sid, {})
+        name = str(data.get("name", f"세트{sid}"))
+        changed = self.master.sort_profiles_by_screen_pos(sid)
+        if changed:
+            QMessageBox.information(
+                self,
+                "위젯 순서 재정렬",
+                f"'{name}' 세트의 위젯들을 화면 위치(좌상단 ➔ 우하단) 순서로 재정렬했습니다.",
+            )
+            self._refresh_info()
+        else:
+            QMessageBox.information(
+                self,
+                "위젯 순서 재정렬",
+                f"'{name}' 세트의 위젯들이 이미 화면 위치 순서대로 정렬되어 있습니다.",
+            )
+
+    def _clear_set_video_cache(self):
+        sid = str(self.target_sid) if self.target_sid else str(self.master.selected_set_id() or "")
+        if not sid:
+            return
+        data = self.master._set_defs.get(sid, {})
+        name = str(data.get("name", f"세트{sid}"))
+        removed_files, removed_bytes = self.master.clear_set_video_cache(sid)
+        if removed_files > 0:
+            def _fmt_size(b):
+                if b < 1024:
+                    return f"{b} B"
+                if b < 1024 * 1024:
+                    return f"{b / 1024:.1f} KB"
+                return f"{b / (1024 * 1024):.1f} MB"
+            QMessageBox.information(
+                self,
+                "영상 캐시 정리",
+                f"'{name}' 세트의 영상 캐시 {removed_files}개 ({_fmt_size(removed_bytes)})를 성공적으로 정리했습니다.",
+            )
+        else:
+            QMessageBox.information(
+                self,
+                "영상 캐시 정리",
+                f"'{name}' 세트에 정리할 영상 캐시 파일이 없습니다.",
+            )
 
 
 class RandomSetChooserDialog(QDialog):

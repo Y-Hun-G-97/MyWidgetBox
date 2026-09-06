@@ -657,3 +657,106 @@ def apply_set(controller, set_id):
     controller._refresh_set_ui()
     controller.load_profiles(force_rebuild=True)
     controller._begin_startup_queue(startup_entries, mode="set_switch")
+
+
+def sort_profiles_by_screen_pos(controller, set_id):
+    """
+    세트 내 위젯들의 순서를 화면에 보이는 위치(좌상단 -> 우하단) 순서로 재정렬.
+    세로(y) 좌표를 25px 단위로 구간화하여 같은 행의 위젯들은 왼쪽(x)부터 오른쪽 순으로 정렬.
+    """
+    sid = str(set_id)
+    if sid not in controller._set_defs:
+        return False
+    profiles = list(controller._set_defs[sid].get("profiles", []))
+    if len(profiles) <= 1:
+        return False
+
+    def get_pos(pid):
+        spid = str(pid)
+        w = controller.widgets.get(spid)
+        if w is not None and hasattr(w, "x") and hasattr(w, "y"):
+            return (w.y(), w.x())
+        from PyQt6.QtCore import QSettings
+        cfg = QSettings("MyHomeApp", f"Profile_{spid}")
+        try:
+            x = int(cfg.value("x", 100))
+            y = int(cfg.value("y", 100))
+        except Exception:
+            x, y = 100, 100
+        return (y, x)
+
+    sorted_profiles = sorted(
+        profiles,
+        key=lambda pid: (round(get_pos(pid)[0] / 25), get_pos(pid)[1], get_pos(pid)[0], str(pid))
+    )
+    if sorted_profiles == profiles:
+        return False
+
+    controller._set_defs[sid]["profiles"] = sorted_profiles
+    controller.master_settings.setValue(controller._set_key(sid, "profiles"), sorted_profiles)
+    _sync_master_settings(controller)
+    controller.load_profiles(force_rebuild=True)
+    return True
+
+
+def clear_set_video_cache(controller, set_id):
+    """
+    지정한 세트에 속한 위젯들의 영상 프록시 캐시 파일을 찾아 삭제하고 (삭제 파일수, 삭제 용량바이트)를 반환.
+    """
+    import os, hashlib
+    from PyQt6.QtCore import QSettings
+    sid = str(set_id)
+    if sid not in controller._set_defs:
+        return 0, 0
+    pids = list(controller._set_defs[sid].get("profiles", []))
+    if not pids:
+        return 0, 0
+
+    base = str(os.environ.get("LOCALAPPDATA", "") or "").strip()
+    if not base:
+        base = os.path.expanduser("~")
+    cache_dir = os.path.join(base, "MyHomeApp", "video_proxy_cache")
+    if not os.path.isdir(cache_dir):
+        return 0, 0
+
+    video_paths = set()
+    for pid in pids:
+        cfg = QSettings("MyHomeApp", f"Profile_{pid}")
+        img_path = str(cfg.value("image_path", "") or "").strip()
+        if img_path:
+            video_paths.add(img_path)
+        slide_items = cfg.value("slide_items", [])
+        if isinstance(slide_items, list):
+            for it in slide_items:
+                if isinstance(it, dict) and "path" in it:
+                    video_paths.add(str(it["path"]).strip())
+
+    tokens = set()
+    for vp in video_paths:
+        if not vp:
+            continue
+        try:
+            st = os.stat(vp)
+            sig = f"{os.path.abspath(vp)}|{int(st.st_size)}|{int(st.st_mtime_ns)}"
+        except Exception:
+            sig = os.path.abspath(vp)
+        for h in (360, 540, 720, 1080):
+            tok = hashlib.sha1(f"{sig}|{h}".encode("utf-8", "ignore")).hexdigest()[:24]
+            tokens.add(tok)
+
+    removed_files = 0
+    removed_bytes = 0
+    for root, _dirs, files in os.walk(cache_dir):
+        for fname in files:
+            matches = any(fname.startswith(tok) for tok in tokens)
+            if matches:
+                fp = os.path.join(root, fname)
+                try:
+                    sz = os.path.getsize(fp)
+                    os.remove(fp)
+                    removed_files += 1
+                    removed_bytes += sz
+                except Exception:
+                    pass
+
+    return removed_files, removed_bytes

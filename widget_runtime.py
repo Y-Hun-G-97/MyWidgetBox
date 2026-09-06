@@ -688,11 +688,11 @@ def mouse_press_event(widget, e):
         if bool(getattr(widget, "is_locked", False)):
             widget.cancel_active_interaction()
             return
-        # Ctrl + 좌클릭 시: 영역 드래그 다중 선택(Box Select) 시작
+        # Ctrl + 좌클릭 시: 영역 드래그 다중 선택(Box Select) 또는 단일 클릭 토글 시작
         if bool(e.modifiers() & Qt.KeyboardModifier.ControlModifier) or (hasattr(widget, "_is_ctrl_down") and widget._is_ctrl_down()):
             if hasattr(widget, "manager") and widget.manager and hasattr(widget.manager, "start_marquee_selection"):
                 widget.cancel_active_interaction()
-                widget.manager.start_marquee_selection(e.globalPosition().toPoint())
+                widget.manager.start_marquee_selection(e.globalPosition().toPoint(), source_widget=widget)
                 return
         widget._reset_axis_snap()
         local_pos = e.position().toPoint() if hasattr(e, "position") else widget.mapFromGlobal(e.globalPosition().toPoint())

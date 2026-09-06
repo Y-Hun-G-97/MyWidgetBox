@@ -324,8 +324,9 @@ class MarqueeSelectionOverlay(QWidget):
 
         self.start_pos = None
         self.current_pos = None
+        self.source_widget = None
 
-    def start_selection(self, global_start_pos):
+    def start_selection(self, global_start_pos, source_widget=None):
         screens = QApplication.screens()
         if not screens:
             return
@@ -336,6 +337,7 @@ class MarqueeSelectionOverlay(QWidget):
 
         self.start_pos = global_start_pos
         self.current_pos = global_start_pos
+        self.source_widget = source_widget
         self.show()
         self.raise_()
         self.activateWindow()
@@ -349,12 +351,14 @@ class MarqueeSelectionOverlay(QWidget):
     def mouseReleaseEvent(self, e):
         self.releaseMouse()
         self.hide()
+        src_w = self.source_widget
         if self.start_pos and self.current_pos:
             rect = QRect(self.start_pos, self.current_pos).normalized()
             if self.manager and hasattr(self.manager, "finish_marquee_selection"):
-                self.manager.finish_marquee_selection(rect)
+                self.manager.finish_marquee_selection(rect, source_widget=src_w)
         self.start_pos = None
         self.current_pos = None
+        self.source_widget = None
 
     def keyPressEvent(self, e):
         if e.key() == Qt.Key.Key_Escape:
@@ -362,6 +366,7 @@ class MarqueeSelectionOverlay(QWidget):
             self.hide()
             self.start_pos = None
             self.current_pos = None
+            self.source_widget = None
         super().keyPressEvent(e)
 
     def paintEvent(self, e):

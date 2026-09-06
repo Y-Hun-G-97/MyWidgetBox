@@ -12,18 +12,21 @@ from mywidgetbox_core import _as_bool
 
 
 def frozen_executable_path():
-    if not bool(getattr(sys, "frozen", False)):
-        return ""
-    try:
-        exe_path = str(getattr(sys, "executable", "") or "").strip()
-        if not exe_path:
-            return ""
-        exe_path = os.path.abspath(exe_path)
-    except Exception:
-        return ""
-    if not os.path.isfile(exe_path):
-        return ""
-    return exe_path
+    if bool(getattr(sys, "frozen", False)):
+        try:
+            exe_path = str(getattr(sys, "executable", "") or "").strip()
+            if exe_path and os.path.isfile(exe_path):
+                return os.path.abspath(exe_path)
+        except Exception:
+            pass
+    # In dev mode, resolve built executable if available so testing works seamlessly
+    for cand in [
+        os.path.join(os.path.dirname(__file__), "dist", "MyWidgetBox", "MyWidgetBox.exe"),
+        r"C:\Users\ggrol\OneDrive\바탕 화면\MyWidgetBox_v6.0\MyWidgetBox.exe",
+    ]:
+        if os.path.isfile(cand):
+            return os.path.abspath(cand)
+    return ""
 
 
 def windows_startup_folder_path():
@@ -308,15 +311,14 @@ def ensure_windows_startup_shortcut(controller, force=False):
         return False
     exe_path = frozen_executable_path()
     user_name = _current_windows_user()
-    if not exe_path:
+    if not exe_path or not os.path.isfile(exe_path):
         return False
     working_dir = os.path.dirname(exe_path)
     exe_name = os.path.splitext(os.path.basename(exe_path))[0] or "MyWidgetBox"
     task_name = _startup_task_name(controller, exe_path=exe_path)
     description = f"{exe_name} auto start"
-    icon_path = startup_shortcut_icon_path(exe_path)
 
-    # 1. 작업 스케줄러 (Scheduled Task) 등록 시도
+    # 작업 스케줄러 (Scheduled Task) 단일 등록 (로그온 시 자동 실행, UAC 팝업 방지)
     script = f"""
 $ErrorActionPreference = 'Stop'
 Import-Module ScheduledTasks -ErrorAction Stop
@@ -337,31 +339,9 @@ exit 0
 """
     result = _run_powershell(script)
     success = bool(result is not None and result.returncode == 0)
-    if success:
-        _remove_legacy_startup_shortcut(controller, exe_path=exe_path)
-        return True
-
-    # 2. 작업 스케줄러 등록 실패 시: 시작프로그램 폴더(.lnk) 생성 안전 fallback
-    lnk_path = startup_shortcut_path(controller, exe_path=exe_path)
-    if lnk_path:
-        lnk_script = f"""
-$ErrorActionPreference = 'Stop'
-$wsh = New-Object -ComObject WScript.Shell
-$sc = $wsh.CreateShortcut('{_ps_single_quote(lnk_path)}')
-$sc.TargetPath = '{_ps_single_quote(exe_path)}'
-$sc.WorkingDirectory = '{_ps_single_quote(working_dir)}'
-$sc.Description = '{_ps_single_quote(description)}'
-if (Test-Path '{_ps_single_quote(icon_path)}') {{
-    $sc.IconLocation = '{_ps_single_quote(icon_path)},0'
-}}
-$sc.Save()
-exit 0
-"""
-        lnk_result = _run_powershell(lnk_script)
-        if lnk_result is not None and lnk_result.returncode == 0 and os.path.isfile(lnk_path):
-            return True
-
-    return False
+    # 시작프로그램 폴더(.lnk) 중복 방지를 위해 항상 기존 바로가기 파일 삭제
+    _remove_legacy_startup_shortcut(controller, exe_path=exe_path)
+    return success
 
 
 def remove_windows_startup_shortcut(controller):
@@ -391,72 +371,29 @@ exit 0
 def sync_startup_shortcut_toggle(controller):
     if not hasattr(controller, "startup_shortcut_cb"):
         return
-    available = bool(getattr(sys, "frozen", False))
-    enabled_pref = bool(controller._startup_shortcut_enabled()) if available else False
+    exe_path = frozen_executable_path()
+    available = bool(exe_path and os.path.isfile(exe_path))
+    registered = _startup_task_registered(controller, exe_path=exe_path) if available else False
     prev = controller.startup_shortcut_cb.blockSignals(True)
     controller.startup_shortcut_cb.setEnabled(available)
-    controller.startup_shortcut_cb.setChecked(enabled_pref)
+    controller.startup_shortcut_cb.setChecked(registered)
     controller.startup_shortcut_cb.blockSignals(prev)
     if not hasattr(controller, "startup_shortcut_hint_lbl"):
         return
     if not available:
-        controller.startup_shortcut_hint_lbl.setText("개발 실행에서는 비활성화됩니다. exe에서만 동작합니다.")
+        controller.startup_shortcut_hint_lbl.setText("실행 파일(exe) 빌드 후 등록할 수 있습니다.")
         return
-    shortcut_path = controller._startup_shortcut_path(controller._frozen_executable_path())
-    registered = False
-    if shortcut_path:
-        try:
-            registered = os.path.isfile(shortcut_path)
-        except Exception:
-            registered = False
-    controller.startup_shortcut_hint_lbl.setText("현재 등록됨" if registered else "현재 미등록")
-
-
-def set_startup_shortcut_enabled(controller, enabled, persist=True):
-    enable_flag = bool(enabled)
-    if persist:
-        controller.master_settings.setValue(controller._startup_shortcut_pref_key(), enable_flag)
-        controller.master_settings.sync()
-    if enable_flag:
-        controller._ensure_windows_startup_shortcut(force=True)
-    else:
-        controller._remove_windows_startup_shortcut()
-    sync_startup_shortcut_toggle(controller)
-
-
-def on_startup_shortcut_toggled(controller, checked):
-    if not bool(getattr(sys, "frozen", False)):
-        sync_startup_shortcut_toggle(controller)
-        return
-    set_startup_shortcut_enabled(controller, bool(checked), persist=True)
-
-
-def sync_startup_shortcut_toggle(controller):
-    if not hasattr(controller, "startup_shortcut_cb"):
-        return
-    available = bool(getattr(sys, "frozen", False))
-    enabled_pref = bool(controller._startup_shortcut_enabled()) if available else False
-    prev = controller.startup_shortcut_cb.blockSignals(True)
-    controller.startup_shortcut_cb.setEnabled(available)
-    controller.startup_shortcut_cb.setChecked(enabled_pref)
-    controller.startup_shortcut_cb.blockSignals(prev)
-    if not hasattr(controller, "startup_shortcut_hint_lbl"):
-        return
-    if not available:
-        controller.startup_shortcut_hint_lbl.setText("개발 실행에서는 비활성화됩니다. exe에서만 동작합니다.")
-        return
-    registered = _startup_task_registered(controller, exe_path=controller._frozen_executable_path())
     controller.startup_shortcut_hint_lbl.setText(
-        "현재 작업 스케줄러 등록됨" if registered else "현재 미등록"
+        "Windows 작업 스케줄러 등록됨 (부팅 시 자동 실행)" if registered else "미등록 (체크 시 Windows 부팅 시 자동 실행)"
     )
 
 
 def set_startup_shortcut_enabled(controller, enabled, persist=True):
     enable_flag = bool(enabled)
     if enable_flag:
-        enabled_state = bool(controller._ensure_windows_startup_shortcut(force=True))
+        enabled_state = bool(ensure_windows_startup_shortcut(controller, force=True))
     else:
-        controller._remove_windows_startup_shortcut()
+        remove_windows_startup_shortcut(controller)
         enabled_state = False
     if persist:
         controller.master_settings.setValue(controller._startup_shortcut_pref_key(), bool(enabled_state))
@@ -465,9 +402,6 @@ def set_startup_shortcut_enabled(controller, enabled, persist=True):
 
 
 def on_startup_shortcut_toggled(controller, checked):
-    if not bool(getattr(sys, "frozen", False)):
-        sync_startup_shortcut_toggle(controller)
-        return
     set_startup_shortcut_enabled(controller, bool(checked), persist=True)
 
 

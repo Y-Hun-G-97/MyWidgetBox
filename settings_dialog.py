@@ -972,7 +972,7 @@ class FolderSpreadDialog(QDialog):
         grid_layout.addWidget(QLabel("비율/맞춤:"), 4, 0)
         self.fit_combo = DownwardComboBox()
         self.fit_combo.addItems([
-            "🧩 빈칸 자동 채우기 (자유 비율, 권장)",
+            "🧱 핀터레스트형 테트리스 배치 (원본비율 보존, 권장)",
             "📏 가로 줄 맞춤 (단정한 앨범형)",
             "📐 세로 줄 맞춤 (세로 짤 돋보임)",
             "🔲 균일 바둑판 (꽉 채움)",
@@ -981,7 +981,7 @@ class FolderSpreadDialog(QDialog):
         self.fit_combo.setCurrentIndex(0)
         grid_layout.addWidget(self.fit_combo, 4, 1, 1, 3)
 
-        self.auto_calc_hint_lbl = QLabel("✨ 빈칸 자동 채우기: 각 짤의 원래 비율을 살리며, 남는 빈자리에 다음 짤을 쏙쏙 넣어 자연스럽게 채웁니다.")
+        self.auto_calc_hint_lbl = QLabel("✨ 핀터레스트형 테트리스 배치: 각 짤의 원본 비율을 보존하며, 남는 빈자리에 다음 짤을 쏙쏙 넣어 빈틈없이 채웁니다.")
         self.auto_calc_hint_lbl.setWordWrap(True)
         self.auto_calc_hint_lbl.setStyleSheet("""
             color: #7eb0ff;
@@ -1018,7 +1018,7 @@ class FolderSpreadDialog(QDialog):
                 _set_folder_input_active(self.rows_wrap, self.rows_input, self.lbl_rows, True)
 
             hints = {
-                0: "✨ 빈칸 자동 채우기: 각 짤의 원래 비율을 살리며, 남는 빈자리에 다음 짤을 쏙쏙 넣어 자연스럽게 채웁니다.",
+                0: "✨ 핀터레스트형 테트리스 배치: 각 짤의 원본 비율을 보존하며, 남는 빈자리에 다음 짤을 쏙쏙 넣어 빈틈없이 채웁니다.",
                 1: "✨ 가로 줄 맞춤: 가로 줄마다 높이를 똑같이 맞춰 잡지나 앨범처럼 반듯한 수평선으로 화면을 꽉 채웁니다.",
                 2: "✨ 세로 줄 맞춤: 세로 줄마다 너비를 똑같이 맞춰 세로로 긴 짤들이 큼직하고 시원하게 돋보이도록 화면을 꽉 채웁니다.",
                 3: "✨ 균일 바둑판 (꽉 채움): 모든 위젯을 동일한 사각형 타일로 통일하고 빈틈없이 채웁니다.",
@@ -1049,17 +1049,6 @@ class FolderSpreadDialog(QDialog):
                 font-size: 11px;
                 font-weight: 600;
                 spacing: 6px;
-            }
-            QCheckBox::indicator {
-                width: 16px;
-                height: 16px;
-                border-radius: 4px;
-                border: 1px solid #48648c;
-                background-color: #121c2b;
-            }
-            QCheckBox::indicator:checked {
-                background-color: #4872d4;
-                border-color: #7397ea;
             }
         """)
         self.smart_weight_cb.setToolTip("짤의 원본 해상도를 분석하여 큰 일러스트는 시원하게 확대하고, 작은 SD/치비/이모티콘은 아기자기하게 묶어 크기 불균형을 자동 조절합니다.")
@@ -2211,7 +2200,7 @@ QDialog#settingsDialog {
             bso_layout.addWidget(QLabel("배치 맞춤:"), 0, 0)
             self.bulk_spread_fit_combo = DownwardComboBox()
             self.bulk_spread_fit_combo.addItems([
-                "🧩 빈칸 자동 채우기 (자유 비율, 권장)",
+                "🧱 핀터레스트형 테트리스 배치 (원본비율 보존, 권장)",
                 "📏 가로 줄 맞춤 (단정한 앨범형)",
                 "📐 세로 줄 맞춤 (세로 짤 돋보임)",
                 "🔲 균일 바둑판 (꽉 채움)",
@@ -2219,7 +2208,7 @@ QDialog#settingsDialog {
             ])
             self.bulk_spread_fit_combo.setCurrentIndex(0)
             bso_layout.addWidget(self.bulk_spread_fit_combo, 0, 1, 1, 3)
-            self.bulk_spread_auto_hint = QLabel("✨ 빈칸 자동 채우기: 각 짤의 원래 비율을 살리며, 남는 빈자리에 다음 짤을 쏙쏙 넣어 자연스럽게 채웁니다.")
+            self.bulk_spread_auto_hint = QLabel("✨ 핀터레스트형 테트리스 배치: 각 짤의 원본 비율을 보존하며, 남는 빈자리에 다음 짤을 쏙쏙 넣어 빈틈없이 채웁니다.")
             self.bulk_spread_auto_hint.setWordWrap(True)
             self.bulk_spread_auto_hint.setStyleSheet("""
                 color: #7eb0ff;
@@ -2300,17 +2289,6 @@ QDialog#settingsDialog {
                     font-size: 11px;
                     font-weight: 600;
                     spacing: 6px;
-                }
-                QCheckBox::indicator {
-                    width: 16px;
-                    height: 16px;
-                    border-radius: 4px;
-                    border: 1px solid #48648c;
-                    background-color: #121c2b;
-                }
-                QCheckBox::indicator:checked {
-                    background-color: #4872d4;
-                    border-color: #7397ea;
                 }
             """)
             self.bulk_spread_smart_weight_cb.setToolTip("짤의 원본 해상도를 분석하여 큰 일러스트는 시원하게 확대하고, 작은 SD/치비는 아기자기하게 묶어 크기 불균형을 자동 조절합니다.")
@@ -2396,7 +2374,7 @@ QDialog#settingsDialog {
                     _set_input_active_state(self.bulk_spread_rows_box, self.bulk_spread_rows_spin, self.bulk_spread_lbl_rows, True)
 
                 hints = {
-                    0: "✨ 빈칸 자동 채우기: 각 짤의 원래 비율을 살리며, 남는 빈자리에 다음 짤을 쏙쏙 넣어 자연스럽게 채웁니다.",
+                    0: "✨ 핀터레스트형 테트리스 배치: 각 짤의 원본 비율을 보존하며, 남는 빈자리에 다음 짤을 쏙쏙 넣어 빈틈없이 채웁니다.",
                     1: "✨ 가로 줄 맞춤: 가로 줄마다 높이를 똑같이 맞춰 잡지나 앨범처럼 반듯한 수평선으로 화면을 꽉 채웁니다.",
                     2: "✨ 세로 줄 맞춤: 세로 줄마다 너비를 똑같이 맞춰 세로로 긴 짤들이 큼직하고 시원하게 돋보이도록 화면을 꽉 채웁니다.",
                     3: "✨ 균일 바둑판 (꽉 채움): 모든 위젯을 동일한 정사각형/직사각형 타일로 통일하고 빈틈없이 꽉 채웁니다.",
@@ -2591,18 +2569,6 @@ QDialog#settingsDialog {
         )
         self.video_decode_hint.setObjectName("hintCaption")
         self.video_decode_hint.setWordWrap(True)
-        self.video_cache_usage_label = QLabel("캐시 사용량: 계산 중...")
-        self.video_cache_usage_label.setObjectName("pathLabel")
-        self.video_cache_usage_label.setWordWrap(True)
-        self.video_cache_usage_label.setToolTip("영상 프록시 캐시 폴더")
-        self.video_cache_clear_btn = QPushButton("영상 캐시 정리")
-        self.video_cache_clear_btn.setMinimumHeight(30)
-        self.video_cache_action_row_widget = QWidget()
-        video_cache_action_row = QHBoxLayout(self.video_cache_action_row_widget)
-        video_cache_action_row.setContentsMargins(0, 0, 0, 0)
-        video_cache_action_row.setSpacing(6)
-        video_cache_action_row.addWidget(self.video_cache_clear_btn)
-        video_cache_action_row.addStretch(1)
         self.video_dual_fade_ms_spin = QSpinBox()
         self.video_dual_fade_ms_spin.setRange(0, 300)
         self.video_dual_fade_ms_spin.setSingleStep(10)
@@ -2756,10 +2722,6 @@ QDialog#settingsDialog {
 
         _add_section_header(system_form, "오디오")
         system_form.addRow("음소거:", self.mute_checkbox)
-
-        _add_section_header(system_form, "저장 공간 관리")
-        system_form.addRow("영상 캐시:", self.video_cache_usage_label)
-        system_form.addRow("", self.video_cache_action_row_widget)
         
         btns = QHBoxLayout(); apply = QPushButton("저장"); cancel = QPushButton("취소")
         btns.setSpacing(10)
@@ -2788,7 +2750,6 @@ QDialog#settingsDialog {
         self.focus_bind_btn.clicked.connect(self._start_focus_capture)
         self.focus_bind_clear_btn.clicked.connect(self._clear_focus_binding)
         self.video_transition_combo.currentIndexChanged.connect(self._sync_video_transition_dependent_ui)
-        self.video_cache_clear_btn.clicked.connect(self._clear_video_proxy_cache)
         self.master_btn.clicked.connect(self.open_master)
         apply.clicked.connect(self.accept); cancel.clicked.connect(self.reject)
 
@@ -2807,7 +2768,6 @@ QDialog#settingsDialog {
         self._sync_edit_slide_btn_state()
         QTimer.singleShot(0, self._apply_title_bar_theme)
         QTimer.singleShot(0, self._sync_video_transition_dependent_ui)
-        QTimer.singleShot(0, self._refresh_video_proxy_cache_usage)
         QTimer.singleShot(0, self._sync_dialog_height)
 
     def _sync_edit_slide_btn_state(self):
@@ -2959,21 +2919,6 @@ QDialog#settingsDialog {
                 base = os.path.expanduser("~")
             return os.path.join(base, "MyHomeApp", "video_proxy_cache")
 
-    def _video_proxy_cache_usage(self):
-        cache_dir = self._video_proxy_cache_dir()
-        total = 0
-        count = 0
-        if os.path.isdir(cache_dir):
-            for root, _dirs, files in os.walk(cache_dir):
-                for name in files:
-                    fp = os.path.join(root, name)
-                    try:
-                        total += int(os.path.getsize(fp))
-                        count += 1
-                    except Exception:
-                        pass
-        return cache_dir, int(total), int(count)
-
     @staticmethod
     def _themed_message_box_style():
         return """
@@ -3012,62 +2957,6 @@ QDialog#settingsDialog {
         except Exception:
             pass
         return box.exec()
-
-    def _refresh_video_proxy_cache_usage(self):
-        cache_dir, total, count = self._video_proxy_cache_usage()
-        self.video_cache_usage_label.setText(
-            f"{self._format_size_bytes(total)} ({int(count)}개 파일)"
-        )
-        self.video_cache_usage_label.setToolTip(cache_dir)
-        self.video_cache_clear_btn.setEnabled(int(count) > 0)
-
-    def _clear_video_proxy_cache(self):
-        cache_dir, total, count = self._video_proxy_cache_usage()
-        if int(count) <= 0:
-            self._refresh_video_proxy_cache_usage()
-            return
-        confirm = self._show_themed_message_box(
-            QMessageBox.Icon.Question,
-            "영상 캐시 정리",
-            f"영상 캐시 {self._format_size_bytes(total)} ({int(count)}개 파일)를 삭제할까요?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if int(confirm) != int(QMessageBox.StandardButton.Yes):
-            return
-        removed = 0
-        failed = 0
-        if os.path.isdir(cache_dir):
-            for root, dirs, files in os.walk(cache_dir, topdown=False):
-                for name in files:
-                    fp = os.path.join(root, name)
-                    try:
-                        os.remove(fp)
-                        removed += 1
-                    except Exception:
-                        failed += 1
-                for name in dirs:
-                    dp = os.path.join(root, name)
-                    try:
-                        os.rmdir(dp)
-                    except Exception:
-                        pass
-        self._refresh_video_proxy_cache_usage()
-        if failed > 0:
-            self._show_themed_message_box(
-                QMessageBox.Icon.Warning,
-                "영상 캐시 정리",
-                f"{int(removed)}개 파일 삭제됨, {int(failed)}개 파일은 삭제하지 못했습니다.\n"
-                "재생 중인 파일은 잠시 후 다시 시도해 주세요.",
-                QMessageBox.StandardButton.Ok,
-            )
-        else:
-            self._show_themed_message_box(
-                QMessageBox.Icon.Information,
-                "영상 캐시 정리",
-                f"{int(removed)}개 파일을 삭제했습니다.",
-                QMessageBox.StandardButton.Ok,
-            )
 
     def _place_shortcut_panel(self):
         self.shortcut_panel.adjustSize()
